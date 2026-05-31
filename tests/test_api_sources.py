@@ -10,7 +10,7 @@ from app.sources.personal_1337x import Personal1337xSearchResult
 class FakeProvider:
     uploader = "mekamb"
 
-    async def search(self, q: str, *, page: int = 1, sort_by: str | None = None):
+    async def search(self, q: str, *, page: int = 1, sort_by: str | None = None, redis=None):
         assert q == "ambient"
         assert page == 1
         assert sort_by == "seeders"
@@ -42,4 +42,3 @@ def test_search_endpoint_returns_filtered_provider_results():
     payload = response.json()
     assert payload["filtered_by_uploader"] == "mekamb"
     assert [item["torrent_id"] for item in payload["items"]] == ["1"]
-

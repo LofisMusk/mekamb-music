@@ -1,7 +1,10 @@
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Response, status
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import downloads, imports, library, playlists, sources, tracks
 from app.api.schemas import HealthResponse, ReadinessResponse
@@ -31,6 +34,10 @@ async def lifespan(app: FastAPI):
         pass
 
 
+WEB_ROOT = Path(__file__).parent / "web"
+STATIC_ROOT = WEB_ROOT / "static"
+
+
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.include_router(sources.router, prefix="/sources", tags=["sources"])
 app.include_router(imports.router, prefix="/imports", tags=["imports"])
@@ -38,6 +45,17 @@ app.include_router(downloads.router, prefix="/downloads", tags=["downloads"])
 app.include_router(tracks.router, prefix="/tracks", tags=["tracks"])
 app.include_router(playlists.router, prefix="/playlists", tags=["playlists"])
 app.include_router(library.router, prefix="/library", tags=["library"])
+app.mount("/static", StaticFiles(directory=STATIC_ROOT), name="static")
+
+
+@app.get("/", include_in_schema=False)
+async def frontend() -> FileResponse:
+    return FileResponse(WEB_ROOT / "index.html")
+
+
+@app.head("/", include_in_schema=False)
+async def frontend_head() -> Response:
+    return Response(status_code=status.HTTP_200_OK)
 
 
 @app.get("/health", response_model=HealthResponse)

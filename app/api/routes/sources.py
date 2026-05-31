@@ -1,11 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from redis.asyncio import Redis
 
-from app.api.deps import personal_1337x_provider, require_token
-from app.api.schemas import Source1337xSearchResponse
+from app.api.deps import personal_1337x_provider, piratebay_provider, require_token
+from app.api.schemas import Source1337xSearchResponse, SourcePirateBaySearchResponse
 from app.imports.queue import RedisImportQueue
 from app.core.config import settings
-from app.sources.personal_1337x import Personal1337xProvider, ProviderDisabledError
+from app.sources.personal_1337x import (
+    Personal1337xProvider,
+    ProviderDisabledError,
+    SourceBlockedError,
+)
+from app.sources.piratebay import PirateBayProvider, PirateBaySourceError
 
 router = APIRouter(dependencies=[Depends(require_token)])
 
@@ -27,8 +32,26 @@ async def search_personal_1337x(
         results = await provider.search(q, page=page, sort_by=sort_by, redis=redis)
     except ProviderDisabledError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except SourceBlockedError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     return Source1337xSearchResponse(
         items=[item.to_dict() for item in results],
         filtered_by_uploader=provider.uploader,
+    )
+
+
+@router.get("/piratebay/search", response_model=SourcePirateBaySearchResponse)
+async def search_piratebay_pmedia(
+    q: str = Query(min_length=1, max_length=120),
+    provider: PirateBayProvider = Depends(piratebay_provider),
+) -> SourcePirateBaySearchResponse:
+    try:
+        results = await provider.search(q)
+    except PirateBaySourceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    return SourcePirateBaySearchResponse(
+        items=[item.to_dict() for item in results],
+        title_marker=provider.title_marker,
     )

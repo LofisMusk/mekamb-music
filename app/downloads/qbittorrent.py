@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import httpx
 
@@ -20,12 +21,14 @@ class QBittorrentDownloader:
         rpc_url: str,
         username: str,
         password: str,
+        listen_port: int = 6881,
         timeout_seconds: float = 20.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.rpc_url = rpc_url.rstrip("/")
         self.username = username
         self.password = password
+        self.listen_port = listen_port
         self.timeout_seconds = timeout_seconds
         self.transport = transport
 
@@ -35,11 +38,13 @@ class QBittorrentDownloader:
             rpc_url=getattr(settings, "torrent_rpc_url"),
             username=getattr(settings, "torrent_rpc_username"),
             password=getattr(settings, "torrent_rpc_password"),
+            listen_port=getattr(settings, "torrent_listen_port", 6881),
         )
 
     async def enqueue(self, *, magnet_link: str, download_path: Path, label: str) -> None:
         async with self._client() as client:
             await self._login(client)
+            await self._configure_preferences(client)
             response = await client.post(
                 f"{self.rpc_url}/api/v2/torrents/add",
                 data={
@@ -55,6 +60,7 @@ class QBittorrentDownloader:
     async def status_by_label(self, label: str) -> TorrentRuntimeStatus | None:
         async with self._client() as client:
             await self._login(client)
+            await self._configure_preferences(client)
             response = await client.get(
                 f"{self.rpc_url}/api/v2/torrents/info",
                 params={"tag": label},
@@ -102,6 +108,7 @@ class QBittorrentDownloader:
     async def check(self) -> None:
         async with self._client() as client:
             await self._login(client)
+            await self._configure_preferences(client)
             response = await client.get(f"{self.rpc_url}/api/v2/app/version")
             response.raise_for_status()
             if not response.text.strip():
@@ -116,8 +123,28 @@ class QBittorrentDownloader:
             data={"username": self.username, "password": self.password},
         )
         login.raise_for_status()
+        if login.status_code == 204:
+            return
         if login.text.strip() != "Ok.":
             raise QBittorrentAuthError("qBittorrent rejected the configured username or password.")
+
+    async def _configure_preferences(self, client: httpx.AsyncClient) -> None:
+        response = await client.post(
+            f"{self.rpc_url}/api/v2/app/setPreferences",
+            data={
+                "json": json.dumps(
+                    {
+                        "listen_port": self.listen_port,
+                        "dht": True,
+                        "pex": True,
+                        "lsd": True,
+                        "upnp": True,
+                        "random_port": False,
+                    }
+                )
+            },
+        )
+        response.raise_for_status()
 
 
 async def check_qbittorrent(settings: object) -> None:

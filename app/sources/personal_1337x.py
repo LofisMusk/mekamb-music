@@ -6,6 +6,9 @@ import logging
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,10 @@ class OwnershipMismatch(RuntimeError):
 
 
 class MissingTorrentMetadata(RuntimeError):
+    pass
+
+
+class SourceBlockedError(RuntimeError):
     pass
 
 
@@ -188,6 +195,9 @@ class Personal1337xProvider:
                 )
             )
 
+        if not filtered and not getattr(result, "items", []):
+            await asyncio.to_thread(self._raise_if_search_is_blocked, query)
+
         if redis is not None and filtered:
             try:
                 await redis.setex(cache_key, self._search_cache_ttl, _serialize_results(filtered))
@@ -237,6 +247,35 @@ class Personal1337xProvider:
     def _is_owned_by_configured_uploader(self, item: object) -> bool:
         return _get_attr(item, "uploader") == self.uploader
 
+    def _raise_if_search_is_blocked(self, query: str) -> None:
+        url = f"{self.base_url}/search/{quote(query)}/1/"
+        request = Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+                )
+            },
+        )
+        try:
+            with urlopen(request, timeout=12) as response:
+                body = response.read(4096).decode("utf-8", errors="replace")
+        except HTTPError as exc:
+            body = exc.read(4096).decode("utf-8", errors="replace")
+            if exc.code in {403, 429} and _looks_like_cloudflare_challenge(body):
+                raise SourceBlockedError(
+                    f"{self.base_url} is returning a Cloudflare challenge to the backend."
+                ) from exc
+            return
+        except URLError:
+            return
+
+        if _looks_like_cloudflare_challenge(body):
+            raise SourceBlockedError(
+                f"{self.base_url} is returning a Cloudflare challenge to the backend."
+            )
+
     def _source_url(self, info: object, torrent_id: str) -> str:
         for attr in ("url", "link", "source_url"):
             value = _get_attr(info, attr)
@@ -257,3 +296,8 @@ def _deserialize_results(raw: str) -> list[Personal1337xSearchResult]:
         )
         for item in items
     ]
+
+
+def _looks_like_cloudflare_challenge(body: str) -> bool:
+    lowered = body.lower()
+    return "just a moment" in lowered and "cloudflare" in lowered

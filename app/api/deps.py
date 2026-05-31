@@ -15,6 +15,7 @@ from app.imports.service import ImportEventPublisher, ImportService
 from app.playlists.repository import SqlAlchemyPlaylistRepository
 from app.playlists.service import PlaylistService
 from app.sources.personal_1337x import Personal1337xProvider
+from app.sources.piratebay import PirateBayProvider
 
 
 async def require_token(authorization: str | None = Header(default=None)) -> None:
@@ -33,6 +34,10 @@ async def db_session() -> AsyncIterator[AsyncSession]:
 
 def personal_1337x_provider() -> Personal1337xProvider:
     return Personal1337xProvider.from_settings(settings)
+
+
+def piratebay_provider() -> PirateBayProvider:
+    return PirateBayProvider.from_settings(settings)
 
 
 def torrent_downloader() -> QBittorrentDownloader:

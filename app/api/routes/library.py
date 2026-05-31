@@ -14,6 +14,10 @@ router = APIRouter(dependencies=[Depends(require_token)])
 async def get_library_summary(
     session: AsyncSession = Depends(db_session),
 ) -> LibrarySummaryResponse:
+    artist_name = func.coalesce(Track.artist, "Unknown Artist")
+    album_title = func.coalesce(Track.album, "Unknown Album")
+    album_artist = func.coalesce(Track.artist, "Unknown Artist")
+
     track_count, size_bytes, duration_seconds, latest_track_at = (
         await session.execute(
             select(
@@ -29,19 +33,11 @@ async def get_library_summary(
         track_count=int(track_count or 0),
         artist_count=await _count_grouped(
             session,
-            select(func.coalesce(Track.artist, "Unknown Artist")).group_by(
-                func.coalesce(Track.artist, "Unknown Artist")
-            ),
+            select(artist_name).group_by(artist_name),
         ),
         album_count=await _count_grouped(
             session,
-            select(
-                func.coalesce(Track.album, "Unknown Album"),
-                func.coalesce(Track.artist, "Unknown Artist"),
-            ).group_by(
-                func.coalesce(Track.album, "Unknown Album"),
-                func.coalesce(Track.artist, "Unknown Artist"),
-            ),
+            select(album_title, album_artist).group_by(album_title, album_artist),
         ),
         playlist_count=await _count_rows(session, Playlist.id),
         liked_track_count=await _count_rows(session, LikedTrack.id),

@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 from app.imports.domain import ImportRecord, ImportRepository, ImportStatus
 from app.sources.personal_1337x import Personal1337xImportCandidate
+from app.sources.piratebay import PirateBayImportCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,17 @@ class ImportService:
         )
 
     async def create_1337x_import(self, candidate: Personal1337xImportCandidate) -> ImportRecord:
+        return await self._create_torrent_import(candidate, source="personal_1337x")
+
+    async def create_piratebay_import(self, candidate: PirateBayImportCandidate) -> ImportRecord:
+        return await self._create_torrent_import(candidate, source="piratebay_pmedia")
+
+    async def _create_torrent_import(
+        self,
+        candidate: Personal1337xImportCandidate | PirateBayImportCandidate,
+        *,
+        source: str,
+    ) -> ImportRecord:
         self._validate_candidate(candidate)
 
         existing = await self.repository.get_by_info_hash(candidate.info_hash)
@@ -126,7 +138,7 @@ class ImportService:
         now = datetime.now(UTC)
         record = ImportRecord(
             id=import_id,
-            source="personal_1337x",
+            source=source,
             torrent_id=candidate.torrent_id,
             info_hash=candidate.info_hash,
             magnet_link=candidate.magnet_link,

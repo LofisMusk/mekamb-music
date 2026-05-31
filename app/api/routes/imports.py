@@ -1,10 +1,18 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from httpx import HTTPError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import db_session, import_service, personal_1337x_provider, require_token
+from app.api.deps import (
+    db_session,
+    import_service,
+    personal_1337x_provider,
+    piratebay_provider,
+    require_token,
+)
 from app.api.schemas import ImportListResponse, ImportRecordResponse, TrackListResponse
+from app.downloads.qbittorrent import QBittorrentError
 from app.imports.domain import ImportNotFound
 from app.imports.service import (
     ImportNotRetryable,
@@ -18,6 +26,12 @@ from app.sources.personal_1337x import (
     OwnershipMismatch,
     Personal1337xProvider,
     ProviderDisabledError,
+)
+from app.sources.piratebay import (
+    PirateBayMarkerMismatch,
+    PirateBayMissingMetadata,
+    PirateBayProvider,
+    PirateBaySourceError,
 )
 
 router = APIRouter(dependencies=[Depends(require_token)])
@@ -61,6 +75,39 @@ async def import_personal_1337x(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except (MissingTorrentMetadata, InvalidImportCandidate, SandboxViolation) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (HTTPError, QBittorrentError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not enqueue torrent in qBittorrent: {exc}",
+        ) from exc
+
+    return ImportRecordResponse(**record.to_dict())
+
+
+@router.post(
+    "/piratebay/{torrent_id}",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=ImportRecordResponse,
+)
+async def import_piratebay_pmedia(
+    torrent_id: str,
+    provider: PirateBayProvider = Depends(piratebay_provider),
+    service: ImportService = Depends(import_service),
+) -> ImportRecordResponse:
+    try:
+        candidate = await provider.resolve_for_import(torrent_id)
+        record = await service.create_piratebay_import(candidate)
+    except PirateBayMarkerMismatch as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except (PirateBayMissingMetadata, InvalidImportCandidate, SandboxViolation) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except PirateBaySourceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except (HTTPError, QBittorrentError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not enqueue torrent in qBittorrent: {exc}",
+        ) from exc
 
     return ImportRecordResponse(**record.to_dict())
 

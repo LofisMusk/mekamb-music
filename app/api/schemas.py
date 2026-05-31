@@ -58,6 +58,28 @@ class Source1337xSearchResponse(BaseModel):
     filtered_by_uploader: str
 
 
+class SourcePirateBayItem(BaseModel):
+    name: str
+    torrent_id: str
+    info_hash: str
+    magnet_link: str
+    url: str
+    seeders: str
+    leechers: str
+    size_bytes: int
+    num_files: int
+    uploader: str
+    category: str
+    status: str
+    added_at: datetime | None
+    discovered_at: datetime
+
+
+class SourcePirateBaySearchResponse(BaseModel):
+    items: list[SourcePirateBayItem]
+    title_marker: str
+
+
 class ImportRecordResponse(BaseModel):
     id: UUID
     source: str

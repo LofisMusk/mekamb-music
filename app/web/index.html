@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mekamb Music</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <p class="eyebrow">Mekamb Music</p>
+          <h1>Biblioteka</h1>
+        </div>
+        <form id="tokenForm" class="token-form">
+          <label for="tokenInput">API token</label>
+          <div class="token-row">
+            <input id="tokenInput" name="token" type="password" autocomplete="off" placeholder="Bearer token" />
+            <button type="submit">Zapisz</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="status-strip" aria-live="polite">
+        <div>
+          <span class="label">Status</span>
+          <strong id="healthStatus">...</strong>
+        </div>
+        <div>
+          <span class="label">Utwory</span>
+          <strong id="trackCount">0</strong>
+        </div>
+        <div>
+          <span class="label">Artyści</span>
+          <strong id="artistCount">0</strong>
+        </div>
+        <div>
+          <span class="label">Importy aktywne</span>
+          <strong id="activeImports">0</strong>
+        </div>
+      </section>
+
+      <section class="panel player-panel">
+        <div>
+          <span class="label">Teraz odtwarzane</span>
+          <h2 id="nowTitle">Wybierz utwór</h2>
+          <p id="nowMeta">Odtwarzacz załaduje plik przez API z tokenem.</p>
+        </div>
+        <audio id="audio" controls preload="none"></audio>
+      </section>
+
+      <section class="grid">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Utwory</h2>
+            <div class="tabs" role="tablist" aria-label="Widok utworów">
+              <button class="tab active" type="button" data-view="tracks">Wszystkie</button>
+              <button class="tab" type="button" data-view="liked">Polubione</button>
+              <button class="tab" type="button" data-view="recent">Ostatnie</button>
+            </div>
+          </div>
+          <form id="trackSearchForm" class="search-row">
+            <input id="trackQuery" type="search" placeholder="Szukaj po tytule, artyście, albumie" />
+            <button type="submit">Szukaj</button>
+          </form>
+          <div id="tracksList" class="list empty">Podaj token i odśwież bibliotekę.</div>
+        </div>
+
+        <aside class="stack">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Import z Pirate Bay</h2>
+            </div>
+            <form id="sourceSearchForm" class="search-row">
+              <input id="sourceQuery" type="search" placeholder="Nazwa albumu lub artysty" />
+              <button type="submit">Szukaj</button>
+            </form>
+            <div id="sourceResults" class="list compact empty">Pokazuję tylko tytuły z [PMEDIA].</div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Importy</h2>
+              <button id="refreshImports" class="quiet" type="button">Odśwież</button>
+            </div>
+            <div id="importsList" class="list compact empty">Brak danych.</div>
+          </section>
+        </aside>
+      </section>
+
+      <p id="message" class="message" role="status"></p>
+    </main>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

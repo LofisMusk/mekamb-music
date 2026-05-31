@@ -40,6 +40,9 @@ async def test_qbittorrent_status_reads_torrent_by_label():
         seen_paths.append(request.url.path)
         if request.url.path == "/api/v2/auth/login":
             return httpx.Response(200, text="Ok.")
+        if request.url.path == "/api/v2/app/setPreferences":
+            assert "listen_port" in request.content.decode()
+            return httpx.Response(200)
         if request.url.path == "/api/v2/torrents/info":
             assert request.url.params["tag"] == "mekamb-music:import-id"
             return httpx.Response(
@@ -69,7 +72,11 @@ async def test_qbittorrent_status_reads_torrent_by_label():
 
     status = await downloader.status_by_label("mekamb-music:import-id")
 
-    assert seen_paths == ["/api/v2/auth/login", "/api/v2/torrents/info"]
+    assert seen_paths == [
+        "/api/v2/auth/login",
+        "/api/v2/app/setPreferences",
+        "/api/v2/torrents/info",
+    ]
     assert status is not None
     assert status.name == "track.flac"
     assert status.info_hash == "ABC123"
@@ -81,6 +88,8 @@ async def test_qbittorrent_status_returns_none_when_tag_not_found():
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/v2/auth/login":
             return httpx.Response(200, text="Ok.")
+        if request.url.path == "/api/v2/app/setPreferences":
+            return httpx.Response(200)
         if request.url.path == "/api/v2/torrents/info":
             return httpx.Response(200, json=[])
         return httpx.Response(404)
@@ -100,6 +109,8 @@ async def test_qbittorrent_status_rejects_unexpected_payload():
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/v2/auth/login":
             return httpx.Response(200, text="Ok.")
+        if request.url.path == "/api/v2/app/setPreferences":
+            return httpx.Response(200)
         if request.url.path == "/api/v2/torrents/info":
             return httpx.Response(200, json={"not": "a list"})
         return httpx.Response(404)
@@ -113,6 +124,35 @@ async def test_qbittorrent_status_rejects_unexpected_payload():
 
     with pytest.raises(QBittorrentError):
         await downloader.status_by_label("bad")
+
+
+@pytest.mark.asyncio
+async def test_qbittorrent_accepts_no_content_login_response():
+    requests = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/v2/auth/login":
+            return httpx.Response(204)
+        if request.url.path == "/api/v2/app/setPreferences":
+            return httpx.Response(200)
+        if request.url.path == "/api/v2/torrents/info":
+            return httpx.Response(200, json=[])
+        return httpx.Response(404)
+
+    downloader = QBittorrentDownloader(
+        rpc_url="http://qbittorrent:8080",
+        username="admin",
+        password="strong-password",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert await downloader.status_by_label("missing") is None
+    assert [request.url.path for request in requests] == [
+        "/api/v2/auth/login",
+        "/api/v2/app/setPreferences",
+        "/api/v2/torrents/info",
+    ]
 
 
 @pytest.mark.asyncio
@@ -148,6 +188,8 @@ async def test_qbittorrent_enqueue_sends_magnet_to_quarantine_path():
         requests.append(request)
         if request.url.path == "/api/v2/auth/login":
             return httpx.Response(200, text="Ok.")
+        if request.url.path == "/api/v2/app/setPreferences":
+            return httpx.Response(200)
         if request.url.path == "/api/v2/torrents/add":
             body = request.content.decode()
             assert "magnet%3A%3Fxt%3Durn%3Abtih%3AABC123" in body
@@ -171,6 +213,7 @@ async def test_qbittorrent_enqueue_sends_magnet_to_quarantine_path():
 
     assert [request.url.path for request in requests] == [
         "/api/v2/auth/login",
+        "/api/v2/app/setPreferences",
         "/api/v2/torrents/add",
     ]
 

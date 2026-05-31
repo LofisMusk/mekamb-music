@@ -17,6 +17,8 @@ docker compose up --build
 ```
 
 The API listens on `http://localhost:8000`.
+Open `http://localhost:8000/` for a very small browser frontend that uses the
+same API token and calls the backend directly.
 
 Compose waits for Postgres and Redis healthchecks before starting the app.
 MinIO readiness is handled by `minio-init`, which waits for MinIO and creates
@@ -48,7 +50,9 @@ python -m app.api.openapi_export openapi.json
 - `GET /health`
 - `GET /health/ready`
 - `GET /sources/1337x/search?q=...`
+- `GET /sources/piratebay/search?q=...`
 - `POST /imports/1337x/{torrent_id}`
+- `POST /imports/piratebay/{torrent_id}`
 - `GET /imports?status=queued&limit=50&offset=0`
 - `GET /imports/{id}`
 - `GET /imports/{id}/tracks?limit=50&offset=0`
@@ -101,6 +105,8 @@ Pass `Authorization: Bearer <API_TOKEN>` to every non-health endpoint.
   `CLEANUP_QUARANTINE_AFTER_IMPORT=false` if you want to inspect downloaded files.
 - Original files are preserved; FLAC/ALAC stay lossless and MP3 stays MP3.
 - The v1 1337x API surface intentionally has no trending/top/browse endpoints.
+- Pirate Bay imports are restricted to torrents whose title contains the
+  configured `PIRATEBAY_TITLE_MARKER`, defaulting to `[PMEDIA]`.
 
 ## Configuration Notes
 
