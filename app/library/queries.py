@@ -1,10 +1,22 @@
+from uuid import UUID
+
 from sqlalchemy import Select, func, or_, select
 
 from app.db.models import Track
 
 
-def build_track_list_query(*, q: str | None, limit: int, offset: int) -> Select[tuple[Track]]:
+def build_track_list_query(
+    *,
+    q: str | None,
+    artist: str | None = None,
+    album: str | None = None,
+    source_import_id: UUID | None = None,
+    limit: int,
+    offset: int,
+) -> Select[tuple[Track]]:
     statement = select(Track)
+    if source_import_id is not None:
+        statement = statement.where(Track.source_import_id == source_import_id)
     normalized_query = q.strip() if q else ""
     if normalized_query:
         pattern = f"%{normalized_query}%"
@@ -15,6 +27,18 @@ def build_track_list_query(*, q: str | None, limit: int, offset: int) -> Select[
                 Track.album.ilike(pattern),
                 Track.original_filename.ilike(pattern),
             )
+        )
+    normalized_artist = artist.strip() if artist else ""
+    if normalized_artist:
+        statement = statement.where(
+            func.lower(func.coalesce(Track.artist, "Unknown Artist"))
+            == normalized_artist.lower()
+        )
+    normalized_album = album.strip() if album else ""
+    if normalized_album:
+        statement = statement.where(
+            func.lower(func.coalesce(Track.album, "Unknown Album"))
+            == normalized_album.lower()
         )
 
     return statement.order_by(Track.created_at.desc()).limit(limit).offset(offset)

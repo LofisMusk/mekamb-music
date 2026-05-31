@@ -9,8 +9,11 @@ from app.db.session import get_session
 from app.downloads.qbittorrent import QBittorrentDownloader
 from app.downloads.service import DownloadService
 from app.imports.domain import ImportRepository
+from app.imports.queue import RedisImportQueue
 from app.imports.repository import SqlAlchemyImportRepository
-from app.imports.service import ImportService
+from app.imports.service import ImportEventPublisher, ImportService
+from app.playlists.repository import SqlAlchemyPlaylistRepository
+from app.playlists.service import PlaylistService
 from app.sources.personal_1337x import Personal1337xProvider
 
 
@@ -40,11 +43,25 @@ def import_repository(session: AsyncSession = Depends(db_session)) -> ImportRepo
     return SqlAlchemyImportRepository(session)
 
 
+async def import_event_publisher() -> AsyncIterator[ImportEventPublisher]:
+    queue = RedisImportQueue.from_settings(settings)
+    try:
+        yield queue
+    finally:
+        await queue.close()
+
+
 def import_service(
     repository: ImportRepository = Depends(import_repository),
     downloader: QBittorrentDownloader = Depends(torrent_downloader),
+    event_publisher: ImportEventPublisher = Depends(import_event_publisher),
 ) -> ImportService:
-    return ImportService.from_settings(settings, repository=repository, downloader=downloader)
+    return ImportService.from_settings(
+        settings,
+        repository=repository,
+        downloader=downloader,
+        event_publisher=event_publisher,
+    )
 
 
 def download_service(
@@ -52,3 +69,7 @@ def download_service(
     downloader: QBittorrentDownloader = Depends(torrent_downloader),
 ) -> DownloadService:
     return DownloadService(repository=repository, torrent_client=downloader)
+
+
+def playlist_service(session: AsyncSession = Depends(db_session)) -> PlaylistService:
+    return PlaylistService(repository=SqlAlchemyPlaylistRepository(session))

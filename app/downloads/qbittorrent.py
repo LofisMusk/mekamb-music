@@ -81,7 +81,11 @@ class QBittorrentDownloader:
             payload = response.json()
             if not isinstance(payload, list):
                 raise QBittorrentError("qBittorrent returned an unexpected torrent info response.")
-            hashes = [str(item.get("hash")) for item in payload if isinstance(item, dict) and item.get("hash")]
+            hashes = [
+                str(item.get("hash"))
+                for item in payload
+                if isinstance(item, dict) and item.get("hash")
+            ]
             if not hashes:
                 return False
 
@@ -95,6 +99,14 @@ class QBittorrentDownloader:
             delete_response.raise_for_status()
             return True
 
+    async def check(self) -> None:
+        async with self._client() as client:
+            await self._login(client)
+            response = await client.get(f"{self.rpc_url}/api/v2/app/version")
+            response.raise_for_status()
+            if not response.text.strip():
+                raise QBittorrentError("qBittorrent returned an empty version response.")
+
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport)
 
@@ -106,3 +118,8 @@ class QBittorrentDownloader:
         login.raise_for_status()
         if login.text.strip() != "Ok.":
             raise QBittorrentAuthError("qBittorrent rejected the configured username or password.")
+
+
+async def check_qbittorrent(settings: object) -> None:
+    downloader = QBittorrentDownloader.from_settings(settings)
+    await downloader.check()

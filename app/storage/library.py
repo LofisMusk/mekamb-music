@@ -11,6 +11,9 @@ class ObjectStorage(Protocol):
     def put_file(self, source: Path, key: str):
         ...
 
+    def delete_file(self, key: str) -> None:
+        ...
+
 
 class LibraryStorage:
     """Writes a streamable local cache and optionally mirrors objects remotely."""
@@ -25,6 +28,11 @@ class LibraryStorage:
             self.remote.put_file(source, key)
         return cached_path
 
+    def delete_file(self, key: str) -> None:
+        if self.remote is not None:
+            self.remote.delete_file(key)
+        self.local_cache.delete_file(key)
+
 
 def build_library_storage(settings: object) -> LibraryStorage:
     backend = getattr(settings, "storage_backend", "local").lower()
@@ -35,4 +43,3 @@ def build_library_storage(settings: object) -> LibraryStorage:
     if backend == "s3":
         return LibraryStorage(local_cache=local_cache, remote=S3Storage.from_settings(settings))
     raise ValueError(f"Unsupported STORAGE_BACKEND {backend!r}. Use 'local' or 's3'.")
-

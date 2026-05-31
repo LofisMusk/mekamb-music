@@ -23,7 +23,10 @@ MinIO readiness is handled by `minio-init`, which waits for MinIO and creates
 the configured bucket before API/worker containers continue.
 Use `/health` for a simple process liveness check and `/health/ready` when a
 deploy target should verify database, auth/source configuration, and sandbox
-directories before routing traffic.
+directories, Redis, and qBittorrent before routing traffic.
+Imports are stored in Postgres and also publish a Redis queue event so the
+worker wakes up quickly; the worker still periodically scans active imports as a
+fallback.
 
 For local Python-only checks:
 
@@ -48,13 +51,34 @@ python -m app.api.openapi_export openapi.json
 - `POST /imports/1337x/{torrent_id}`
 - `GET /imports?status=queued&limit=50&offset=0`
 - `GET /imports/{id}`
+- `GET /imports/{id}/tracks?limit=50&offset=0`
 - `POST /imports/{id}/cancel?delete_files=true`
+- `POST /imports/{id}/retry?delete_files=true`
 - `GET /downloads/{id}`
-- `GET /tracks?q=...&limit=50&offset=0`
+- `GET /library/summary`
+- `GET /tracks?q=...&artist=...&album=...&source_import_id=...&limit=50&offset=0`
+- `GET /tracks/liked?limit=50&offset=0`
+- `GET /tracks/recent?limit=50&offset=0`
 - `GET /tracks/artists?q=...&limit=50&offset=0`
 - `GET /tracks/albums?q=...&limit=50&offset=0`
 - `GET /tracks/{id}`
+- `GET /tracks/{id}/stats`
+- `PATCH /tracks/{id}`
+- `PUT /tracks/{id}/like`
+- `DELETE /tracks/{id}/like`
+- `POST /tracks/{id}/plays`
+- `DELETE /tracks/{id}?delete_file=true`
+- `GET /tracks/{id}/artwork`
+- `HEAD /tracks/{id}/stream`
 - `GET /tracks/{id}/stream`
+- `GET /playlists?limit=50&offset=0`
+- `POST /playlists`
+- `GET /playlists/{id}`
+- `PATCH /playlists/{id}`
+- `DELETE /playlists/{id}`
+- `POST /playlists/{id}/tracks`
+- `PUT /playlists/{id}/tracks/order`
+- `DELETE /playlists/{id}/tracks/{track_id}`
 
 Pass `Authorization: Bearer <API_TOKEN>` to every non-health endpoint.
 
@@ -66,8 +90,15 @@ Pass `Authorization: Bearer <API_TOKEN>` to every non-health endpoint.
 - qBittorrent only receives the quarantine volume, never the library volume.
 - The worker waits until qBittorrent reports the torrent as complete, then imports
   only allowed audio extensions from quarantine.
+- If the completed torrent has no supported audio files or its quarantine path is
+  missing/invalid, the import is marked `failed` instead of staying active.
 - Before importing, the worker verifies that qBittorrent reports the expected
   `info_hash` and the exact per-import download path.
+- Redis is only a wake-up signal for the worker; Postgres remains the source of
+  truth for import state.
+- After a successful import, the worker removes the completed torrent and cleans
+  its quarantine directory by default. Set `REMOVE_TORRENT_AFTER_IMPORT=false` or
+  `CLEANUP_QUARANTINE_AFTER_IMPORT=false` if you want to inspect downloaded files.
 - Original files are preserved; FLAC/ALAC stay lossless and MP3 stays MP3.
 - The v1 1337x API surface intentionally has no trending/top/browse endpoints.
 

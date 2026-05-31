@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderDisabledError(RuntimeError):
@@ -103,12 +107,14 @@ class Personal1337xProvider:
         max_pages: int = 1,
         client: Py1337xLike | None = None,
         category: str | None = None,
+        search_cache_ttl: int = 300,
     ) -> None:
         self.uploader = uploader.strip() if uploader else ""
         self.base_url = base_url.rstrip("/")
         self.max_pages = max(1, max_pages)
         self._client = client
         self._category = category or _music_category()
+        self._search_cache_ttl = search_cache_ttl
 
     @classmethod
     def from_settings(cls, settings: object) -> "Personal1337xProvider":
@@ -116,6 +122,7 @@ class Personal1337xProvider:
             uploader=getattr(settings, "personal_1337x_uploader", None),
             base_url=getattr(settings, "personal_1337x_base_url", "https://1337x.to"),
             max_pages=getattr(settings, "personal_1337x_max_pages", 1),
+            search_cache_ttl=getattr(settings, "search_cache_ttl_seconds", 300),
         )
 
     @property
@@ -134,10 +141,22 @@ class Personal1337xProvider:
         *,
         page: int = 1,
         sort_by: str | None = None,
+        redis=None,
     ) -> list[Personal1337xSearchResult]:
         self._ensure_enabled()
         if page > self.max_pages:
             return []
+
+        # Redis cache
+        cache_key = f"1337x:search:{self.uploader}:{query}:{page}:{sort_by or 'seeders'}"
+        if redis is not None:
+            try:
+                cached = await redis.get(cache_key)
+                if cached:
+                    logger.debug("Search cache hit: %s", cache_key)
+                    return _deserialize_results(cached)
+            except Exception as exc:
+                logger.warning("Redis get failed (ignored): %s", exc)
 
         selected_sort = _seeders_sort() if sort_by in (None, "seeders") else sort_by
         result = await asyncio.to_thread(
@@ -168,7 +187,16 @@ class Personal1337xProvider:
                     discovered_at=now,
                 )
             )
+
+        if redis is not None and filtered:
+            try:
+                await redis.setex(cache_key, self._search_cache_ttl, _serialize_results(filtered))
+                logger.debug("Search cache set: %s (TTL=%ds)", cache_key, self._search_cache_ttl)
+            except Exception as exc:
+                logger.warning("Redis set failed (ignored): %s", exc)
+
         return filtered
+
 
     async def resolve_for_import(self, torrent_id: str) -> Personal1337xImportCandidate:
         self._ensure_enabled()
@@ -216,3 +244,16 @@ class Personal1337xProvider:
                 return value
         return f"{self.base_url}/torrent/{torrent_id}/"
 
+
+def _serialize_results(results: list[Personal1337xSearchResult]) -> str:
+    return json.dumps([r.to_dict() for r in results])
+
+
+def _deserialize_results(raw: str) -> list[Personal1337xSearchResult]:
+    items = json.loads(raw)
+    return [
+        Personal1337xSearchResult(
+            **{**item, "discovered_at": datetime.fromisoformat(item["discovered_at"])}
+        )
+        for item in items
+    ]

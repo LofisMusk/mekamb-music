@@ -49,7 +49,12 @@ class SqlAlchemyImportRepository:
         return import_record_from_model(record) if record else None
 
     async def list(self, *, status: str | None, limit: int, offset: int) -> list[ImportRecord]:
-        statement = select(ImportJob).order_by(ImportJob.created_at.desc()).limit(limit).offset(offset)
+        statement = (
+            select(ImportJob)
+            .order_by(ImportJob.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
         if status:
             statement = statement.where(ImportJob.status == status)
         records = await self.session.scalars(statement)
@@ -60,6 +65,7 @@ class SqlAlchemyImportRepository:
         if model is None:
             raise ImportNotFound(f"Import {record.id} not found.")
         model.status = record.status
+        model.quarantine_path = record.quarantine_path
         model.error_message = record.error_message
         model.updated_at = record.updated_at
         await self.session.commit()

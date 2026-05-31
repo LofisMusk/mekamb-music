@@ -1,0 +1,77 @@
+from fastapi import APIRouter, Depends
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import db_session, require_token
+from app.api.schemas import LibrarySummaryResponse
+from app.db.models import ImportJob, LikedTrack, Playlist, Track, TrackPlay
+from app.imports.domain import ImportStatus
+
+router = APIRouter(dependencies=[Depends(require_token)])
+
+
+@router.get("/summary", response_model=LibrarySummaryResponse)
+async def get_library_summary(
+    session: AsyncSession = Depends(db_session),
+) -> LibrarySummaryResponse:
+    track_count, size_bytes, duration_seconds, latest_track_at = (
+        await session.execute(
+            select(
+                func.count(Track.id),
+                func.coalesce(func.sum(Track.size_bytes), 0),
+                func.coalesce(func.sum(Track.duration_seconds), 0),
+                func.max(Track.created_at),
+            )
+        )
+    ).one()
+
+    return LibrarySummaryResponse(
+        track_count=int(track_count or 0),
+        artist_count=await _count_grouped(
+            session,
+            select(func.coalesce(Track.artist, "Unknown Artist")).group_by(
+                func.coalesce(Track.artist, "Unknown Artist")
+            ),
+        ),
+        album_count=await _count_grouped(
+            session,
+            select(
+                func.coalesce(Track.album, "Unknown Album"),
+                func.coalesce(Track.artist, "Unknown Artist"),
+            ).group_by(
+                func.coalesce(Track.album, "Unknown Album"),
+                func.coalesce(Track.artist, "Unknown Artist"),
+            ),
+        ),
+        playlist_count=await _count_rows(session, Playlist.id),
+        liked_track_count=await _count_rows(session, LikedTrack.id),
+        playback_event_count=await _count_rows(session, TrackPlay.id),
+        import_count=await _count_rows(session, ImportJob.id),
+        active_import_count=await _count_imports_by_status(session, ImportStatus.active()),
+        failed_import_count=await _count_imports_by_status(session, (ImportStatus.FAILED.value,)),
+        library_size_bytes=int(size_bytes or 0),
+        total_duration_seconds=int(duration_seconds or 0),
+        latest_track_at=latest_track_at,
+        latest_import_at=await _latest_import_at(session),
+    )
+
+
+async def _count_rows(session: AsyncSession, column) -> int:
+    count = await session.scalar(select(func.count(column)))
+    return int(count or 0)
+
+
+async def _count_grouped(session: AsyncSession, statement) -> int:
+    count = await session.scalar(select(func.count()).select_from(statement.subquery()))
+    return int(count or 0)
+
+
+async def _count_imports_by_status(session: AsyncSession, statuses: tuple[str, ...]) -> int:
+    count = await session.scalar(
+        select(func.count(ImportJob.id)).where(ImportJob.status.in_(statuses))
+    )
+    return int(count or 0)
+
+
+async def _latest_import_at(session: AsyncSession):
+    return await session.scalar(select(func.max(ImportJob.created_at)))

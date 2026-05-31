@@ -5,6 +5,7 @@ description = "Private Spotify-like music backend with a personal 1337x source p
 requires-python = ">=3.11"
 dependencies = [
   "1337x==2.1.1",
+  "alembic>=1.13.0",
   "asyncpg>=0.30.0",
   "boto3>=1.34.0",
   "fastapi>=0.115.0",
@@ -12,7 +13,7 @@ dependencies = [
   "mutagen>=1.47.0",
   "pydantic-settings>=2.4.0",
   "python-multipart>=0.0.9",
-  "redis>=5.0.0",
+  "redis[hiredis]>=5.0.0",
   "sqlalchemy[asyncio]>=2.0.32",
   "uvicorn[standard]>=0.30.0",
 ]

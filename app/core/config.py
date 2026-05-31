@@ -18,6 +18,7 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://music:music@localhost:5432/music"
     redis_url: str = "redis://localhost:6379/0"
+    import_queue_name: str = "mekamb-music:import-events"
 
     s3_endpoint_url: str | None = "http://localhost:9000"
     s3_access_key_id: str = "minio"
@@ -33,6 +34,15 @@ class Settings(BaseSettings):
     torrent_rpc_username: str = "admin"
     torrent_rpc_password: str = "adminadmin"
     import_worker_interval_seconds: int = 15
+    cleanup_quarantine_after_import: bool = True
+    remove_torrent_after_import: bool = True
+
+    # ── Cache TTL ────────────────────────────────────────────────────────────
+    cache_ttl_days: int = 30
+    cache_cleanup_interval_seconds: int = 3600
+
+    # ── Redis search cache ───────────────────────────────────────────────────
+    search_cache_ttl_seconds: int = 300
 
     @property
     def personal_1337x_enabled(self) -> bool:

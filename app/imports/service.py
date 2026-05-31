@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,12 +11,18 @@ from uuid import UUID, uuid4
 from app.imports.domain import ImportRecord, ImportRepository, ImportStatus
 from app.sources.personal_1337x import Personal1337xImportCandidate
 
+logger = logging.getLogger(__name__)
+
 
 class InvalidImportCandidate(RuntimeError):
     pass
 
 
 class SandboxViolation(RuntimeError):
+    pass
+
+
+class ImportNotRetryable(RuntimeError):
     pass
 
 
@@ -27,6 +34,16 @@ class TorrentDownloader(Protocol):
         ...
 
 
+class ImportEventPublisher(Protocol):
+    async def notify_import_changed(self, import_id: UUID) -> None:
+        ...
+
+
+class NoopImportEventPublisher:
+    async def notify_import_changed(self, import_id: UUID) -> None:
+        return None
+
+
 @dataclass(frozen=True)
 class QuarantinePlan:
     import_id: UUID
@@ -35,7 +52,13 @@ class QuarantinePlan:
 
 
 class QuarantinePlanner:
-    def __init__(self, *, quarantine_root: Path, torrent_download_root: Path, library_root: Path) -> None:
+    def __init__(
+        self,
+        *,
+        quarantine_root: Path,
+        torrent_download_root: Path,
+        library_root: Path,
+    ) -> None:
         self.quarantine_root = quarantine_root
         self.torrent_download_root = torrent_download_root
         self.library_root = library_root
@@ -61,10 +84,12 @@ class ImportService:
         repository: ImportRepository,
         downloader: TorrentDownloader,
         planner: QuarantinePlanner,
+        event_publisher: ImportEventPublisher | None = None,
     ) -> None:
         self.repository = repository
         self.downloader = downloader
         self.planner = planner
+        self.event_publisher = event_publisher or NoopImportEventPublisher()
 
     @classmethod
     def from_settings(
@@ -73,13 +98,19 @@ class ImportService:
         *,
         repository: ImportRepository,
         downloader: TorrentDownloader,
+        event_publisher: ImportEventPublisher | None = None,
     ) -> "ImportService":
         planner = QuarantinePlanner(
             quarantine_root=getattr(settings, "quarantine_root"),
             torrent_download_root=getattr(settings, "torrent_download_root"),
             library_root=getattr(settings, "library_root"),
         )
-        return cls(repository=repository, downloader=downloader, planner=planner)
+        return cls(
+            repository=repository,
+            downloader=downloader,
+            planner=planner,
+            event_publisher=event_publisher,
+        )
 
     async def create_1337x_import(self, candidate: Personal1337xImportCandidate) -> ImportRecord:
         self._validate_candidate(candidate)
@@ -112,7 +143,9 @@ class ImportService:
             download_path=quarantine.torrent_path,
             label=f"mekamb-music:{import_id}",
         )
-        return await self.repository.add(record)
+        record = await self.repository.add(record)
+        await self._notify_import_changed(record.id)
+        return record
 
     async def get_import(self, import_id: UUID) -> ImportRecord:
         return await self.repository.get(import_id)
@@ -128,9 +161,43 @@ class ImportService:
 
         now = datetime.now(UTC)
         record.status = ImportStatus.CANCELED.value
-        record.error_message = None if removed_from_client else "Torrent was not visible in qBittorrent."
+        record.error_message = (
+            None if removed_from_client else "Torrent was not visible in qBittorrent."
+        )
         record.updated_at = now
-        return await self.repository.update(record)
+        record = await self.repository.update(record)
+        await self._notify_import_changed(record.id)
+        return record
+
+    async def retry_import(self, import_id: UUID, *, delete_files: bool = True) -> ImportRecord:
+        record = await self.repository.get(import_id)
+        if record.status in ImportStatus.active():
+            raise ImportNotRetryable("Import is already active.")
+        if record.status == ImportStatus.IMPORTED.value:
+            raise ImportNotRetryable("Imported records cannot be retried.")
+
+        await self.downloader.delete_by_label(
+            f"mekamb-music:{import_id}",
+            delete_files=delete_files,
+        )
+        quarantine = self.planner.plan(import_id)
+        if delete_files:
+            self._remove_quarantine_path(str(quarantine.host_path))
+        quarantine.host_path.mkdir(parents=True, exist_ok=True)
+
+        await self.downloader.enqueue(
+            magnet_link=record.magnet_link,
+            download_path=quarantine.torrent_path,
+            label=f"mekamb-music:{import_id}",
+        )
+
+        record.status = ImportStatus.QUEUED.value
+        record.quarantine_path = str(quarantine.host_path)
+        record.error_message = None
+        record.updated_at = datetime.now(UTC)
+        record = await self.repository.update(record)
+        await self._notify_import_changed(record.id)
+        return record
 
     async def list_imports(
         self,
@@ -158,3 +225,9 @@ class ImportService:
             raise SandboxViolation("Refusing to remove a path outside the quarantine root.")
         if path.exists():
             rmtree(path)
+
+    async def _notify_import_changed(self, import_id: UUID) -> None:
+        try:
+            await self.event_publisher.notify_import_changed(import_id)
+        except Exception as exc:
+            logger.warning("Could not publish import event for %s: %s", import_id, exc)

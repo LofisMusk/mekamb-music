@@ -35,3 +35,6 @@ class S3Storage:
     def put_file(self, source: Path, key: str) -> str:
         self.client.upload_file(str(source), self.bucket, key)
         return key
+
+    def delete_file(self, key: str) -> None:
+        self.client.delete_object(Bucket=self.bucket, Key=key)
