@@ -3,6 +3,11 @@ const state = {
   currentView: "tracks",
   currentAudioUrl: null,
   importsTimer: null,
+  visibleTracks: [],
+  queue: [],
+  queueIndex: -1,
+  shuffle: false,
+  loop: "off",
 };
 
 const queueStatuses = ["queued", "downloading", "ready_to_import", "failed"];
@@ -24,6 +29,10 @@ const els = {
   refreshImports: document.querySelector("#refreshImports"),
   message: document.querySelector("#message"),
   audio: document.querySelector("#audio"),
+  prevTrack: document.querySelector("#prevTrack"),
+  nextTrack: document.querySelector("#nextTrack"),
+  shuffleToggle: document.querySelector("#shuffleToggle"),
+  loopToggle: document.querySelector("#loopToggle"),
   nowTitle: document.querySelector("#nowTitle"),
   nowMeta: document.querySelector("#nowMeta"),
   tabs: [...document.querySelectorAll(".tab")],
@@ -138,7 +147,18 @@ function renderTrack(track) {
   play.title = "Odtwórz";
   play.ariaLabel = "Odtwórz";
   play.textContent = "▶";
-  play.addEventListener("click", () => runAction(() => playTrack(track)));
+  play.addEventListener("click", () => runAction(() => playFromVisibleQueue(track.id)));
+
+  const add = document.createElement("button");
+  add.className = "icon quiet";
+  add.type = "button";
+  add.title = "Dodaj do kolejki";
+  add.ariaLabel = "Dodaj do kolejki";
+  add.textContent = "+";
+  add.addEventListener("click", () => {
+    addToQueue(track);
+    setMessage("Dodano do kolejki.");
+  });
 
   const like = document.createElement("button");
   like.className = "icon quiet";
@@ -148,7 +168,7 @@ function renderTrack(track) {
   like.textContent = "♥";
   like.addEventListener("click", () => runAction(() => likeTrack(track.id)));
 
-  actions.append(play, like);
+  actions.append(play, add, like);
   return item;
 }
 
@@ -245,9 +265,10 @@ async function loadTracks() {
   let payload;
   if (state.currentView === "liked") {
     payload = await api("/tracks/liked?limit=50");
+    state.visibleTracks = payload.items.map((item) => item.track);
     renderList(
       els.tracksList,
-      payload.items.map((item) => item.track),
+      state.visibleTracks,
       renderTrack,
       "Nie ma jeszcze polubionych utworów.",
     );
@@ -255,9 +276,10 @@ async function loadTracks() {
   }
   if (state.currentView === "recent") {
     payload = await api("/tracks/recent?limit=50");
+    state.visibleTracks = payload.items.map((item) => item.track);
     renderList(
       els.tracksList,
-      payload.items.map((item) => item.track),
+      state.visibleTracks,
       renderTrack,
       "Nie ma jeszcze historii odtwarzania.",
     );
@@ -267,7 +289,8 @@ async function loadTracks() {
   const params = new URLSearchParams({ limit: "50" });
   if (query) params.set("q", query);
   payload = await api(`/tracks?${params}`);
-  renderList(els.tracksList, payload.items, renderTrack, "Brak utworów dla tego wyszukiwania.");
+  state.visibleTracks = payload.items;
+  renderList(els.tracksList, state.visibleTracks, renderTrack, "Brak utworów dla tego wyszukiwania.");
 }
 
 async function loadImports() {
@@ -348,6 +371,70 @@ async function playTrack(track) {
   setMessage("");
 }
 
+function addToQueue(track) {
+  state.queue.push(track);
+  if (state.queueIndex === -1) state.queueIndex = 0;
+}
+
+function setQueueFromVisible(startTrackId) {
+  const tracks = state.shuffle ? shuffled(state.visibleTracks) : [...state.visibleTracks];
+  const selectedIndex = tracks.findIndex((track) => track.id === startTrackId);
+  state.queue = tracks;
+  state.queueIndex = selectedIndex >= 0 ? selectedIndex : 0;
+}
+
+function shuffled(items) {
+  const copy = [...items];
+  for (let index = copy.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [copy[index], copy[swapIndex]] = [copy[swapIndex], copy[index]];
+  }
+  return copy;
+}
+
+async function playFromVisibleQueue(trackId) {
+  setQueueFromVisible(trackId);
+  await playCurrentQueueTrack();
+}
+
+async function playCurrentQueueTrack() {
+  const track = state.queue[state.queueIndex];
+  if (!track) return;
+  await playTrack(track);
+}
+
+async function playNextTrack() {
+  if (!state.queue.length) return;
+  if (state.loop === "one") {
+    await playCurrentQueueTrack();
+    return;
+  }
+  if (state.queueIndex < state.queue.length - 1) {
+    state.queueIndex += 1;
+  } else if (state.loop === "all") {
+    state.queueIndex = 0;
+  } else {
+    return;
+  }
+  await playCurrentQueueTrack();
+}
+
+async function playPreviousTrack() {
+  if (!state.queue.length) return;
+  if (state.queueIndex > 0) {
+    state.queueIndex -= 1;
+  } else if (state.loop === "all") {
+    state.queueIndex = state.queue.length - 1;
+  }
+  await playCurrentQueueTrack();
+}
+
+function updateTransport() {
+  els.shuffleToggle.classList.toggle("active", state.shuffle);
+  els.loopToggle.classList.toggle("active", state.loop !== "off");
+  els.loopToggle.textContent = state.loop === "one" ? "↺1" : "↻";
+}
+
 async function refreshAll() {
   try {
     await loadHealth();
@@ -412,6 +499,22 @@ els.refreshImports.addEventListener("click", async () => {
   }
 });
 
+els.nextTrack.addEventListener("click", () => runAction(playNextTrack));
+els.prevTrack.addEventListener("click", () => runAction(playPreviousTrack));
+els.audio.addEventListener("ended", () => runAction(playNextTrack));
+
+els.shuffleToggle.addEventListener("click", () => {
+  state.shuffle = !state.shuffle;
+  updateTransport();
+  setMessage(state.shuffle ? "Shuffle włączony." : "Shuffle wyłączony.");
+});
+
+els.loopToggle.addEventListener("click", () => {
+  state.loop = state.loop === "off" ? "all" : state.loop === "all" ? "one" : "off";
+  updateTransport();
+  setMessage(state.loop === "off" ? "Loop wyłączony." : `Loop ${state.loop === "one" ? "utworu" : "kolejki"}.`);
+});
+
 els.tabs.forEach((tab) => {
   tab.addEventListener("click", async () => {
     state.currentView = tab.dataset.view;
@@ -426,3 +529,4 @@ els.tabs.forEach((tab) => {
 
 refreshAll();
 startImportsAutoRefresh();
+updateTransport();

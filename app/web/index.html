@@ -47,7 +47,15 @@
           <h2 id="nowTitle">Wybierz utwór</h2>
           <p id="nowMeta">Odtwarzacz załaduje plik przez API z tokenem.</p>
         </div>
-        <audio id="audio" controls preload="none"></audio>
+        <div class="player-controls">
+          <audio id="audio" controls preload="none"></audio>
+          <div class="transport">
+            <button id="prevTrack" class="icon quiet" type="button" title="Poprzedni" aria-label="Poprzedni">⏮</button>
+            <button id="shuffleToggle" class="icon quiet" type="button" title="Shuffle" aria-label="Shuffle">⇄</button>
+            <button id="loopToggle" class="icon quiet" type="button" title="Loop" aria-label="Loop">↻</button>
+            <button id="nextTrack" class="icon quiet" type="button" title="Następny" aria-label="Następny">⏭</button>
+          </div>
+        </div>
       </section>
 
       <section class="grid">

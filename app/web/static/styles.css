@@ -1,15 +1,16 @@
 :root {
-  color-scheme: light;
-  --bg: #f5f6f1;
-  --panel: #ffffff;
-  --ink: #17201c;
-  --muted: #66706b;
-  --line: #dfe4dc;
-  --accent: #176b5b;
-  --accent-strong: #0f4b42;
-  --warn: #9a4d12;
-  --bad: #9b2424;
-  --shadow: 0 10px 30px rgba(23, 32, 28, 0.08);
+  color-scheme: dark;
+  --bg: #050607;
+  --panel: #111417;
+  --panel-soft: #171b1f;
+  --ink: #f2f5f3;
+  --muted: #9aa39e;
+  --line: #2a3136;
+  --accent: #1db991;
+  --accent-strong: #62e0bd;
+  --warn: #f3a33d;
+  --bad: #ff6b6b;
+  --shadow: 0 12px 36px rgba(0, 0, 0, 0.34);
 }
 
 * {
@@ -47,14 +48,14 @@ button:hover {
 
 button.quiet,
 button.tab {
-  background: #fff;
+  background: var(--panel-soft);
   color: var(--accent-strong);
 }
 
 button.quiet:hover,
 button.tab:hover,
 button.tab.active {
-  background: #e8f2ef;
+  background: rgba(29, 185, 145, 0.16);
 }
 
 button.danger {
@@ -63,7 +64,7 @@ button.danger {
 }
 
 button.danger:hover {
-  background: #f7e9e9;
+  background: rgba(255, 107, 107, 0.12);
 }
 
 button.icon {
@@ -76,14 +77,14 @@ input {
   min-height: 40px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: #fff;
+  background: #090b0d;
   color: var(--ink);
   padding: 0 12px;
 }
 
 input:focus,
 button:focus-visible {
-  outline: 3px solid rgba(23, 107, 91, 0.2);
+  outline: 3px solid rgba(29, 185, 145, 0.28);
   outline-offset: 2px;
 }
 
@@ -185,6 +186,22 @@ h2 {
   color: var(--muted);
 }
 
+.player-controls {
+  display: grid;
+  gap: 8px;
+}
+
+.transport {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.transport button.active {
+  background: var(--accent);
+  color: #03100d;
+}
+
 audio {
   width: 100%;
 }
@@ -268,7 +285,7 @@ audio {
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 999px;
-  background: #f4f6f1;
+  background: #090b0d;
   margin-top: 8px;
 }
 
