@@ -57,6 +57,15 @@ button.tab.active {
   background: #e8f2ef;
 }
 
+button.danger {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+button.danger:hover {
+  background: #f7e9e9;
+}
+
 button.icon {
   width: 40px;
   padding: 0;
@@ -283,6 +292,7 @@ audio {
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   align-items: center;
 }

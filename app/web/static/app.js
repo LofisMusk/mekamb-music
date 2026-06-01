@@ -5,6 +5,8 @@ const state = {
   importsTimer: null,
 };
 
+const queueStatuses = ["queued", "downloading", "ready_to_import", "failed"];
+
 const els = {
   tokenForm: document.querySelector("#tokenForm"),
   tokenInput: document.querySelector("#tokenInput"),
@@ -180,6 +182,24 @@ function renderImport(download) {
   const status = document.createElement("span");
   status.className = `pill ${record.status}`;
   status.textContent = record.status;
+
+  if (record.status === "failed") {
+    const retry = document.createElement("button");
+    retry.className = "quiet";
+    retry.type = "button";
+    retry.textContent = "Ponów";
+    retry.addEventListener("click", () => runAction(() => retryImport(record.id)));
+    actions.appendChild(retry);
+  }
+  if (record.status !== "imported" && record.status !== "canceled") {
+    const cancel = document.createElement("button");
+    cancel.className = "quiet danger";
+    cancel.type = "button";
+    cancel.textContent = record.status === "failed" ? "Usuń" : "Anuluj";
+    cancel.addEventListener("click", () => runAction(() => cancelImport(record.id)));
+    actions.appendChild(cancel);
+  }
+
   item.firstElementChild.appendChild(progressWrap);
   actions.appendChild(status);
   return item;
@@ -251,10 +271,16 @@ async function loadTracks() {
 }
 
 async function loadImports() {
-  const payload = await api("/imports?limit=20");
+  const pages = await Promise.all(
+    queueStatuses.map((status) => api(`/imports?status=${encodeURIComponent(status)}&limit=20`)),
+  );
+  const records = pages
+    .flatMap((page) => page.items)
+    .sort((left, right) => new Date(right.created_at) - new Date(left.created_at))
+    .slice(0, 20);
   const downloads = await Promise.all(
-    payload.items.map(async (record) => {
-      if (!["queued", "downloading", "importing"].includes(record.status)) {
+    records.map(async (record) => {
+      if (!["queued", "downloading", "ready_to_import", "importing"].includes(record.status)) {
         return { import: record, torrent: null };
       }
       try {
@@ -264,7 +290,7 @@ async function loadImports() {
       }
     }),
   );
-  renderList(els.importsList, downloads, renderImport, "Brak importów.");
+  renderList(els.importsList, downloads, renderImport, "Kolejka jest pusta.");
 }
 
 async function searchSource() {
@@ -279,6 +305,18 @@ async function searchSource() {
 async function startImport(torrentId) {
   await api(`/imports/piratebay/${encodeURIComponent(torrentId)}`, { method: "POST" });
   setMessage("Import dodany do kolejki.");
+  await Promise.allSettled([loadImports(), loadSummary()]);
+}
+
+async function cancelImport(importId) {
+  await api(`/imports/${encodeURIComponent(importId)}/cancel?delete_files=true`, { method: "POST" });
+  setMessage("Import usunięty z kolejki.");
+  await Promise.allSettled([loadImports(), loadSummary()]);
+}
+
+async function retryImport(importId) {
+  await api(`/imports/${encodeURIComponent(importId)}/retry?delete_files=true`, { method: "POST" });
+  setMessage("Import dodany ponownie.");
   await Promise.allSettled([loadImports(), loadSummary()]);
 }
 
@@ -299,7 +337,8 @@ async function playTrack(track) {
   if (state.currentAudioUrl) {
     URL.revokeObjectURL(state.currentAudioUrl);
   }
-  const blob = await response.blob();
+  const contentType = response.headers.get("Content-Type") || track.media_type || "application/octet-stream";
+  const blob = new Blob([await response.arrayBuffer()], { type: contentType });
   state.currentAudioUrl = URL.createObjectURL(blob);
   els.audio.src = state.currentAudioUrl;
   els.nowTitle.textContent = track.title;
