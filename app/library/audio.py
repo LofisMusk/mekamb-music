@@ -16,6 +16,18 @@ ALLOWED_AUDIO_EXTENSIONS = {
     ".wav",
 }
 
+MEDIA_TYPES_BY_EXTENSION = {
+    ".aac": "audio/aac",
+    ".aiff": "audio/aiff",
+    ".alac": "audio/mp4",
+    ".flac": "audio/flac",
+    ".m4a": "audio/mp4",
+    ".mp3": "audio/mpeg",
+    ".ogg": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".wav": "audio/wav",
+}
+
 _COVER_FILENAMES = [
     "cover.jpg", "cover.jpeg", "cover.png",
     "folder.jpg", "folder.png",
@@ -70,7 +82,7 @@ def scan_audio_file(path: Path) -> AudioMetadata:
         artist = _first_tag(tags, "artist")
         album = _first_tag(tags, "album")
 
-    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    media_type = media_type_for_audio_file(path)
     return AudioMetadata(
         title=title,
         artist=artist,
@@ -79,6 +91,14 @@ def scan_audio_file(path: Path) -> AudioMetadata:
         codec=codec,
         duration_seconds=duration_seconds,
         size_bytes=path.stat().st_size,
+    )
+
+
+def media_type_for_audio_file(path: Path) -> str:
+    return (
+        MEDIA_TYPES_BY_EXTENSION.get(path.suffix.lower())
+        or mimetypes.guess_type(path.name)[0]
+        or "application/octet-stream"
     )
 
 

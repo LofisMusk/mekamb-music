@@ -21,6 +21,7 @@ class FakeTrack:
         self.size_bytes = 1234
         self.source_import_id = None
         self.created_at = datetime.now(UTC)
+        self.last_accessed = self.created_at
 
     def to_dict(self):
         return {
@@ -36,6 +37,7 @@ class FakeTrack:
             "size_bytes": self.size_bytes,
             "source_import_id": None,
             "created_at": self.created_at.isoformat(),
+            "last_accessed": self.last_accessed.isoformat(),
         }
 
 

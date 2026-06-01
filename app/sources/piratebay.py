@@ -14,10 +14,6 @@ class PirateBaySourceError(RuntimeError):
     pass
 
 
-class PirateBayMarkerMismatch(RuntimeError):
-    pass
-
-
 class PirateBayMissingMetadata(RuntimeError):
     pass
 
@@ -62,18 +58,15 @@ class PirateBayProvider:
         self,
         *,
         api_base_url: str = "https://apibay.org",
-        title_marker: str = "[PMEDIA]",
         category: int = 100,
     ) -> None:
         self.api_base_url = api_base_url.rstrip("/")
-        self.title_marker = title_marker.strip() or "[PMEDIA]"
         self.category = category
 
     @classmethod
     def from_settings(cls, settings: object) -> "PirateBayProvider":
         return cls(
             api_base_url=getattr(settings, "piratebay_api_base_url", "https://apibay.org"),
-            title_marker=getattr(settings, "piratebay_title_marker", "[PMEDIA]"),
             category=getattr(settings, "piratebay_category", 100),
         )
 
@@ -87,8 +80,7 @@ class PirateBayProvider:
             raise PirateBaySourceError("Pirate Bay API returned an unexpected response.")
 
         now = datetime.now(UTC)
-        results = [_result for item in payload if (_result := self._parse_result(item, now))]
-        return [result for result in results if self._has_marker(result.name)]
+        return [_result for item in payload if (_result := self._parse_result(item, now))]
 
     async def resolve_for_import(self, torrent_id: str) -> PirateBayImportCandidate:
         torrent_id = torrent_id.strip()
@@ -102,10 +94,6 @@ class PirateBayProvider:
         result = self._parse_result(payload, datetime.now(UTC))
         if result is None:
             raise PirateBayMissingMetadata("Torrent metadata was not found.")
-        if not self._has_marker(result.name):
-            raise PirateBayMarkerMismatch(
-                f"Torrent title must contain {self.title_marker!r} before import."
-            )
 
         return PirateBayImportCandidate(
             torrent_id=result.torrent_id,
@@ -156,10 +144,6 @@ class PirateBayProvider:
             added_at=_timestamp(item.get("added")),
             discovered_at=discovered_at,
         )
-
-    def _has_marker(self, title: str) -> bool:
-        return self.title_marker.casefold() in title.casefold()
-
 
 def _magnet_link(*, info_hash: str, name: str) -> str:
     trackers = [

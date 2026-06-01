@@ -77,7 +77,6 @@ class SourcePirateBayItem(BaseModel):
 
 class SourcePirateBaySearchResponse(BaseModel):
     items: list[SourcePirateBayItem]
-    title_marker: str
 
 
 class ImportRecordResponse(BaseModel):

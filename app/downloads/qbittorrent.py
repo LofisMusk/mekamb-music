@@ -53,6 +53,8 @@ class QBittorrentDownloader:
                     "category": "mekamb-music",
                     "tags": label,
                     "paused": "false",
+                    "ratioLimit": "0",
+                    "seedingTimeLimit": "0",
                 },
             )
             response.raise_for_status()

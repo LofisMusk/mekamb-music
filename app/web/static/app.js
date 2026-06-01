@@ -198,6 +198,12 @@ function renderSourceResult(result) {
   return item;
 }
 
+function topSeededResults(results) {
+  return [...results]
+    .sort((left, right) => Number(right.seeders || 0) - Number(left.seeders || 0))
+    .slice(0, 5);
+}
+
 async function loadHealth() {
   try {
     const health = await api("/health");
@@ -267,7 +273,7 @@ async function searchSource() {
 
   const params = new URLSearchParams({ q: query });
   const payload = await api(`/sources/piratebay/search?${params}`);
-  renderList(els.sourceResults, payload.items, renderSourceResult, `Brak wyników z ${payload.title_marker}.`);
+  renderList(els.sourceResults, topSeededResults(payload.items), renderSourceResult, "Brak wyników.");
 }
 
 async function startImport(torrentId) {

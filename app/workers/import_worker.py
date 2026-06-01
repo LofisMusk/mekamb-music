@@ -138,6 +138,7 @@ async def process_job(job: ImportJob, session, storage: LibraryStorage) -> None:
 
     # Wyciągnij okładkę raz dla całego importu
     cover_key = _import_cover(audio_files, job.info_hash, storage)
+    remove_non_audio_files(quarantine_path)
 
     track_records: list[Track] = []
     for source in audio_files:
@@ -218,6 +219,17 @@ def remove_quarantine_path(quarantine_path: str) -> None:
     path = resolve_quarantine_path(quarantine_path, action="remove")
     if path.exists():
         rmtree(path)
+
+
+def remove_non_audio_files(quarantine_path: Path) -> None:
+    for path in sorted(quarantine_path.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        if path.is_file() and not is_allowed_audio_file(path):
+            path.unlink()
+        elif path.is_dir():
+            try:
+                path.rmdir()
+            except OSError:
+                pass
 
 
 def resolve_quarantine_path(quarantine_path: str, *, action: str = "use") -> Path:

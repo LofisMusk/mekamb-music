@@ -42,7 +42,7 @@ async def search_personal_1337x(
 
 
 @router.get("/piratebay/search", response_model=SourcePirateBaySearchResponse)
-async def search_piratebay_pmedia(
+async def search_piratebay(
     q: str = Query(min_length=1, max_length=120),
     provider: PirateBayProvider = Depends(piratebay_provider),
 ) -> SourcePirateBaySearchResponse:
@@ -53,5 +53,4 @@ async def search_piratebay_pmedia(
 
     return SourcePirateBaySearchResponse(
         items=[item.to_dict() for item in results],
-        title_marker=provider.title_marker,
     )

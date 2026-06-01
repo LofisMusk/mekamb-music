@@ -24,7 +24,7 @@ from app.api.schemas import (
 from app.core.config import settings
 from app.db.models import LikedTrack, PlaylistTrack, Track, TrackPlay, utcnow
 from app.db.session import AsyncSessionLocal
-from app.library.audio import extract_embedded_artwork
+from app.library.audio import extract_embedded_artwork, media_type_for_audio_file
 from app.library.queries import (
     build_album_list_query,
     build_artist_list_query,
@@ -475,7 +475,10 @@ async def _resolve_stream_target(
     if not path.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audio file not found.")
 
-    return track, path, track.media_type or "application/octet-stream", path.stat().st_size
+    media_type = track.media_type
+    if not media_type or media_type == "application/octet-stream":
+        media_type = media_type_for_audio_file(path)
+    return track, path, media_type, path.stat().st_size
 
 
 def _stream_headers(*, track: Track, content_length: int) -> dict[str, str]:

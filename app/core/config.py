@@ -16,7 +16,6 @@ class Settings(BaseSettings):
     personal_1337x_base_url: str = "https://1337x.to"
     personal_1337x_max_pages: int = 1
     piratebay_api_base_url: str = "https://apibay.org"
-    piratebay_title_marker: str = "[PMEDIA]"
     piratebay_category: int = 100
 
     database_url: str = "postgresql+asyncpg://music:music@localhost:5432/music"

@@ -105,8 +105,7 @@ Pass `Authorization: Bearer <API_TOKEN>` to every non-health endpoint.
   `CLEANUP_QUARANTINE_AFTER_IMPORT=false` if you want to inspect downloaded files.
 - Original files are preserved; FLAC/ALAC stay lossless and MP3 stays MP3.
 - The v1 1337x API surface intentionally has no trending/top/browse endpoints.
-- Pirate Bay imports are restricted to torrents whose title contains the
-  configured `PIRATEBAY_TITLE_MARKER`, defaulting to `[PMEDIA]`.
+- Pirate Bay imports use the configured category but do not require a title marker.
 
 ## Configuration Notes
 
@@ -119,3 +118,10 @@ Pass `Authorization: Bearer <API_TOKEN>` to every non-health endpoint.
 - `STORAGE_BACKEND=local` keeps only the streamable local cache.
 - `STORAGE_BACKEND=s3` keeps the same local cache for Range streaming and also
   mirrors imported originals into the configured S3/MinIO bucket.
+- `TORRENT_LISTEN_PORT` is used by the app, qBittorrent, and Docker's TCP/UDP
+  port mappings. On a Linux server, also open this port for both TCP and UDP in
+  the host firewall and any VPS/cloud security group; otherwise torrents may stay
+  stalled even when the WebUI works.
+- The API, worker, and qBittorrent containers share the quarantine volume as
+  UID/GID `1000`. The `volume-init` service fixes named-volume ownership before
+  the app starts so qBittorrent can write into per-import download directories.

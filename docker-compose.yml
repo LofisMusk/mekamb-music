@@ -1,8 +1,11 @@
 services:
   api:
     build: .
+    user: "1000:1000"
     env_file: .env
     depends_on:
+      volume-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -29,8 +32,11 @@ services:
 
   worker:
     build: .
+    user: "1000:1000"
     env_file: .env
     depends_on:
+      volume-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -42,6 +48,13 @@ services:
       qbittorrent:
         condition: service_started
     command: ["python", "-m", "app.workers.import_worker"]
+    volumes:
+      - quarantine:/data/quarantine
+      - library:/data/library
+
+  volume-init:
+    image: alpine:3.20
+    command: ["sh", "-c", "chown -R 1000:1000 /data/quarantine /data/library"]
     volumes:
       - quarantine:/data/quarantine
       - library:/data/library
@@ -106,10 +119,11 @@ services:
       PGID: 1000
       TZ: Europe/Warsaw
       WEBUI_PORT: 8080
+      TORRENTING_PORT: ${TORRENT_LISTEN_PORT:-6881}
     ports:
       - "8080:8080"
-      - "6881:6881"
-      - "6881:6881/udp"
+      - "${TORRENT_LISTEN_PORT:-6881}:${TORRENT_LISTEN_PORT:-6881}"
+      - "${TORRENT_LISTEN_PORT:-6881}:${TORRENT_LISTEN_PORT:-6881}/udp"
     volumes:
       - qbittorrent-config:/config
       - quarantine:/downloads/incomplete

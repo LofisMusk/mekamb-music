@@ -195,6 +195,8 @@ async def test_qbittorrent_enqueue_sends_magnet_to_quarantine_path():
             assert "magnet%3A%3Fxt%3Durn%3Abtih%3AABC123" in body
             assert "%2Fdownloads%2Fincomplete%2Fimport-id" in body
             assert "mekamb-music%3Aimport-id" in body
+            assert "ratioLimit=0" in body
+            assert "seedingTimeLimit=0" in body
             return httpx.Response(200, text="Ok.")
         return httpx.Response(404)
 

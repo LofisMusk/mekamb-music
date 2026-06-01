@@ -3,10 +3,16 @@ from uuid import uuid4
 
 import pytest
 
+from app.core.config import settings
 from app.db.models import ImportJob, Track
 from app.downloads.domain import TorrentRuntimeStatus
 from app.storage.local import LocalStorage
 from app.workers.import_worker import process_downloaded_job_safely, process_job
+
+
+@pytest.fixture(autouse=True)
+def quarantine_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(settings, "quarantine_root", tmp_path / "quarantine")
 
 
 class FakeSession:
@@ -79,6 +85,8 @@ async def test_worker_imports_only_audio_files_from_quarantine(tmp_path: Path):
     assert session.added[0].original_filename == "track.mp3"
     assert not any(path.name == "notes.txt" for path in library.rglob("*"))
     assert list(library.rglob("*.mp3"))
+    assert not (quarantine / "notes.txt").exists()
+    assert (quarantine / "track.mp3").exists()
 
 
 @pytest.mark.asyncio

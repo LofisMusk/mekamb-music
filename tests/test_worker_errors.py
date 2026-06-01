@@ -1,7 +1,13 @@
 import pytest
 
+from app.core.config import settings
 from app.db.models import ImportJob
 from app.workers.import_worker import process_job_safely
+
+
+@pytest.fixture(autouse=True)
+def quarantine_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "quarantine_root", tmp_path / "quarantine")
 
 
 class FakeSession:
@@ -35,8 +41,8 @@ class FailingSecondStorage:
 
 @pytest.mark.asyncio
 async def test_worker_marks_job_failed_when_storage_fails(tmp_path):
-    quarantine = tmp_path / "quarantine"
-    quarantine.mkdir()
+    quarantine = tmp_path / "quarantine" / "import-1"
+    quarantine.mkdir(parents=True)
     (quarantine / "track.mp3").write_bytes(b"fake audio")
     job = ImportJob(
         torrent_id="1",
@@ -56,8 +62,8 @@ async def test_worker_marks_job_failed_when_storage_fails(tmp_path):
 
 @pytest.mark.asyncio
 async def test_worker_does_not_add_partial_track_records_when_later_file_fails(tmp_path):
-    quarantine = tmp_path / "quarantine"
-    quarantine.mkdir()
+    quarantine = tmp_path / "quarantine" / "import-1"
+    quarantine.mkdir(parents=True)
     (quarantine / "01-track.mp3").write_bytes(b"first audio")
     (quarantine / "02-track.mp3").write_bytes(b"second audio")
     job = ImportJob(

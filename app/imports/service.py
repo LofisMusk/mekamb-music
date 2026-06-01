@@ -117,7 +117,7 @@ class ImportService:
         return await self._create_torrent_import(candidate, source="personal_1337x")
 
     async def create_piratebay_import(self, candidate: PirateBayImportCandidate) -> ImportRecord:
-        return await self._create_torrent_import(candidate, source="piratebay_pmedia")
+        return await self._create_torrent_import(candidate, source="piratebay")
 
     async def _create_torrent_import(
         self,

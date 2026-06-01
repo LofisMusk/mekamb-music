@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.library.audio import is_allowed_audio_file, scan_audio_file
+from app.library.audio import is_allowed_audio_file, media_type_for_audio_file, scan_audio_file
 
 
 class AudioTests(unittest.TestCase):
@@ -27,7 +27,10 @@ class AudioTests(unittest.TestCase):
             self.assertEqual(metadata.codec, "mp3")
             self.assertEqual(metadata.size_bytes, 4)
 
+    def test_media_type_uses_audio_extension_map(self):
+        self.assertEqual(media_type_for_audio_file(Path("track.flac")), "audio/flac")
+        self.assertEqual(media_type_for_audio_file(Path("track.mp3")), "audio/mpeg")
+
 
 if __name__ == "__main__":
     unittest.main()
-

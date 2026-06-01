@@ -28,7 +28,6 @@ from app.sources.personal_1337x import (
     ProviderDisabledError,
 )
 from app.sources.piratebay import (
-    PirateBayMarkerMismatch,
     PirateBayMissingMetadata,
     PirateBayProvider,
     PirateBaySourceError,
@@ -89,7 +88,7 @@ async def import_personal_1337x(
     status_code=status.HTTP_202_ACCEPTED,
     response_model=ImportRecordResponse,
 )
-async def import_piratebay_pmedia(
+async def import_piratebay(
     torrent_id: str,
     provider: PirateBayProvider = Depends(piratebay_provider),
     service: ImportService = Depends(import_service),
@@ -97,8 +96,6 @@ async def import_piratebay_pmedia(
     try:
         candidate = await provider.resolve_for_import(torrent_id)
         record = await service.create_piratebay_import(candidate)
-    except PirateBayMarkerMismatch as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except (PirateBayMissingMetadata, InvalidImportCandidate, SandboxViolation) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PirateBaySourceError as exc:
