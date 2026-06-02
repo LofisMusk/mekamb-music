@@ -13,14 +13,6 @@ from urllib.request import Request, urlopen
 logger = logging.getLogger(__name__)
 
 
-class ProviderDisabledError(RuntimeError):
-    pass
-
-
-class OwnershipMismatch(RuntimeError):
-    pass
-
-
 class MissingTorrentMetadata(RuntimeError):
     pass
 
@@ -109,14 +101,12 @@ class Personal1337xProvider:
     def __init__(
         self,
         *,
-        uploader: str | None,
         base_url: str = "https://1337x.to",
         max_pages: int = 1,
         client: Py1337xLike | None = None,
         category: str | None = None,
         search_cache_ttl: int = 300,
     ) -> None:
-        self.uploader = uploader.strip() if uploader else ""
         self.base_url = base_url.rstrip("/")
         self.max_pages = max(1, max_pages)
         self._client = client
@@ -126,15 +116,10 @@ class Personal1337xProvider:
     @classmethod
     def from_settings(cls, settings: object) -> "Personal1337xProvider":
         return cls(
-            uploader=getattr(settings, "personal_1337x_uploader", None),
             base_url=getattr(settings, "personal_1337x_base_url", "https://1337x.to"),
             max_pages=getattr(settings, "personal_1337x_max_pages", 1),
             search_cache_ttl=getattr(settings, "search_cache_ttl_seconds", 300),
         )
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.uploader)
 
     @property
     def client(self) -> Py1337xLike:
@@ -150,12 +135,11 @@ class Personal1337xProvider:
         sort_by: str | None = None,
         redis=None,
     ) -> list[Personal1337xSearchResult]:
-        self._ensure_enabled()
         if page > self.max_pages:
             return []
 
         # Redis cache
-        cache_key = f"1337x:search:{self.uploader}:{query}:{page}:{sort_by or 'seeders'}"
+        cache_key = f"1337x:search:{query}:{page}:{sort_by or 'seeders'}"
         if redis is not None:
             try:
                 cached = await redis.get(cache_key)
@@ -176,11 +160,9 @@ class Personal1337xProvider:
         )
 
         now = datetime.now(UTC)
-        filtered: list[Personal1337xSearchResult] = []
+        results: list[Personal1337xSearchResult] = []
         for item in getattr(result, "items", []):
-            if not self._is_owned_by_configured_uploader(item):
-                continue
-            filtered.append(
+            results.append(
                 Personal1337xSearchResult(
                     name=_get_attr(item, "name"),
                     torrent_id=_get_attr(item, "torrent_id"),
@@ -195,32 +177,24 @@ class Personal1337xProvider:
                 )
             )
 
-        if not filtered and not getattr(result, "items", []):
+        if not results and not getattr(result, "items", []):
             await asyncio.to_thread(self._raise_if_search_is_blocked, query)
 
-        if redis is not None and filtered:
+        if redis is not None and results:
             try:
-                await redis.setex(cache_key, self._search_cache_ttl, _serialize_results(filtered))
+                await redis.setex(cache_key, self._search_cache_ttl, _serialize_results(results))
                 logger.debug("Search cache set: %s (TTL=%ds)", cache_key, self._search_cache_ttl)
             except Exception as exc:
                 logger.warning("Redis set failed (ignored): %s", exc)
 
-        return filtered
-
+        return results
 
     async def resolve_for_import(self, torrent_id: str) -> Personal1337xImportCandidate:
-        self._ensure_enabled()
         torrent_id = torrent_id.strip()
         if not torrent_id:
             raise MissingTorrentMetadata("Missing torrent id.")
 
         info = await asyncio.to_thread(self.client.info, torrent_id=torrent_id)
-        if not self._is_owned_by_configured_uploader(info):
-            actual = _get_attr(info, "uploader", "<missing>")
-            raise OwnershipMismatch(
-                f"Torrent uploader {actual!r} does not match configured uploader {self.uploader!r}."
-            )
-
         magnet_link = _get_attr(info, "magnet_link")
         info_hash = _get_attr(info, "info_hash")
         if not magnet_link:
@@ -237,15 +211,6 @@ class Personal1337xProvider:
             name=_get_attr(info, "name") or None,
             fetched_at=datetime.now(UTC),
         )
-
-    def _ensure_enabled(self) -> None:
-        if not self.enabled:
-            raise ProviderDisabledError(
-                "personal_1337x provider is disabled because PERSONAL_1337X_UPLOADER is not set."
-            )
-
-    def _is_owned_by_configured_uploader(self, item: object) -> bool:
-        return _get_attr(item, "uploader") == self.uploader
 
     def _raise_if_search_is_blocked(self, query: str) -> None:
         url = f"{self.base_url}/search/{quote(query)}/1/"

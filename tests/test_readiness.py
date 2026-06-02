@@ -10,13 +10,11 @@ class SettingsLike:
         self,
         *,
         api_token: str,
-        personal_1337x_uploader: str | None,
         quarantine_root: Path,
         library_root: Path,
         storage_backend: str = "local",
     ):
         self.api_token = api_token
-        self.personal_1337x_uploader = personal_1337x_uploader
         self.quarantine_root = quarantine_root
         self.library_root = library_root
         self.storage_backend = storage_backend
@@ -40,7 +38,6 @@ async def test_collect_readiness_returns_ready_when_all_checks_pass(tmp_path: Pa
     payload = await collect_readiness(
         SettingsLike(
             api_token="secret",
-            personal_1337x_uploader="mekamb",
             quarantine_root=quarantine,
             library_root=library,
         ),
@@ -59,7 +56,6 @@ async def test_collect_readiness_reports_configuration_and_database_errors(tmp_p
     payload = await collect_readiness(
         SettingsLike(
             api_token="",
-            personal_1337x_uploader=None,
             quarantine_root=quarantine,
             library_root=library,
             storage_backend="ftp",
@@ -70,9 +66,7 @@ async def test_collect_readiness_reports_configuration_and_database_errors(tmp_p
     assert payload["status"] == "not_ready"
     checks = {check["name"]: check for check in payload["checks"]}
     assert checks["api_token"]["status"] == "error"
-    assert checks["personal_1337x_uploader"]["status"] == "error"
     assert checks["storage_backend"]["status"] == "error"
     assert checks["quarantine_root"]["status"] == "error"
     assert checks["library_root"]["status"] == "error"
     assert checks["database"]["detail"] == "database unavailable"
-

@@ -23,9 +23,7 @@ from app.imports.service import (
 from app.library.queries import build_track_list_query
 from app.sources.personal_1337x import (
     MissingTorrentMetadata,
-    OwnershipMismatch,
     Personal1337xProvider,
-    ProviderDisabledError,
 )
 from app.sources.piratebay import (
     PirateBayMissingMetadata,
@@ -65,13 +63,6 @@ async def import_personal_1337x(
     try:
         candidate = await provider.resolve_for_import(torrent_id)
         record = await service.create_1337x_import(candidate)
-    except ProviderDisabledError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        ) from exc
-    except OwnershipMismatch as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except (MissingTorrentMetadata, InvalidImportCandidate, SandboxViolation) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (HTTPError, QBittorrentError) as exc:

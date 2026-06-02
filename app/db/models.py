@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.imports.domain import ImportStatus
@@ -117,6 +117,36 @@ class TrackPlay(Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     track_id: Mapped[UUID] = mapped_column(ForeignKey("tracks.id"), nullable=False, index=True)
     played_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class PlaybackState(Base):
+    __tablename__ = "playback_states"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default="default")
+    current_track_id: Mapped[UUID | None] = mapped_column(ForeignKey("tracks.id"), index=True)
+    position_seconds: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    is_playing: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    repeat_mode: Mapped[str] = mapped_column(String(32), default="off", nullable=False)
+    shuffle: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    active_device_id: Mapped[str | None] = mapped_column(String(255))
+    active_device_name: Mapped[str | None] = mapped_column(String(255))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class PlaybackQueueItem(Base):
+    __tablename__ = "playback_queue_items"
+    __table_args__ = (UniqueConstraint("state_id", "position", name="uq_playback_queue_position"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    state_id: Mapped[str] = mapped_column(
+        ForeignKey("playback_states.id"),
+        default="default",
+        nullable=False,
+        index=True,
+    )
+    track_id: Mapped[UUID] = mapped_column(ForeignKey("tracks.id"), nullable=False, index=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Playlist(Base):

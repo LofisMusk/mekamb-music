@@ -8,8 +8,6 @@ from app.sources.personal_1337x import Personal1337xSearchResult
 
 
 class FakeProvider:
-    uploader = "mekamb"
-
     async def search(self, q: str, *, page: int = 1, sort_by: str | None = None, redis=None):
         assert q == "ambient"
         assert page == 1
@@ -30,7 +28,7 @@ class FakeProvider:
         ]
 
 
-def test_search_endpoint_returns_filtered_provider_results():
+def test_search_endpoint_returns_provider_results():
     app.dependency_overrides[require_token] = lambda: None
     app.dependency_overrides[personal_1337x_provider] = lambda: FakeProvider()
     try:
@@ -40,5 +38,4 @@ def test_search_endpoint_returns_filtered_provider_results():
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["filtered_by_uploader"] == "mekamb"
     assert [item["torrent_id"] for item in payload["items"]] == ["1"]

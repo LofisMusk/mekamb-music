@@ -19,7 +19,6 @@ async def collect_readiness(
 ) -> dict[str, object]:
     checks = [
         _check_api_token(settings),
-        _check_personal_1337x_uploader(settings),
         _check_storage_backend(settings),
         _check_sandbox_paths(settings),
         _check_directory("quarantine_root", getattr(settings, "quarantine_root")),
@@ -36,12 +35,6 @@ def _check_api_token(settings: object) -> dict[str, str]:
     if getattr(settings, "api_token", ""):
         return _ok("api_token")
     return _error("api_token", "API_TOKEN is not configured.")
-
-
-def _check_personal_1337x_uploader(settings: object) -> dict[str, str]:
-    if getattr(settings, "personal_1337x_uploader", None):
-        return _ok("personal_1337x_uploader")
-    return _error("personal_1337x_uploader", "PERSONAL_1337X_UPLOADER is not configured.")
 
 
 def _check_storage_backend(settings: object) -> dict[str, str]:

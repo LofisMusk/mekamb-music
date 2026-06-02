@@ -64,8 +64,8 @@ def build_artist_list_query(*, q: str | None, limit: int, offset: int):
 
 
 def build_album_list_query(*, q: str | None, limit: int, offset: int):
-    artist_name = func.coalesce(Track.artist, "Unknown Artist").label("artist")
     album_title = func.coalesce(Track.album, "Unknown Album").label("title")
+    artist_name = func.min(func.coalesce(Track.artist, "Unknown Artist")).label("artist")
     normalized_query = q.strip() if q else ""
     statement = (
         select(
@@ -74,8 +74,8 @@ def build_album_list_query(*, q: str | None, limit: int, offset: int):
             func.count(Track.id).label("track_count"),
             func.max(Track.created_at).label("latest_track_at"),
         )
-        .group_by(album_title, artist_name)
-        .order_by(artist_name.asc(), album_title.asc())
+        .group_by(album_title)
+        .order_by(album_title.asc())
         .limit(limit)
         .offset(offset)
     )

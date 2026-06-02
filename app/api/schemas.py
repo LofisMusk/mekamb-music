@@ -55,7 +55,6 @@ class Source1337xItem(BaseModel):
 
 class Source1337xSearchResponse(BaseModel):
     items: list[Source1337xItem]
-    filtered_by_uploader: str
 
 
 class SourcePirateBayItem(BaseModel):
@@ -156,6 +155,43 @@ class PlaybackEventResponse(BaseModel):
 
 class PlaybackEventListResponse(PageBase):
     items: list[PlaybackEventResponse]
+
+
+class PlaybackQueueItemResponse(BaseModel):
+    position: int
+    added_at: datetime
+    track: TrackResponse
+
+
+class PlaybackStateResponse(BaseModel):
+    current_track: TrackResponse | None
+    position_seconds: float
+    is_playing: bool
+    repeat_mode: str
+    shuffle: bool
+    active_device_id: str | None
+    active_device_name: str | None
+    queue: list[PlaybackQueueItemResponse]
+    updated_at: datetime | None
+
+
+class PlaybackStateUpdateRequest(BaseModel):
+    current_track_id: UUID | None = None
+    position_seconds: float = Field(default=0.0, ge=0.0)
+    is_playing: bool = False
+    repeat_mode: str = Field(default="off", pattern="^(off|track|queue)$")
+    shuffle: bool = False
+    active_device_id: str | None = Field(default=None, max_length=255)
+    active_device_name: str | None = Field(default=None, max_length=255)
+    queue_track_ids: list[UUID] = Field(default_factory=list, max_length=500)
+
+    @field_validator("active_device_id", "active_device_name")
+    @classmethod
+    def normalize_optional_device_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        return text or None
 
 
 class TrackStatsResponse(BaseModel):

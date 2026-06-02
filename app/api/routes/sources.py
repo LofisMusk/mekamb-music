@@ -7,7 +7,6 @@ from app.imports.queue import RedisImportQueue
 from app.core.config import settings
 from app.sources.personal_1337x import (
     Personal1337xProvider,
-    ProviderDisabledError,
     SourceBlockedError,
 )
 from app.sources.piratebay import PirateBayProvider, PirateBaySourceError
@@ -30,14 +29,11 @@ async def search_personal_1337x(
     redis = await _get_redis()
     try:
         results = await provider.search(q, page=page, sort_by=sort_by, redis=redis)
-    except ProviderDisabledError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     except SourceBlockedError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     return Source1337xSearchResponse(
         items=[item.to_dict() for item in results],
-        filtered_by_uploader=provider.uploader,
     )
 
 

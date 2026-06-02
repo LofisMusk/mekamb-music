@@ -3,7 +3,6 @@ from dataclasses import dataclass
 
 from app.sources.personal_1337x import (
     MissingTorrentMetadata,
-    OwnershipMismatch,
     Personal1337xProvider,
 )
 
@@ -45,7 +44,7 @@ class FakeClient:
 
 
 class Personal1337xProviderTests(unittest.IsolatedAsyncioTestCase):
-    async def test_search_returns_only_configured_uploader(self):
+    async def test_search_returns_all_music_results(self):
         client = FakeClient(
             [
                 FakeItem("mine", "1", "mekamb"),
@@ -53,30 +52,29 @@ class Personal1337xProviderTests(unittest.IsolatedAsyncioTestCase):
             ],
             FakeItem("mine", "1", "mekamb"),
         )
-        provider = Personal1337xProvider(uploader="mekamb", client=client)
+        provider = Personal1337xProvider(client=client)
 
         results = await provider.search("ambient")
 
-        self.assertEqual([item.torrent_id for item in results], ["1"])
+        self.assertEqual([item.torrent_id for item in results], ["1", "2"])
         self.assertEqual(client.search_kwargs["category"].lower(), "music")
 
-    async def test_import_rechecks_info_uploader(self):
+    async def test_import_accepts_any_uploader(self):
         client = FakeClient([], FakeItem("not mine", "1", "other"))
-        provider = Personal1337xProvider(uploader="mekamb", client=client)
+        provider = Personal1337xProvider(client=client)
 
-        with self.assertRaises(OwnershipMismatch):
-            await provider.resolve_for_import("1")
+        candidate = await provider.resolve_for_import("1")
+
+        self.assertEqual(candidate.uploader, "other")
 
     async def test_import_rejects_missing_magnet_or_hash(self):
         provider = Personal1337xProvider(
-            uploader="mekamb",
             client=FakeClient([], FakeItem("mine", "1", "mekamb", magnet_link="", info_hash="ABC")),
         )
         with self.assertRaises(MissingTorrentMetadata):
             await provider.resolve_for_import("1")
 
         provider = Personal1337xProvider(
-            uploader="mekamb",
             client=FakeClient([], FakeItem("mine", "1", "mekamb", magnet_link="magnet:", info_hash="")),
         )
         with self.assertRaises(MissingTorrentMetadata):

@@ -1,16 +1,14 @@
 # Mekamb Music Backend
 
-Private FastAPI backend for a Spotify-like music library. The `personal_1337x`
-provider is intentionally narrow: it searches 1337x Music results with
-`py1337x`, but only returns/imports torrents whose uploader exactly matches
-`PERSONAL_1337X_UPLOADER`.
+Private FastAPI backend for a Spotify-like music library. It searches music
+torrents from 1337x with `py1337x` and Pirate Bay through the configured API,
+then imports completed audio files into a persistent local library.
 
 ## Local Setup
 
 1. Copy `.env.example` to `.env`.
 2. Set `API_TOKEN` to a long random secret.
-3. Set `PERSONAL_1337X_UPLOADER` to your exact 1337x uploader name.
-4. Start the stack:
+3. Start the stack:
 
 ```bash
 docker compose up --build
@@ -19,6 +17,43 @@ docker compose up --build
 The API listens on `http://localhost:8000`.
 Open `http://localhost:8000/` for a very small browser frontend that uses the
 same API token and calls the backend directly.
+
+## Desktop App
+
+The desktop app is a client only. It ships the web player UI locally, connects
+to one of your remote API endpoints, and forwards system media keys to the
+player:
+
+- play / pause
+- next track
+- previous track
+- stop, when the keyboard or desktop environment exposes it
+
+Run it locally:
+
+```bash
+npm install
+npm run desktop
+```
+
+You can enter API endpoints in the app, one per line. The first reachable
+endpoint wins, so you can put a cloud URL and a home-server URL in priority
+order. You can also prefill them at launch:
+
+```bash
+MEKAMB_MUSIC_URLS="https://music.example.com,http://home-server:8000" npm run desktop
+```
+
+Build desktop packages:
+
+```bash
+npm run desktop:dist:mac
+npm run desktop:dist:linux
+```
+
+On macOS, media keys may require allowing the app in System Settings when the
+system asks for keyboard/accessibility permissions. On Linux, global media-key
+support depends on the desktop environment and window manager.
 
 Compose waits for Postgres and Redis healthchecks before starting the app.
 MinIO readiness is handled by `minio-init`, which waits for MinIO and creates
@@ -75,6 +110,9 @@ python -m app.api.openapi_export openapi.json
 - `GET /tracks/{id}/artwork`
 - `HEAD /tracks/{id}/stream`
 - `GET /tracks/{id}/stream`
+- `GET /playback/state`
+- `PUT /playback/state`
+- `DELETE /playback/state`
 - `GET /playlists?limit=50&offset=0`
 - `POST /playlists`
 - `GET /playlists/{id}`
@@ -86,11 +124,15 @@ python -m app.api.openapi_export openapi.json
 
 Pass `Authorization: Bearer <API_TOKEN>` to every non-health endpoint.
 
+`/playback/state` stores the cross-session player snapshot for the private user:
+current track, playback position, playing/paused state, repeat/shuffle, active
+device, and the upcoming queue. A frontend should `GET` it on startup and `PUT`
+it whenever the current track, queue, or progress changes.
+
 ## Safety Model
 
-- The 1337x provider is disabled unless `PERSONAL_1337X_UPLOADER` is set.
-- Search results are filtered by exact uploader match.
-- Import resolves the torrent with `info()` and verifies the uploader again.
+- 1337x searches are limited to Music category results and sorted by seeders by default.
+- Import resolves the torrent with `info()` before enqueueing it.
 - qBittorrent only receives the quarantine volume, never the library volume.
 - The worker waits until qBittorrent reports the torrent as complete, then imports
   only allowed audio extensions from quarantine.

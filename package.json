@@ -1,0 +1,43 @@
+{
+  "name": "mekamb-music-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop shell for Mekamb Music.",
+  "main": "desktop/main.js",
+  "scripts": {
+    "desktop": "electron .",
+    "desktop:dist": "electron-builder",
+    "desktop:dist:linux": "electron-builder --linux AppImage deb",
+    "desktop:dist:mac": "electron-builder --mac dmg zip"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "pl.mekamb.music",
+    "productName": "Mekamb Music",
+    "directories": {
+      "output": "dist-desktop"
+    },
+    "files": [
+      "desktop/**/*",
+      "app/web/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.music",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "linux": {
+      "category": "Audio;Music;Player",
+      "target": [
+        "AppImage",
+        "deb"
+      ]
+    }
+  }
+}

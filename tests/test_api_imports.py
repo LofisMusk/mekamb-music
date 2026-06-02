@@ -8,7 +8,6 @@ from app.imports.domain import ImportRecord
 from app.main import app
 from app.sources.personal_1337x import (
     MissingTorrentMetadata,
-    OwnershipMismatch,
     Personal1337xImportCandidate,
 )
 
@@ -24,11 +23,6 @@ class SuccessProvider:
             name="mine",
             fetched_at=datetime.now(UTC),
         )
-
-
-class OwnershipMismatchProvider:
-    async def resolve_for_import(self, torrent_id: str):
-        raise OwnershipMismatch("Torrent uploader 'other' does not match configured uploader 'mekamb'.")
 
 
 class MissingMetadataProvider:
@@ -127,16 +121,6 @@ def test_import_endpoint_queues_verified_personal_torrent():
     assert payload["torrent_id"] == "123"
     assert payload["uploader"] == "mekamb"
     assert payload["status"] == "queued"
-
-
-def test_import_endpoint_rejects_non_matching_uploader():
-    try:
-        response = _client(OwnershipMismatchProvider()).post("/imports/1337x/123")
-    finally:
-        app.dependency_overrides.clear()
-
-    assert response.status_code == 403
-    assert "does not match" in response.json()["detail"]
 
 
 def test_import_endpoint_rejects_missing_torrent_metadata():

@@ -40,6 +40,7 @@ from app.library.streaming import (
 )
 from app.storage.library import build_library_storage
 from app.workers.cache_cleanup import get_cache_stats, run_cleanup_once
+from app.api.routes.playback import clear_deleted_track_from_playback
 
 router = APIRouter(dependencies=[Depends(require_token)])
 
@@ -297,6 +298,7 @@ async def delete_track(
     await session.execute(delete(PlaylistTrack).where(PlaylistTrack.track_id == track_id))
     await session.execute(delete(LikedTrack).where(LikedTrack.track_id == track_id))
     await session.execute(delete(TrackPlay).where(TrackPlay.track_id == track_id))
+    await clear_deleted_track_from_playback(session, track_id)
     await session.delete(track)
     await session.commit()
 

@@ -12,7 +12,6 @@ class Settings(BaseSettings):
     environment: str = "local"
     api_token: str = Field(default="")
 
-    personal_1337x_uploader: str | None = None
     personal_1337x_base_url: str = "https://1337x.to"
     personal_1337x_max_pages: int = 1
     piratebay_api_base_url: str = "https://apibay.org"
@@ -46,11 +45,6 @@ class Settings(BaseSettings):
 
     # ── Redis search cache ───────────────────────────────────────────────────
     search_cache_ttl_seconds: int = 300
-
-    @property
-    def personal_1337x_enabled(self) -> bool:
-        return bool(self.personal_1337x_uploader and self.personal_1337x_uploader.strip())
-
 
 @lru_cache
 def get_settings() -> Settings:
