@@ -313,7 +313,8 @@ async def get_track_artwork(
     # Najpierw spróbuj cover_key z library storage (szybciej)
     if track.cover_key:
         try:
-            cover_path = resolve_library_file(settings.library_root, track.cover_key)
+            storage = build_library_storage(settings)
+            cover_path = resolve_library_file(storage.local_cache.root, track.cover_key)
             if cover_path.is_file():
                 import mimetypes
                 mime = mimetypes.guess_type(cover_path.name)[0] or "image/jpeg"

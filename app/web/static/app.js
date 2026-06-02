@@ -2,6 +2,7 @@ const state = {
   token: localStorage.getItem("mekambMusicToken") || "",
   currentView: "tracks",
   currentAudioUrl: null,
+  artworkUrls: new Set(),
   importsTimer: null,
   visibleTracks: [],
   queue: [],
@@ -141,6 +142,30 @@ function renderList(element, items, renderer, emptyText) {
   items.forEach((item) => element.appendChild(renderer(item)));
 }
 
+function placeholderArtwork() {
+  return "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
+}
+
+function clearArtworkUrls() {
+  state.artworkUrls.forEach((url) => URL.revokeObjectURL(url));
+  state.artworkUrls.clear();
+}
+
+async function loadArtwork(img, trackId) {
+  try {
+    const response = await fetch(`/tracks/${encodeURIComponent(trackId)}/artwork`, {
+      headers: authHeaders(),
+    });
+    if (!response.ok) throw new Error("Artwork not found.");
+    const url = URL.createObjectURL(await response.blob());
+    state.artworkUrls.add(url);
+    img.src = url;
+  } catch {
+    img.classList.add("missing");
+    img.src = placeholderArtwork();
+  }
+}
+
 function renderAlbum(group) {
   const item = document.createElement("article");
   item.className = "album-item";
@@ -149,11 +174,8 @@ function renderAlbum(group) {
   cover.className = "album-cover";
   cover.alt = "";
   cover.loading = "lazy";
-  cover.src = `/tracks/${group.tracks[0].id}/artwork`;
-  cover.addEventListener("error", () => {
-    cover.classList.add("missing");
-    cover.src = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
-  });
+  cover.src = placeholderArtwork();
+  loadArtwork(cover, group.tracks[0].id);
 
   const text = document.createElement("div");
   const title = document.createElement("p");
@@ -325,6 +347,7 @@ async function loadSummary() {
 }
 
 async function loadTracks() {
+  clearArtworkUrls();
   const query = els.trackQuery.value.trim();
   let payload;
   if (state.currentView === "liked") {
