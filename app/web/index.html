@@ -9,6 +9,7 @@
   <body>
     <main class="shell">
       <aside class="sidebar">
+        <div id="sidebarResizer" class="sidebar-resizer" aria-hidden="true"></div>
         <div class="brand-block">
           <div>
             <p class="eyebrow">Mekamb Music</p>
@@ -56,6 +57,7 @@
 
       <section class="main-area">
         <header class="topbar">
+          <button id="sidebarToggle" class="quiet icon-only" type="button" aria-label="Pokaż lub schowaj sidebar"></button>
           <form id="trackSearchForm" class="global-search">
             <input id="trackQuery" type="search" placeholder="Szukaj utworów, artystów, albumów..." />
             <button type="submit">Szukaj</button>
@@ -83,23 +85,21 @@
             <p id="nowMeta">Odtwarzacz załaduje plik przez API z tokenem.</p>
           </div>
         </div>
-        <div class="player-controls">
-          <div class="transport">
-            <button id="prevTrack" class="quiet" type="button">Poprzedni</button>
-            <button id="playPause" class="primary" type="button">Play</button>
-            <button id="shuffleToggle" class="quiet" type="button">Shuffle</button>
-            <button id="loopToggle" class="quiet" type="button">Loop</button>
-            <button id="nextTrack" class="quiet" type="button">Następny</button>
-          </div>
-          <div class="custom-player">
-            <span id="currentTime">0:00</span>
-            <input id="seekBar" class="seek" type="range" min="0" max="1000" value="0" aria-label="Pozycja utworu" />
-            <span id="durationTime">0:00</span>
-            <button id="muteToggle" class="quiet" type="button">Wycisz</button>
-            <input id="volumeBar" class="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Głośność" />
-          </div>
-          <audio id="audio" preload="none"></audio>
+        <div class="custom-player">
+          <span id="currentTime">0:00</span>
+          <input id="seekBar" class="seek" type="range" min="0" max="1000" value="0" aria-label="Pozycja utworu" />
+          <span id="durationTime">0:00</span>
         </div>
+        <div class="transport">
+          <button id="shuffleToggle" class="quiet icon-only" type="button" aria-label="Shuffle"></button>
+          <button id="prevTrack" class="quiet icon-only" type="button" aria-label="Poprzedni"></button>
+          <button id="playPause" class="primary icon-only" type="button" aria-label="Odtwórz"></button>
+          <button id="nextTrack" class="quiet icon-only" type="button" aria-label="Następny"></button>
+          <button id="loopToggle" class="quiet icon-only" type="button" aria-label="Loop"></button>
+          <button id="muteToggle" class="quiet icon-only" type="button" aria-label="Wycisz"></button>
+          <input id="volumeBar" class="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Głośność" />
+        </div>
+        <audio id="audio" preload="none"></audio>
       </section>
     </main>
     <script src="static/app.js" defer></script>

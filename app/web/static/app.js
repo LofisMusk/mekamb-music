@@ -3,16 +3,22 @@ const state = {
   apiEndpoints: readApiEndpoints(),
   apiBase: normalizeEndpoint(localStorage.getItem("mekambMusicApiBase") || ""),
   currentPage: "home",
+  searchQuery: "",
   currentAudioUrl: null,
+  currentTrack: null,
   artworkUrls: new Set(),
   importsTimer: null,
+  searchTimer: null,
+  saveTimer: null,
   visibleTracks: [],
   currentAlbums: [],
-  expandedAlbumKey: "",
   queue: [],
   queueIndex: -1,
-  shuffle: false,
-  loop: "off",
+  shuffle: localStorage.getItem("mekambShuffle") === "true",
+  loop: localStorage.getItem("mekambLoopMode") || "off",
+  sidebarCollapsed: localStorage.getItem("mekambSidebarCollapsed") === "true",
+  restoredTrackId: "",
+  restoredPosition: 0,
 };
 
 const queueStatuses = ["queued", "downloading", "ready_to_import", "failed"];
@@ -22,6 +28,8 @@ const els = {
   apiEndpointsInput: document.querySelector("#apiEndpointsInput"),
   apiBaseStatus: document.querySelector("#apiBaseStatus"),
   tokenInput: document.querySelector("#tokenInput"),
+  sidebarToggle: document.querySelector("#sidebarToggle"),
+  sidebarResizer: document.querySelector("#sidebarResizer"),
   trackSearchForm: document.querySelector("#trackSearchForm"),
   trackQuery: document.querySelector("#trackQuery"),
   tracksList: document.querySelector("#tracksList"),
@@ -50,6 +58,79 @@ const els = {
 
 els.tokenInput.value = state.token;
 els.apiEndpointsInput.value = state.apiEndpoints.join("\n");
+
+const iconPaths = {
+  menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+  play: '<path d="M8 5v14l11-7z"/>',
+  pause: '<path d="M7 5h4v14H7zM13 5h4v14h-4z"/>',
+  previous: '<path d="M6 5h2v14H6zM19 6v12L9 12z"/>',
+  next: '<path d="M16 5h2v14h-2zM5 6v12l10-6z"/>',
+  shuffle: '<path d="M16 3h5v5M4 7h3c2.2 0 3.6 1 5.1 3.1M21 3l-6.8 6.8M16 21h5v-5M4 17h3c2.2 0 3.6-1 5.1-3.1M21 21l-6.8-6.8"/>',
+  loop: '<path d="M17 2l4 4-4 4M3 11V9a4 4 0 0 1 4-4h14M7 22l-4-4 4-4M21 13v2a4 4 0 0 1-4 4H3"/>',
+  volume: '<path d="M4 9v6h4l5 4V5L8 9zM17 9.5a4 4 0 0 1 0 5M19.5 7a7.5 7.5 0 0 1 0 10"/>',
+  muted: '<path d="M4 9v6h4l5 4V5L8 9zM18 9l4 4M22 9l-4 4"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  heart: '<path d="M20.8 5.6a5.2 5.2 0 0 0-7.4 0L12 7l-1.4-1.4a5.2 5.2 0 0 0-7.4 7.4L12 21l8.8-8a5.2 5.2 0 0 0 0-7.4z"/>',
+  back: '<path d="M19 12H5M12 19l-7-7 7-7"/>',
+  search: '<path d="M10.5 18a7.5 7.5 0 1 1 5.3-2.2L21 21"/>',
+};
+
+function svgIcon(name) {
+  return `<svg class="symbol" viewBox="0 0 24 24" aria-hidden="true">${iconPaths[name] || ""}</svg>`;
+}
+
+function setButtonIcon(button, name, label) {
+  button.innerHTML = svgIcon(name);
+  button.title = label;
+  button.ariaLabel = label;
+}
+
+function hydrateStaticIcons() {
+  setButtonIcon(els.sidebarToggle, "menu", state.sidebarCollapsed ? "Pokaż sidebar" : "Schowaj sidebar");
+  setButtonIcon(els.prevTrack, "previous", "Poprzedni");
+  setButtonIcon(els.nextTrack, "next", "Następny");
+  setButtonIcon(els.shuffleToggle, "shuffle", "Shuffle");
+  setButtonIcon(els.loopToggle, "loop", "Loop");
+  updateTransport();
+  updateVolumeControls();
+}
+
+function applySidebarState() {
+  document.body.classList.toggle("sidebar-collapsed", state.sidebarCollapsed);
+  localStorage.setItem("mekambSidebarCollapsed", String(state.sidebarCollapsed));
+  setButtonIcon(els.sidebarToggle, "menu", state.sidebarCollapsed ? "Pokaż sidebar" : "Schowaj sidebar");
+}
+
+function restoreSidebarWidth() {
+  const savedWidth = Number(localStorage.getItem("mekambSidebarWidth") || "0");
+  if (savedWidth > 180) {
+    document.documentElement.style.setProperty("--sidebar-width", `${savedWidth}px`);
+  }
+}
+
+function setupSidebarResize() {
+  restoreSidebarWidth();
+  applySidebarState();
+  els.sidebarResizer.addEventListener("pointerdown", (event) => {
+    if (state.sidebarCollapsed) return;
+    event.preventDefault();
+    document.body.classList.add("resizing-sidebar");
+    const startX = event.clientX;
+    const currentWidth = document.querySelector(".sidebar").getBoundingClientRect().width;
+    const onMove = (moveEvent) => {
+      const nextWidth = Math.max(190, Math.min(420, currentWidth + moveEvent.clientX - startX));
+      document.documentElement.style.setProperty("--sidebar-width", `${nextWidth}px`);
+      localStorage.setItem("mekambSidebarWidth", String(Math.round(nextWidth)));
+    };
+    const onUp = () => {
+      document.body.classList.remove("resizing-sidebar");
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  });
+}
 
 function normalizeEndpoint(endpoint) {
   return (endpoint || "").trim().replace(/\/+$/, "");
@@ -255,6 +336,44 @@ function trackMeta(track) {
   return `${artist} • ${album} • ${formatDuration(track.duration_seconds)} • ${formatBytes(track.size_bytes)}`;
 }
 
+function readPlaybackState() {
+  try {
+    return JSON.parse(localStorage.getItem("mekambPlaybackState") || "null") || {};
+  } catch {
+    return {};
+  }
+}
+
+function savePlaybackState() {
+  const track = state.currentTrack || state.queue[state.queueIndex];
+  if (!track) return;
+  const position = Number.isFinite(els.audio.currentTime) && els.audio.currentTime > 0
+    ? els.audio.currentTime
+    : state.restoredPosition;
+  localStorage.setItem("mekambPlaybackState", JSON.stringify({
+    trackId: track.id,
+    position,
+    queueIds: state.queue.map((item) => item.id),
+    queueIndex: Math.max(0, state.queueIndex),
+    shuffle: state.shuffle,
+    loop: state.loop,
+    volume: els.audio.volume,
+    muted: els.audio.muted,
+    updatedAt: Date.now(),
+  }));
+  localStorage.setItem("mekambContinueAlbumKey", albumKey(track));
+  localStorage.setItem("mekambShuffle", String(state.shuffle));
+  localStorage.setItem("mekambLoopMode", state.loop);
+}
+
+function schedulePlaybackSave() {
+  if (state.saveTimer) return;
+  state.saveTimer = window.setTimeout(() => {
+    state.saveTimer = null;
+    savePlaybackState();
+  }, 800);
+}
+
 function normalizeAlbumName(album) {
   return (album || "Nieznany album")
     .toLowerCase()
@@ -382,9 +501,7 @@ function renderAlbumCard(group) {
   const play = document.createElement("button");
   play.className = "icon album-play";
   play.type = "button";
-  play.title = "Odtwórz album";
-  play.ariaLabel = "Odtwórz album";
-  play.textContent = "Play";
+  setButtonIcon(play, "play", "Odtwórz album");
   play.addEventListener("click", (event) => runAction(async () => {
     event.stopPropagation();
     state.queue = [...group.tracks];
@@ -434,9 +551,7 @@ function renderAlbumDetail(group) {
   const play = document.createElement("button");
   play.className = "icon";
   play.type = "button";
-  play.title = "Odtwórz album";
-  play.ariaLabel = "Odtwórz album";
-  play.textContent = "Play";
+  setButtonIcon(play, "play", "Odtwórz album");
   play.addEventListener("click", () => runAction(async () => {
     state.queue = [...group.tracks];
     state.queueIndex = 0;
@@ -494,17 +609,13 @@ function renderTrack(track) {
   const play = document.createElement("button");
   play.className = "icon";
   play.type = "button";
-  play.title = "Odtwórz";
-  play.ariaLabel = "Odtwórz";
-  play.textContent = "Play";
+  setButtonIcon(play, "play", "Odtwórz");
   play.addEventListener("click", () => runAction(() => playFromVisibleQueue(track.id)));
 
   const add = document.createElement("button");
   add.className = "icon quiet";
   add.type = "button";
-  add.title = "Dodaj do kolejki";
-  add.ariaLabel = "Dodaj do kolejki";
-  add.textContent = "Dodaj";
+  setButtonIcon(add, "plus", "Dodaj do kolejki");
   add.addEventListener("click", () => {
     addToQueue(track);
     setMessage("Dodano do kolejki.");
@@ -513,9 +624,7 @@ function renderTrack(track) {
   const like = document.createElement("button");
   like.className = "icon quiet";
   like.type = "button";
-  like.title = "Polub";
-  like.ariaLabel = "Polub";
-  like.textContent = "Polub";
+  setButtonIcon(like, "heart", "Polub");
   like.addEventListener("click", () => runAction(() => likeTrack(track.id)));
 
   actions.append(play, add, like);
@@ -622,9 +731,49 @@ async function fetchTracks({ q = "", limit = 200 } = {}) {
   return payload.items;
 }
 
+async function findTracksForRestore(playbackState) {
+  const tracks = await fetchTracks({ limit: 600 });
+  const byId = new Map(tracks.map((track) => [track.id, track]));
+  const queue = (playbackState.queueIds || [])
+    .map((id) => byId.get(id))
+    .filter(Boolean);
+  const track = byId.get(playbackState.trackId) || queue[playbackState.queueIndex || 0] || null;
+  if (track && !queue.some((item) => item.id === track.id)) queue.push(track);
+  return { track, queue };
+}
+
+async function restorePlaybackState() {
+  const playbackState = readPlaybackState();
+  if (!playbackState.trackId || !state.token) return;
+  const { track, queue } = await findTracksForRestore(playbackState);
+  if (!track) return;
+
+  state.queue = queue;
+  const restoredIndex = queue.findIndex((item) => item.id === track.id);
+  state.queueIndex = restoredIndex >= 0
+    ? restoredIndex
+    : Math.min(Number(playbackState.queueIndex || 0), Math.max(0, queue.length - 1));
+  state.currentTrack = track;
+  state.restoredTrackId = track.id;
+  state.restoredPosition = Number(playbackState.position || 0);
+  state.shuffle = Boolean(playbackState.shuffle);
+  state.loop = playbackState.loop || "off";
+  els.audio.volume = typeof playbackState.volume === "number" ? playbackState.volume : els.audio.volume;
+  els.audio.muted = Boolean(playbackState.muted);
+  els.nowTitle.textContent = track.title;
+  els.nowMeta.textContent = trackMeta(track);
+  updateTransport();
+  els.currentTime.textContent = formatClock(state.restoredPosition);
+  els.durationTime.textContent = formatClock(track.duration_seconds);
+  els.seekBar.value = track.duration_seconds
+    ? String(Math.round((state.restoredPosition / track.duration_seconds) * 1000))
+    : "0";
+  updateVolumeControls();
+}
+
 async function renderHome() {
   clearArtworkUrls();
-  const query = els.trackQuery.value.trim();
+  const query = state.searchQuery;
   const [tracks, recentPayload] = await Promise.all([
     fetchTracks({ q: query, limit: 200 }),
     api("/tracks/recent?limit=24").catch(() => ({ items: [] })),
@@ -685,13 +834,9 @@ function renderWideAlbumCard(group) {
 
 async function loadTracks() {
   if (state.currentPage === "home") return renderHome();
-  if (state.currentPage === "import") {
-    await loadImports();
-    return 0;
-  }
 
   clearArtworkUrls();
-  const query = els.trackQuery.value.trim();
+  const query = state.searchQuery;
   if (state.currentPage === "liked") {
     setTracksListMode("tracks");
     els.pageTitle.textContent = "Polubione";
@@ -804,13 +949,17 @@ async function showTorrentSuggestions(query) {
 
 async function runGlobalSearch() {
   const query = els.trackQuery.value.trim();
+  state.searchQuery = query;
   if (query && state.currentPage !== "tracks") {
     state.currentPage = "tracks";
     els.pageTabs.forEach((item) => item.classList.toggle("active", item.dataset.page === "tracks"));
     els.libraryPanel.classList.remove("hidden");
   }
   const renderedCount = await loadTracks();
-  if (!query) return;
+  if (!query) {
+    renderList(els.sourceResults, [], renderSourceResult, "Brak sugestii.");
+    return;
+  }
 
   if (renderedCount > 0 || await libraryHasQuery(query)) {
     setMessage("Znaleziono w bibliotece.");
@@ -838,7 +987,8 @@ async function likeTrack(trackId) {
   setMessage("Utwór polubiony.");
 }
 
-async function playTrack(track) {
+async function playTrack(track, options = {}) {
+  const position = Number(options.position || 0);
   setMessage("Ładuję plik audio...");
   const response = await apiResponse(`/tracks/${track.id}/stream`);
 
@@ -848,19 +998,38 @@ async function playTrack(track) {
   const contentType = response.headers.get("Content-Type") || track.media_type || "application/octet-stream";
   const blob = new Blob([await response.arrayBuffer()], { type: contentType });
   state.currentAudioUrl = URL.createObjectURL(blob);
+  state.currentTrack = track;
+  state.restoredTrackId = "";
+  state.restoredPosition = 0;
   els.audio.src = state.currentAudioUrl;
   els.nowTitle.textContent = track.title;
   els.nowMeta.textContent = trackMeta(track);
   localStorage.setItem("mekambContinueAlbumKey", albumKey(track));
   updateMediaSession(track);
   await api(`/tracks/${track.id}/plays`, { method: "POST" });
+  if (position > 0) {
+    await new Promise((resolve) => {
+      const applyPosition = () => {
+        const duration = els.audio.duration || 0;
+        els.audio.currentTime = duration > 0 ? Math.min(position, Math.max(0, duration - 0.5)) : position;
+        resolve();
+      };
+      if (els.audio.readyState >= 1) {
+        applyPosition();
+      } else {
+        els.audio.addEventListener("loadedmetadata", applyPosition, { once: true });
+      }
+    });
+  }
   await els.audio.play();
+  savePlaybackState();
   setMessage("");
 }
 
 function addToQueue(track) {
   state.queue.push(track);
   if (state.queueIndex === -1) state.queueIndex = 0;
+  savePlaybackState();
 }
 
 function setQueueFromVisible(startTrackId) {
@@ -868,6 +1037,7 @@ function setQueueFromVisible(startTrackId) {
   const selectedIndex = tracks.findIndex((track) => track.id === startTrackId);
   state.queue = tracks;
   state.queueIndex = selectedIndex >= 0 ? selectedIndex : 0;
+  savePlaybackState();
 }
 
 function shuffled(items) {
@@ -887,7 +1057,8 @@ async function playFromVisibleQueue(trackId) {
 async function playCurrentQueueTrack() {
   const track = state.queue[state.queueIndex];
   if (!track) return;
-  await playTrack(track);
+  const position = track.id === state.restoredTrackId ? state.restoredPosition : 0;
+  await playTrack(track, { position });
 }
 
 async function togglePlayPause() {
@@ -939,6 +1110,7 @@ async function playNextTrack() {
     state.queueIndex = 0;
   } else {
     localStorage.removeItem("mekambContinueAlbumKey");
+    localStorage.removeItem("mekambPlaybackState");
     return;
   }
   await playCurrentQueueTrack();
@@ -957,8 +1129,8 @@ async function playPreviousTrack() {
 function updateTransport() {
   els.shuffleToggle.classList.toggle("active", state.shuffle);
   els.loopToggle.classList.toggle("active", state.loop !== "off");
-  els.loopToggle.textContent = state.loop === "one" ? "Loop 1" : "Loop";
-  els.playPause.textContent = els.audio.paused ? "Play" : "Pauza";
+  setButtonIcon(els.playPause, els.audio.paused ? "play" : "pause", els.audio.paused ? "Odtwórz" : "Pauza");
+  setButtonIcon(els.loopToggle, "loop", state.loop === "one" ? "Loop utworu" : "Loop kolejki");
 }
 
 function updatePlaybackState() {
@@ -979,7 +1151,7 @@ function updatePlayerProgress() {
 function updateVolumeControls() {
   els.volumeBar.value = String(els.audio.volume);
   els.volumeBar.style.setProperty("--progress", `${els.audio.volume * 100}%`);
-  els.muteToggle.textContent = els.audio.muted || els.audio.volume === 0 ? "Włącz" : "Wycisz";
+  setButtonIcon(els.muteToggle, els.audio.muted || els.audio.volume === 0 ? "muted" : "volume", "Głośność");
 }
 
 function updateMediaSession(track) {
@@ -1064,7 +1236,11 @@ function startImportsAutoRefresh() {
 }
 
 async function setPage(page) {
+  window.clearTimeout(state.searchTimer);
   state.currentPage = page;
+  state.searchQuery = "";
+  els.trackQuery.value = "";
+  renderList(els.sourceResults, [], renderSourceResult, "Brak sugestii.");
   els.pageTabs.forEach((item) => item.classList.toggle("active", item.dataset.page === page));
   els.libraryPanel.classList.remove("hidden");
   await loadTracks();
@@ -1096,12 +1272,37 @@ els.trackSearchForm.addEventListener("submit", async (event) => {
   }
 });
 
+els.trackQuery.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+    event.preventDefault();
+    els.trackQuery.select();
+  }
+});
+
+els.trackQuery.addEventListener("input", () => {
+  window.clearTimeout(state.searchTimer);
+  const query = els.trackQuery.value.trim();
+  if (!query) {
+    state.searchQuery = "";
+    renderList(els.sourceResults, [], renderSourceResult, "Brak sugestii.");
+    state.searchTimer = window.setTimeout(() => runAction(loadTracks), 120);
+    return;
+  }
+  if (query.length < 3) return;
+  state.searchTimer = window.setTimeout(() => runAction(runGlobalSearch), 650);
+});
+
 els.refreshImports.addEventListener("click", async () => {
   try {
     await loadImports();
   } catch (error) {
     setMessage(error.message, true);
   }
+});
+
+els.sidebarToggle.addEventListener("click", () => {
+  state.sidebarCollapsed = !state.sidebarCollapsed;
+  applySidebarState();
 });
 
 els.nextTrack.addEventListener("click", () => runAction(playNextTrack));
@@ -1111,9 +1312,11 @@ els.audio.addEventListener("ended", () => runAction(playNextTrack));
 els.audio.addEventListener("play", updatePlaybackState);
 els.audio.addEventListener("pause", updatePlaybackState);
 els.audio.addEventListener("timeupdate", updatePlayerProgress);
+els.audio.addEventListener("timeupdate", schedulePlaybackSave);
 els.audio.addEventListener("loadedmetadata", updatePlayerProgress);
 els.audio.addEventListener("durationchange", updatePlayerProgress);
 els.audio.addEventListener("volumechange", updateVolumeControls);
+els.audio.addEventListener("volumechange", schedulePlaybackSave);
 
 els.seekBar.addEventListener("input", () => {
   const duration = els.audio.duration || 0;
@@ -1136,12 +1339,14 @@ els.muteToggle.addEventListener("click", () => {
 els.shuffleToggle.addEventListener("click", () => {
   state.shuffle = !state.shuffle;
   updateTransport();
+  savePlaybackState();
   setMessage(state.shuffle ? "Shuffle włączony." : "Shuffle wyłączony.");
 });
 
 els.loopToggle.addEventListener("click", () => {
   state.loop = state.loop === "off" ? "all" : state.loop === "all" ? "one" : "off";
   updateTransport();
+  savePlaybackState();
   setMessage(state.loop === "off" ? "Loop wyłączony." : `Loop ${state.loop === "one" ? "utworu" : "kolejki"}.`);
 });
 
@@ -1155,10 +1360,19 @@ els.pageTabs.forEach((tab) => {
   });
 });
 
+window.addEventListener("beforeunload", savePlaybackState);
+
 async function boot() {
+  setupSidebarResize();
+  hydrateStaticIcons();
   await loadDesktopApiEndpoints();
   setApiBase(state.apiBase);
   await refreshAll();
+  try {
+    await restorePlaybackState();
+  } catch {
+    // Normal library loading will still work if the saved track no longer exists.
+  }
   startImportsAutoRefresh();
   updateTransport();
   updatePlayerProgress();
