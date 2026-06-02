@@ -9,19 +9,30 @@ class LocalStorage:
     def put_file(self, source: Path, key: str) -> Path:
         target = (self.root / key).resolve()
         root = self.root.resolve()
-        if root not in target.parents:
-            raise ValueError("Storage key escaped the library root.")
+        _validate_storage_path(root, target)
         target.parent.mkdir(parents=True, exist_ok=True)
         copy2(source, target)
         return target
 
+    def path_for(self, key: str) -> Path:
+        target = (self.root / key).resolve()
+        _validate_storage_path(self.root.resolve(), target)
+        return target
+
+    def has_file(self, key: str) -> bool:
+        return self.path_for(key).is_file()
+
     def delete_file(self, key: str) -> None:
         target = (self.root / key).resolve()
         root = self.root.resolve()
-        if root not in target.parents:
-            raise ValueError("Storage key escaped the library root.")
+        _validate_storage_path(root, target)
         target.unlink(missing_ok=True)
         _remove_empty_parents(target.parent, root)
+
+
+def _validate_storage_path(root: Path, target: Path) -> None:
+    if target == root or root not in target.parents:
+        raise ValueError("Storage key escaped the library root.")
 
 
 def _remove_empty_parents(path: Path, stop_at: Path) -> None:

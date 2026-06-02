@@ -1,12 +1,14 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import db_session, require_token
 from app.api.schemas import PlaybackStateResponse, PlaybackStateUpdateRequest
+from app.core.config import settings
 from app.db.models import PlaybackQueueItem, PlaybackState, Track, utcnow
+from app.library.prefetch import prefetch_tracks
 
 router = APIRouter(dependencies=[Depends(require_token)])
 
@@ -23,6 +25,7 @@ async def get_playback_state(
 @router.put("/state", response_model=PlaybackStateResponse)
 async def update_playback_state(
     payload: PlaybackStateUpdateRequest,
+    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(db_session),
 ) -> PlaybackStateResponse:
     await _ensure_tracks_exist(
@@ -59,6 +62,11 @@ async def update_playback_state(
         )
 
     await session.commit()
+    background_tasks.add_task(
+        prefetch_tracks,
+        payload.queue_track_ids,
+        limit=settings.playback_prefetch_count,
+    )
     return PlaybackStateResponse(**await _load_state_payload(session))
 
 

@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 
 from app.core.config import settings
 from app.db.models import Track, utcnow
@@ -74,7 +74,6 @@ async def run_cleanup_once() -> dict[str, int | float]:
                 _delete_cover_file(cover_key)
                 deleted_covers.add(cover_key)
 
-        await session.execute(delete(Track).where(Track.id.in_(list(ids_being_deleted))))
         await session.commit()
 
     freed_mb = round(freed_bytes / 1024 / 1024, 2)

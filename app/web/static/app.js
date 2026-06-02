@@ -2,11 +2,12 @@ const state = {
   token: localStorage.getItem("mekambMusicToken") || "",
   apiEndpoints: readApiEndpoints(),
   apiBase: normalizeEndpoint(localStorage.getItem("mekambMusicApiBase") || ""),
-  currentView: "tracks",
+  currentPage: "home",
   currentAudioUrl: null,
   artworkUrls: new Set(),
   importsTimer: null,
   visibleTracks: [],
+  currentAlbums: [],
   expandedAlbumKey: "",
   queue: [],
   queueIndex: -1,
@@ -21,27 +22,30 @@ const els = {
   apiEndpointsInput: document.querySelector("#apiEndpointsInput"),
   apiBaseStatus: document.querySelector("#apiBaseStatus"),
   tokenInput: document.querySelector("#tokenInput"),
-  healthStatus: document.querySelector("#healthStatus"),
-  trackCount: document.querySelector("#trackCount"),
-  artistCount: document.querySelector("#artistCount"),
-  activeImports: document.querySelector("#activeImports"),
   trackSearchForm: document.querySelector("#trackSearchForm"),
   trackQuery: document.querySelector("#trackQuery"),
   tracksList: document.querySelector("#tracksList"),
-  sourceSearchForm: document.querySelector("#sourceSearchForm"),
-  sourceQuery: document.querySelector("#sourceQuery"),
+  pageTitle: document.querySelector("#pageTitle"),
+  pageSubtitle: document.querySelector("#pageSubtitle"),
+  libraryPanel: document.querySelector("#libraryPanel"),
   sourceResults: document.querySelector("#sourceResults"),
   importsList: document.querySelector("#importsList"),
   refreshImports: document.querySelector("#refreshImports"),
   message: document.querySelector("#message"),
   audio: document.querySelector("#audio"),
+  playPause: document.querySelector("#playPause"),
   prevTrack: document.querySelector("#prevTrack"),
   nextTrack: document.querySelector("#nextTrack"),
   shuffleToggle: document.querySelector("#shuffleToggle"),
   loopToggle: document.querySelector("#loopToggle"),
+  seekBar: document.querySelector("#seekBar"),
+  currentTime: document.querySelector("#currentTime"),
+  durationTime: document.querySelector("#durationTime"),
+  muteToggle: document.querySelector("#muteToggle"),
+  volumeBar: document.querySelector("#volumeBar"),
   nowTitle: document.querySelector("#nowTitle"),
   nowMeta: document.querySelector("#nowMeta"),
-  tabs: [...document.querySelectorAll(".tab")],
+  pageTabs: [...document.querySelectorAll(".nav-tab")],
 };
 
 els.tokenInput.value = state.token;
@@ -234,6 +238,13 @@ function formatDuration(seconds) {
   return `${minutes}:${rest}`;
 }
 
+function formatClock(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "0:00";
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.floor(seconds % 60).toString().padStart(2, "0");
+  return `${minutes}:${rest}`;
+}
+
 function formatPercent(value) {
   return `${Math.round(Math.max(0, Math.min(1, value || 0)) * 100)}%`;
 }
@@ -305,7 +316,8 @@ function groupTracksByAlbum(tracks) {
   return [...groups.values()]
     .map((group) => {
       const sortedTracks = sortAlbumTracks(group.tracks);
-      return { ...group, artist: mostCommonArtist(sortedTracks), tracks: sortedTracks };
+      const latestTime = Math.max(...sortedTracks.map((track) => Date.parse(track.created_at || "") || 0));
+      return { ...group, artist: mostCommonArtist(sortedTracks), tracks: sortedTracks, latestTime };
     })
     .sort((left, right) => left.album.localeCompare(right.album, "pl"));
 }
@@ -345,11 +357,9 @@ async function loadArtwork(img, trackId) {
   }
 }
 
-function renderAlbum(group) {
-  const isExpanded = state.expandedAlbumKey === group.key;
+function renderAlbumCard(group) {
   const item = document.createElement("article");
   item.className = "album-item";
-  item.classList.toggle("expanded", isExpanded);
 
   const cover = document.createElement("img");
   cover.className = "album-cover";
@@ -365,51 +375,98 @@ function renderAlbum(group) {
   const meta = document.createElement("p");
   meta.className = "meta";
   meta.textContent = `${group.artist} • ${group.tracks.length} utw.`;
-  const trackList = document.createElement("div");
-  trackList.className = "album-tracks";
-  trackList.addEventListener("click", (event) => event.stopPropagation());
-  if (isExpanded) {
-    group.tracks.forEach((track) => trackList.appendChild(renderTrack(track)));
-    text.append(title, meta, trackList);
-  } else {
-    text.append(title, meta);
-  }
+  text.append(title, meta);
 
   const actions = document.createElement("div");
   actions.className = "actions";
-  const toggle = document.createElement("button");
-  toggle.className = "quiet";
-  toggle.type = "button";
-  toggle.textContent = isExpanded ? "Zwiń" : "Otwórz";
-  toggle.addEventListener("click", (event) => {
-    event.stopPropagation();
-    toggleAlbum(group.key);
-  });
-
   const play = document.createElement("button");
+  play.className = "icon album-play";
   play.type = "button";
-  play.textContent = "Odtwórz";
-  play.addEventListener("click", (event) => event.stopPropagation());
+  play.title = "Odtwórz album";
+  play.ariaLabel = "Odtwórz album";
+  play.textContent = "Play";
+  play.addEventListener("click", (event) => runAction(async () => {
+    event.stopPropagation();
+    state.queue = [...group.tracks];
+    state.queueIndex = 0;
+    await playCurrentQueueTrack();
+  }));
+  actions.append(play);
+
+  item.addEventListener("click", () => showAlbumDetail(group.key));
+  item.append(cover, text, actions);
+  return item;
+}
+
+function renderAlbumDetail(group) {
+  clearArtworkUrls();
+  setTracksListMode("tracks");
+  els.pageTitle.textContent = group.album;
+  els.pageSubtitle.textContent = `${group.artist} • ${group.tracks.length} utw.`;
+  els.tracksList.innerHTML = "";
+  els.tracksList.classList.remove("empty");
+
+  const detail = document.createElement("section");
+  detail.className = "album-detail";
+
+  const cover = document.createElement("img");
+  cover.className = "album-detail-cover";
+  cover.alt = "";
+  cover.src = placeholderArtwork();
+  loadArtwork(cover, group.tracks[0].id);
+
+  const info = document.createElement("div");
+  const eyebrow = document.createElement("p");
+  eyebrow.className = "eyebrow";
+  eyebrow.textContent = "Album";
+  const title = document.createElement("h2");
+  title.textContent = group.album;
+  const meta = document.createElement("p");
+  meta.className = "meta";
+  meta.textContent = `${group.artist} • ${group.tracks.length} utw.`;
+  const controls = document.createElement("div");
+  controls.className = "detail-actions";
+  const back = document.createElement("button");
+  back.className = "quiet";
+  back.type = "button";
+  back.textContent = "Wróć";
+  back.addEventListener("click", () => setPage("albums"));
+  const play = document.createElement("button");
+  play.className = "icon";
+  play.type = "button";
+  play.title = "Odtwórz album";
+  play.ariaLabel = "Odtwórz album";
+  play.textContent = "Play";
   play.addEventListener("click", () => runAction(async () => {
     state.queue = [...group.tracks];
     state.queueIndex = 0;
     await playCurrentQueueTrack();
   }));
-  actions.append(toggle, play);
+  controls.append(back, play);
+  info.append(eyebrow, title, meta, controls);
 
-  item.addEventListener("click", () => toggleAlbum(group.key));
-  item.append(cover, text, actions);
-  return item;
+  const trackList = document.createElement("div");
+  trackList.className = "album-detail-tracks";
+  group.tracks.forEach((track, index) => {
+    const row = renderTrack(track);
+    const number = document.createElement("span");
+    number.className = "track-number";
+    number.textContent = String(index + 1);
+    row.prepend(number);
+    trackList.appendChild(row);
+  });
+
+  detail.append(cover, info, trackList);
+  els.tracksList.appendChild(detail);
 }
 
-function toggleAlbum(key) {
-  state.expandedAlbumKey = state.expandedAlbumKey === key ? "" : key;
-  renderList(
-    els.tracksList,
-    groupTracksByAlbum(state.visibleTracks),
-    renderAlbum,
-    "Brak albumów dla tego wyszukiwania.",
-  );
+function showAlbumDetail(key) {
+  const group = state.currentAlbums.find((album) => album.key === key);
+  if (!group) return;
+  state.currentPage = "album";
+  els.pageTabs.forEach((item) => item.classList.remove("active"));
+  els.libraryPanel.classList.remove("hidden");
+  renderAlbumDetail(group);
 }
 
 function itemShell(title, meta) {
@@ -439,7 +496,7 @@ function renderTrack(track) {
   play.type = "button";
   play.title = "Odtwórz";
   play.ariaLabel = "Odtwórz";
-  play.textContent = "▶";
+  play.textContent = "Play";
   play.addEventListener("click", () => runAction(() => playFromVisibleQueue(track.id)));
 
   const add = document.createElement("button");
@@ -447,7 +504,7 @@ function renderTrack(track) {
   add.type = "button";
   add.title = "Dodaj do kolejki";
   add.ariaLabel = "Dodaj do kolejki";
-  add.textContent = "+";
+  add.textContent = "Dodaj";
   add.addEventListener("click", () => {
     addToQueue(track);
     setMessage("Dodano do kolejki.");
@@ -458,7 +515,7 @@ function renderTrack(track) {
   like.type = "button";
   like.title = "Polub";
   like.ariaLabel = "Polub";
-  like.textContent = "♥";
+  like.textContent = "Polub";
   like.addEventListener("click", () => runAction(() => likeTrack(track.id)));
 
   actions.append(play, add, like);
@@ -552,64 +609,112 @@ function topSeededResults(results) {
 
 async function loadHealth() {
   try {
-    const health = await api("/health");
-    els.healthStatus.textContent = health.status;
+    await api("/health");
   } catch (error) {
-    els.healthStatus.textContent = "offline";
+    throw error;
   }
 }
 
-async function loadSummary() {
-  const summary = await api("/library/summary");
-  els.trackCount.textContent = summary.track_count;
-  els.artistCount.textContent = summary.artist_count;
-  els.activeImports.textContent = summary.active_import_count;
+async function fetchTracks({ q = "", limit = 200 } = {}) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (q) params.set("q", q);
+  const payload = await api(`/tracks?${params}`);
+  return payload.items;
+}
+
+async function renderHome() {
+  clearArtworkUrls();
+  const query = els.trackQuery.value.trim();
+  const [tracks, recentPayload] = await Promise.all([
+    fetchTracks({ q: query, limit: 200 }),
+    api("/tracks/recent?limit=24").catch(() => ({ items: [] })),
+  ]);
+  state.visibleTracks = tracks;
+  state.currentAlbums = groupTracksByAlbum(tracks);
+  setTracksListMode("home");
+  els.pageTitle.textContent = query ? `Wyniki dla "${query}"` : "Start";
+  els.pageSubtitle.textContent = "Kontynuuj słuchanie i rekomendacje z biblioteki";
+  els.tracksList.innerHTML = "";
+  els.tracksList.classList.remove("empty");
+
+  const continueKey = localStorage.getItem("mekambContinueAlbumKey") || "";
+  const continueAlbum = state.currentAlbums.find((album) => album.key === continueKey);
+  if (continueAlbum) {
+    els.tracksList.appendChild(renderHomeSection("Kontynuuj słuchanie", [continueAlbum], renderWideAlbumCard));
+  }
+
+  const recentTracks = recentPayload.items.map((item) => item.track).filter(Boolean);
+  if (recentTracks.length) {
+    els.tracksList.appendChild(renderHomeSection("Ostatnio słuchane", recentTracks.slice(0, 8), renderTrack));
+  }
+
+  const recommendations = [...state.currentAlbums]
+    .sort((left, right) => right.latestTime - left.latestTime)
+    .slice(0, 10);
+  els.tracksList.appendChild(
+    renderHomeSection("Rekomendacje", recommendations, renderAlbumCard, "Brak albumów w bibliotece."),
+  );
+  return tracks.length;
+}
+
+function renderHomeSection(title, items, renderer, emptyText = "") {
+  const section = document.createElement("section");
+  section.className = "home-section";
+  const heading = document.createElement("div");
+  heading.className = "section-head";
+  const h = document.createElement("h2");
+  h.textContent = title;
+  heading.appendChild(h);
+  const content = document.createElement("div");
+  content.className = renderer === renderTrack ? "list" : "home-row";
+  if (items.length) {
+    items.forEach((item) => content.appendChild(renderer(item)));
+  } else {
+    content.classList.add("empty");
+    content.textContent = emptyText;
+  }
+  section.append(heading, content);
+  return section;
+}
+
+function renderWideAlbumCard(group) {
+  const card = renderAlbumCard(group);
+  card.classList.add("wide-album-card");
+  return card;
 }
 
 async function loadTracks() {
+  if (state.currentPage === "home") return renderHome();
+  if (state.currentPage === "import") {
+    await loadImports();
+    return 0;
+  }
+
   clearArtworkUrls();
   const query = els.trackQuery.value.trim();
-  let payload;
-  if (state.currentView === "liked") {
+  if (state.currentPage === "liked") {
     setTracksListMode("tracks");
-    payload = await api("/tracks/liked?limit=50");
+    els.pageTitle.textContent = "Polubione";
+    els.pageSubtitle.textContent = "Twoje zapisane utwory";
+    const payload = await api("/tracks/liked?limit=200");
     state.visibleTracks = payload.items.map((item) => item.track);
-    renderList(
-      els.tracksList,
-      state.visibleTracks,
-      renderTrack,
-      "Nie ma jeszcze polubionych utworów.",
-    );
-    return state.visibleTracks.length;
-  }
-  if (state.currentView === "recent") {
-    setTracksListMode("tracks");
-    payload = await api("/tracks/recent?limit=50");
-    state.visibleTracks = payload.items.map((item) => item.track);
-    renderList(
-      els.tracksList,
-      state.visibleTracks,
-      renderTrack,
-      "Nie ma jeszcze historii odtwarzania.",
-    );
+    renderList(els.tracksList, state.visibleTracks, renderTrack, "Nie ma jeszcze polubionych utworów.");
     return state.visibleTracks.length;
   }
 
-  const params = new URLSearchParams({ limit: state.currentView === "albums" ? "200" : "50" });
-  if (query) params.set("q", query);
-  payload = await api(`/tracks?${params}`);
-  state.visibleTracks = payload.items;
-  if (state.currentView === "albums") {
+  state.visibleTracks = await fetchTracks({ q: query, limit: state.currentPage === "albums" ? 300 : 100 });
+  state.currentAlbums = groupTracksByAlbum(state.visibleTracks);
+  if (state.currentPage === "albums") {
     setTracksListMode("albums");
-    renderList(
-      els.tracksList,
-      groupTracksByAlbum(state.visibleTracks),
-      renderAlbum,
-      "Brak albumów dla tego wyszukiwania.",
-    );
+    els.pageTitle.textContent = query ? `Albumy dla "${query}"` : "Albumy";
+    els.pageSubtitle.textContent = "Kliknij album, żeby otworzyć stronę albumu";
+    renderList(els.tracksList, state.currentAlbums, renderAlbumCard, "Brak albumów dla tego wyszukiwania.");
     return state.visibleTracks.length;
   }
+
   setTracksListMode("tracks");
+  els.pageTitle.textContent = query ? `Utwory dla "${query}"` : "Utwory";
+  els.pageSubtitle.textContent = "Lista utworów w bibliotece";
   renderList(
     els.tracksList,
     state.visibleTracks,
@@ -640,14 +745,6 @@ async function loadImports() {
     }),
   );
   renderList(els.importsList, downloads, renderImport, "Kolejka jest pusta.");
-}
-
-async function searchSource() {
-  const query = els.sourceQuery.value.trim();
-  if (!query) return;
-
-  const results = await searchTorrentSources(query);
-  renderList(els.sourceResults, results, renderSourceResult, "Brak wyników.");
 }
 
 async function searchTorrentSources(query) {
@@ -685,7 +782,7 @@ async function startImport(resultOrTorrentId, source = "piratebay") {
   const endpoint = importSource === "1337x" ? "1337x" : "piratebay";
   const record = await api(`/imports/${endpoint}/${encodeURIComponent(torrentId)}`, { method: "POST" });
   setMessage("Import dodany do kolejki.");
-  await Promise.allSettled([loadImports(), loadSummary()]);
+  await loadImports();
   return record;
 }
 
@@ -695,43 +792,45 @@ async function libraryHasQuery(query) {
   return payload.items.length > 0;
 }
 
-async function importFirstTorrentResult(query) {
-  setMessage("Nie ma w bibliotece. Szukam w torrentach...");
+async function showTorrentSuggestions(query) {
+  setMessage("Nie ma w bibliotece. Pokazuję sugestie torrentów.");
   const results = await searchTorrentSources(query);
   renderList(els.sourceResults, results, renderSourceResult, "Brak wyników.");
   if (!results.length) {
     setMessage("Nie ma w bibliotece i nie znalazłem wyniku w torrentach.", true);
     return;
   }
-
-  const best = results[0];
-  setMessage(`Nie ma w bibliotece. Dodaję do kolejki: ${best.name}`);
-  await startImport(best);
 }
 
 async function runGlobalSearch() {
   const query = els.trackQuery.value.trim();
+  if (query && state.currentPage !== "tracks") {
+    state.currentPage = "tracks";
+    els.pageTabs.forEach((item) => item.classList.toggle("active", item.dataset.page === "tracks"));
+    els.libraryPanel.classList.remove("hidden");
+  }
   const renderedCount = await loadTracks();
   if (!query) return;
 
   if (renderedCount > 0 || await libraryHasQuery(query)) {
     setMessage("Znaleziono w bibliotece.");
+    renderList(els.sourceResults, [], renderSourceResult, "Brak sugestii.");
     return;
   }
 
-  await importFirstTorrentResult(query);
+  await showTorrentSuggestions(query);
 }
 
 async function cancelImport(importId) {
   await api(`/imports/${encodeURIComponent(importId)}/cancel?delete_files=true`, { method: "POST" });
   setMessage("Import usunięty z kolejki.");
-  await Promise.allSettled([loadImports(), loadSummary()]);
+  await loadImports();
 }
 
 async function retryImport(importId) {
   await api(`/imports/${encodeURIComponent(importId)}/retry?delete_files=true`, { method: "POST" });
   setMessage("Import dodany ponownie.");
-  await Promise.allSettled([loadImports(), loadSummary()]);
+  await loadImports();
 }
 
 async function likeTrack(trackId) {
@@ -752,6 +851,7 @@ async function playTrack(track) {
   els.audio.src = state.currentAudioUrl;
   els.nowTitle.textContent = track.title;
   els.nowMeta.textContent = trackMeta(track);
+  localStorage.setItem("mekambContinueAlbumKey", albumKey(track));
   updateMediaSession(track);
   await api(`/tracks/${track.id}/plays`, { method: "POST" });
   await els.audio.play();
@@ -838,6 +938,7 @@ async function playNextTrack() {
   } else if (state.loop === "all") {
     state.queueIndex = 0;
   } else {
+    localStorage.removeItem("mekambContinueAlbumKey");
     return;
   }
   await playCurrentQueueTrack();
@@ -856,12 +957,29 @@ async function playPreviousTrack() {
 function updateTransport() {
   els.shuffleToggle.classList.toggle("active", state.shuffle);
   els.loopToggle.classList.toggle("active", state.loop !== "off");
-  els.loopToggle.textContent = state.loop === "one" ? "↺1" : "↻";
+  els.loopToggle.textContent = state.loop === "one" ? "Loop 1" : "Loop";
+  els.playPause.textContent = els.audio.paused ? "Play" : "Pauza";
 }
 
 function updatePlaybackState() {
+  updateTransport();
   if (!("mediaSession" in navigator)) return;
   navigator.mediaSession.playbackState = els.audio.paused ? "paused" : "playing";
+}
+
+function updatePlayerProgress() {
+  const duration = els.audio.duration || 0;
+  const current = els.audio.currentTime || 0;
+  els.currentTime.textContent = formatClock(current);
+  els.durationTime.textContent = formatClock(duration);
+  els.seekBar.value = duration ? String(Math.round((current / duration) * 1000)) : "0";
+  els.seekBar.style.setProperty("--progress", `${duration ? (current / duration) * 100 : 0}%`);
+}
+
+function updateVolumeControls() {
+  els.volumeBar.value = String(els.audio.volume);
+  els.volumeBar.style.setProperty("--progress", `${els.audio.volume * 100}%`);
+  els.muteToggle.textContent = els.audio.muted || els.audio.volume === 0 ? "Włącz" : "Wycisz";
 }
 
 function updateMediaSession(track) {
@@ -926,7 +1044,7 @@ async function refreshAll() {
   try {
     await loadHealth();
     if (!state.token) return;
-    await Promise.all([loadSummary(), loadTracks(), loadImports()]);
+    await Promise.all([loadTracks(), loadImports()]);
     setMessage("Gotowe.");
   } catch (error) {
     setMessage(error.message, true);
@@ -938,11 +1056,18 @@ function startImportsAutoRefresh() {
   state.importsTimer = window.setInterval(async () => {
     if (!state.token) return;
     try {
-      await Promise.allSettled([loadImports(), loadSummary()]);
+      await loadImports();
     } catch {
       // Manual refresh will show any persistent error.
     }
   }, 5000);
+}
+
+async function setPage(page) {
+  state.currentPage = page;
+  els.pageTabs.forEach((item) => item.classList.toggle("active", item.dataset.page === page));
+  els.libraryPanel.classList.remove("hidden");
+  await loadTracks();
 }
 
 async function runAction(action) {
@@ -971,15 +1096,6 @@ els.trackSearchForm.addEventListener("submit", async (event) => {
   }
 });
 
-els.sourceSearchForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  try {
-    await searchSource();
-  } catch (error) {
-    setMessage(error.message, true);
-  }
-});
-
 els.refreshImports.addEventListener("click", async () => {
   try {
     await loadImports();
@@ -990,9 +1106,32 @@ els.refreshImports.addEventListener("click", async () => {
 
 els.nextTrack.addEventListener("click", () => runAction(playNextTrack));
 els.prevTrack.addEventListener("click", () => runAction(playPreviousTrack));
+els.playPause.addEventListener("click", () => runAction(togglePlayPause));
 els.audio.addEventListener("ended", () => runAction(playNextTrack));
 els.audio.addEventListener("play", updatePlaybackState);
 els.audio.addEventListener("pause", updatePlaybackState);
+els.audio.addEventListener("timeupdate", updatePlayerProgress);
+els.audio.addEventListener("loadedmetadata", updatePlayerProgress);
+els.audio.addEventListener("durationchange", updatePlayerProgress);
+els.audio.addEventListener("volumechange", updateVolumeControls);
+
+els.seekBar.addEventListener("input", () => {
+  const duration = els.audio.duration || 0;
+  if (!duration) return;
+  els.audio.currentTime = (Number(els.seekBar.value) / 1000) * duration;
+  updatePlayerProgress();
+});
+
+els.volumeBar.addEventListener("input", () => {
+  els.audio.volume = Number(els.volumeBar.value);
+  els.audio.muted = els.audio.volume === 0;
+  updateVolumeControls();
+});
+
+els.muteToggle.addEventListener("click", () => {
+  els.audio.muted = !els.audio.muted;
+  updateVolumeControls();
+});
 
 els.shuffleToggle.addEventListener("click", () => {
   state.shuffle = !state.shuffle;
@@ -1006,12 +1145,10 @@ els.loopToggle.addEventListener("click", () => {
   setMessage(state.loop === "off" ? "Loop wyłączony." : `Loop ${state.loop === "one" ? "utworu" : "kolejki"}.`);
 });
 
-els.tabs.forEach((tab) => {
+els.pageTabs.forEach((tab) => {
   tab.addEventListener("click", async () => {
-    state.currentView = tab.dataset.view;
-    els.tabs.forEach((item) => item.classList.toggle("active", item === tab));
     try {
-      await loadTracks();
+      await setPage(tab.dataset.page);
     } catch (error) {
       setMessage(error.message, true);
     }
@@ -1024,6 +1161,8 @@ async function boot() {
   await refreshAll();
   startImportsAutoRefresh();
   updateTransport();
+  updatePlayerProgress();
+  updateVolumeControls();
   setupMediaSession();
   setupDesktopMediaControls();
 }

@@ -129,6 +129,12 @@ current track, playback position, playing/paused state, repeat/shuffle, active
 device, and the upcoming queue. A frontend should `GET` it on startup and `PUT`
 it whenever the current track, queue, or progress changes.
 
+When the frontend saves playback state, the backend prefetches the first
+`PLAYBACK_PREFETCH_COUNT` queued tracks into the local streaming cache. Streaming
+also refreshes the next queued tracks in the background, so skipping from the
+current song into the next album/queue item does not have to wait on remote
+storage.
+
 ## Safety Model
 
 - 1337x searches are limited to Music category results and sorted by seeders by default.

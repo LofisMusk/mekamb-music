@@ -14,6 +14,9 @@ class ObjectStorage(Protocol):
     def delete_file(self, key: str) -> None:
         ...
 
+    def get_file(self, key: str, target: Path) -> Path:
+        ...
+
 
 class LibraryStorage:
     """Writes a streamable local cache and optionally mirrors objects remotely."""
@@ -32,6 +35,14 @@ class LibraryStorage:
         if self.remote is not None:
             self.remote.delete_file(key)
         self.local_cache.delete_file(key)
+
+    def ensure_cached(self, key: str) -> Path:
+        cached_path = self.local_cache.path_for(key)
+        if cached_path.is_file():
+            return cached_path
+        if self.remote is None:
+            raise FileNotFoundError(cached_path)
+        return self.remote.get_file(key, cached_path)
 
 
 def build_library_storage(settings: object) -> LibraryStorage:

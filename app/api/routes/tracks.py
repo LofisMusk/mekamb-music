@@ -38,6 +38,7 @@ from app.library.streaming import (
     parse_range_header,
     resolve_library_file,
 )
+from app.library.prefetch import prefetch_next_queue_tracks
 from app.storage.library import build_library_storage
 from app.workers.cache_cleanup import get_cache_stats, run_cleanup_once
 from app.api.routes.playback import clear_deleted_track_from_playback
@@ -363,6 +364,7 @@ async def stream_track(
 
     # Touch last_accessed w tle — nie blokuje odpowiedzi
     background_tasks.add_task(_touch_last_accessed, track_id)
+    background_tasks.add_task(prefetch_next_queue_tracks)
 
     if range_header is None:
         return FileResponse(
@@ -471,12 +473,17 @@ async def _resolve_stream_target(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Track not found.")
 
     try:
-        path = resolve_library_file(settings.library_root, track.storage_key)
-    except InvalidLibraryPath as exc:
+        storage = build_library_storage(settings)
+        path = storage.ensure_cached(track.storage_key)
+    except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid library path.") from exc
-
-    if not path.is_file():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audio file not found.")
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audio file not found.") from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not prepare audio file for streaming: {exc}",
+        ) from exc
 
     media_type = track.media_type
     if not media_type or media_type == "application/octet-stream":

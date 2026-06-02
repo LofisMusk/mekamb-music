@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     # ── Cache TTL ────────────────────────────────────────────────────────────
     cache_ttl_days: int = 30
     cache_cleanup_interval_seconds: int = 3600
+    playback_prefetch_count: int = 2
 
     # ── Redis search cache ───────────────────────────────────────────────────
     search_cache_ttl_seconds: int = 300

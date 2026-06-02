@@ -8,19 +8,34 @@
   </head>
   <body>
     <main class="shell">
-      <header class="topbar">
+      <aside class="sidebar">
         <div class="brand-block">
-          <span class="brand-mark" aria-hidden="true">◎</span>
           <div>
             <p class="eyebrow">Mekamb Music</p>
             <h1>Biblioteka</h1>
           </div>
         </div>
-        <form id="trackSearchForm" class="global-search">
-          <span aria-hidden="true">⌕</span>
-          <input id="trackQuery" type="search" placeholder="Szukaj utworów, artystów, albumów..." />
-          <button type="submit">Szukaj</button>
-        </form>
+
+        <nav class="main-nav" aria-label="Widoki">
+          <button class="nav-tab active" type="button" data-page="home">Biblioteka</button>
+          <button class="nav-tab" type="button" data-page="albums">Albumy</button>
+          <button class="nav-tab" type="button" data-page="tracks">Utwory</button>
+          <button class="nav-tab" type="button" data-page="liked">Polubione</button>
+        </nav>
+
+        <section class="sidebar-section">
+          <h2>Sugestie torrentów</h2>
+          <div id="sourceResults" class="list compact empty">Brak sugestii.</div>
+        </section>
+
+        <section class="sidebar-section">
+          <div class="sidebar-head">
+            <h2>Kolejka importu</h2>
+            <button id="refreshImports" class="quiet small" type="button">Odśwież</button>
+          </div>
+          <div id="importsList" class="list compact empty">Brak danych.</div>
+        </section>
+
         <form id="tokenForm" class="token-form">
           <label for="apiEndpointsInput">Adresy API</label>
           <textarea
@@ -37,71 +52,31 @@
             <button type="submit">Połącz</button>
           </div>
         </form>
-      </header>
+      </aside>
 
-      <section class="status-strip" aria-live="polite">
-        <div>
-          <span class="label">Status</span>
-          <strong id="healthStatus">...</strong>
-        </div>
-        <div>
-          <span class="label">Utwory</span>
-          <strong id="trackCount">0</strong>
-        </div>
-        <div>
-          <span class="label">Artyści</span>
-          <strong id="artistCount">0</strong>
-        </div>
-        <div>
-          <span class="label">Importy aktywne</span>
-          <strong id="activeImports">0</strong>
-        </div>
-      </section>
+      <section class="main-area">
+        <header class="topbar">
+          <form id="trackSearchForm" class="global-search">
+            <input id="trackQuery" type="search" placeholder="Szukaj utworów, artystów, albumów..." />
+            <button type="submit">Szukaj</button>
+          </form>
+        </header>
 
-      <section class="grid">
-        <div class="panel">
+        <section id="libraryPanel" class="panel content-panel">
           <div class="panel-head">
             <div>
-              <h2>Utwory</h2>
-              <p class="panel-subtitle">Biblioteka, albumy i ostatnie odsłuchy</p>
-            </div>
-            <div class="tabs" role="tablist" aria-label="Widok utworów">
-              <button class="tab active" type="button" data-view="tracks">Wszystkie</button>
-              <button class="tab" type="button" data-view="albums">Albumy</button>
-              <button class="tab" type="button" data-view="liked">Polubione</button>
-              <button class="tab" type="button" data-view="recent">Ostatnie</button>
+              <h2 id="pageTitle">Start</h2>
+              <p id="pageSubtitle" class="panel-subtitle">Wracaj do albumów i odkrywaj bibliotekę</p>
             </div>
           </div>
-          <div id="tracksList" class="list empty">Podaj token i odśwież bibliotekę.</div>
-        </div>
+          <div id="tracksList" class="page-content empty">Podaj token i połącz bibliotekę.</div>
+        </section>
 
-        <aside class="stack">
-          <section class="panel">
-            <div class="panel-head">
-              <h2>Import z torrentów</h2>
-            </div>
-            <form id="sourceSearchForm" class="search-row">
-              <input id="sourceQuery" type="search" placeholder="Nazwa albumu lub artysty" />
-              <button type="submit">Szukaj</button>
-            </form>
-            <div id="sourceResults" class="list compact empty">Wpisz frazę, żeby wyszukać torrenty.</div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-head">
-              <h2>Kolejka importu</h2>
-              <button id="refreshImports" class="quiet" type="button">Odśwież</button>
-            </div>
-            <div id="importsList" class="list compact empty">Brak danych.</div>
-          </section>
-        </aside>
+        <p id="message" class="message" role="status"></p>
       </section>
-
-      <p id="message" class="message" role="status"></p>
 
       <section class="player-panel">
         <div class="now-block">
-          <span class="now-art" aria-hidden="true">♫</span>
           <div>
             <span class="label">Teraz odtwarzane</span>
             <h2 id="nowTitle">Wybierz utwór</h2>
@@ -110,12 +85,20 @@
         </div>
         <div class="player-controls">
           <div class="transport">
-            <button id="prevTrack" class="icon quiet" type="button" title="Poprzedni" aria-label="Poprzedni">⏮</button>
-            <button id="shuffleToggle" class="icon quiet" type="button" title="Shuffle" aria-label="Shuffle">⇄</button>
-            <button id="loopToggle" class="icon quiet" type="button" title="Loop" aria-label="Loop">↻</button>
-            <button id="nextTrack" class="icon quiet" type="button" title="Następny" aria-label="Następny">⏭</button>
+            <button id="prevTrack" class="quiet" type="button">Poprzedni</button>
+            <button id="playPause" class="primary" type="button">Play</button>
+            <button id="shuffleToggle" class="quiet" type="button">Shuffle</button>
+            <button id="loopToggle" class="quiet" type="button">Loop</button>
+            <button id="nextTrack" class="quiet" type="button">Następny</button>
           </div>
-          <audio id="audio" controls preload="none"></audio>
+          <div class="custom-player">
+            <span id="currentTime">0:00</span>
+            <input id="seekBar" class="seek" type="range" min="0" max="1000" value="0" aria-label="Pozycja utworu" />
+            <span id="durationTime">0:00</span>
+            <button id="muteToggle" class="quiet" type="button">Wycisz</button>
+            <input id="volumeBar" class="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Głośność" />
+          </div>
+          <audio id="audio" preload="none"></audio>
         </div>
       </section>
     </main>

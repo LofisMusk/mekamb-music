@@ -36,5 +36,10 @@ class S3Storage:
         self.client.upload_file(str(source), self.bucket, key)
         return key
 
+    def get_file(self, key: str, target: Path) -> Path:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self.client.download_file(self.bucket, key, str(target))
+        return target
+
     def delete_file(self, key: str) -> None:
         self.client.delete_object(Bucket=self.bucket, Key=key)
