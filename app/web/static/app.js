@@ -109,6 +109,28 @@ function trackMeta(track) {
   return `${artist} • ${album} • ${formatDuration(track.duration_seconds)} • ${formatBytes(track.size_bytes)}`;
 }
 
+function albumKey(track) {
+  return `${track.artist || "Nieznany artysta"}\u0000${track.album || "Nieznany album"}`;
+}
+
+function groupTracksByAlbum(tracks) {
+  const groups = new Map();
+  tracks.forEach((track) => {
+    const key = albumKey(track);
+    if (!groups.has(key)) {
+      groups.set(key, {
+        artist: track.artist || "Nieznany artysta",
+        album: track.album || "Nieznany album",
+        tracks: [],
+      });
+    }
+    groups.get(key).tracks.push(track);
+  });
+  return [...groups.values()].sort((left, right) => (
+    `${left.artist} ${left.album}`.localeCompare(`${right.artist} ${right.album}`, "pl")
+  ));
+}
+
 function renderList(element, items, renderer, emptyText) {
   element.innerHTML = "";
   element.classList.toggle("empty", items.length === 0);
@@ -117,6 +139,48 @@ function renderList(element, items, renderer, emptyText) {
     return;
   }
   items.forEach((item) => element.appendChild(renderer(item)));
+}
+
+function renderAlbum(group) {
+  const item = document.createElement("article");
+  item.className = "album-item";
+
+  const cover = document.createElement("img");
+  cover.className = "album-cover";
+  cover.alt = "";
+  cover.loading = "lazy";
+  cover.src = `/tracks/${group.tracks[0].id}/artwork`;
+  cover.addEventListener("error", () => {
+    cover.classList.add("missing");
+    cover.src = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
+  });
+
+  const text = document.createElement("div");
+  const title = document.createElement("p");
+  title.className = "title";
+  title.textContent = group.album;
+  const meta = document.createElement("p");
+  meta.className = "meta";
+  meta.textContent = `${group.artist} • ${group.tracks.length} utw.`;
+  const trackList = document.createElement("div");
+  trackList.className = "album-tracks";
+  group.tracks.forEach((track) => trackList.appendChild(renderTrack(track)));
+  text.append(title, meta, trackList);
+
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const play = document.createElement("button");
+  play.type = "button";
+  play.textContent = "Odtwórz";
+  play.addEventListener("click", () => runAction(async () => {
+    state.queue = [...group.tracks];
+    state.queueIndex = 0;
+    await playCurrentQueueTrack();
+  }));
+  actions.appendChild(play);
+
+  item.append(cover, text, actions);
+  return item;
 }
 
 function itemShell(title, meta) {
@@ -290,7 +354,21 @@ async function loadTracks() {
   if (query) params.set("q", query);
   payload = await api(`/tracks?${params}`);
   state.visibleTracks = payload.items;
-  renderList(els.tracksList, state.visibleTracks, renderTrack, "Brak utworów dla tego wyszukiwania.");
+  if (state.currentView === "albums") {
+    renderList(
+      els.tracksList,
+      groupTracksByAlbum(state.visibleTracks),
+      renderAlbum,
+      "Brak albumów dla tego wyszukiwania.",
+    );
+    return;
+  }
+  renderList(
+    els.tracksList,
+    state.visibleTracks,
+    renderTrack,
+    "Brak utworów dla tego wyszukiwania.",
+  );
 }
 
 async function loadImports() {

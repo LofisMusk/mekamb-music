@@ -29,11 +29,11 @@ MEDIA_TYPES_BY_EXTENSION = {
 }
 
 _COVER_FILENAMES = [
-    "cover.jpg", "cover.jpeg", "cover.png",
-    "folder.jpg", "folder.png",
-    "front.jpg", "front.png",
-    "artwork.jpg", "artwork.png",
-    "albumart.jpg", "albumart.png",
+    "cover.jpg", "cover.jpeg", "cover.png", "cover.webp",
+    "folder.jpg", "folder.jpeg", "folder.png", "folder.webp",
+    "front.jpg", "front.jpeg", "front.png", "front.webp",
+    "artwork.jpg", "artwork.jpeg", "artwork.png", "artwork.webp",
+    "albumart.jpg", "albumart.jpeg", "albumart.png", "albumart.webp",
 ]
 
 
@@ -102,6 +102,27 @@ def media_type_for_audio_file(path: Path) -> str:
     )
 
 
+def is_cover_image_file(path: Path) -> bool:
+    return path.is_file() and path.name.lower() in _COVER_FILENAMES
+
+
+def cover_media_type(path: Path) -> str:
+    return mimetypes.guess_type(path.name)[0] or "image/jpeg"
+
+
+def find_cover_image(root: Path) -> Path | None:
+    direct_matches = [root / name for name in _COVER_FILENAMES]
+    for candidate in direct_matches:
+        if candidate.is_file():
+            return candidate
+
+    matches = sorted(
+        (path for path in root.rglob("*") if is_cover_image_file(path)),
+        key=lambda path: (len(path.relative_to(root).parts), path.as_posix().lower()),
+    )
+    return matches[0] if matches else None
+
+
 def extract_cover(audio_path: Path) -> tuple[bytes, str] | None:
     """
     Wyciągnij okładkę z pliku audio lub pliku graficznego w tym samym folderze.
@@ -112,8 +133,7 @@ def extract_cover(audio_path: Path) -> tuple[bytes, str] | None:
     for name in _COVER_FILENAMES:
         candidate = audio_path.parent / name
         if candidate.is_file():
-            mime = "image/png" if candidate.suffix.lower() == ".png" else "image/jpeg"
-            return candidate.read_bytes(), mime
+            return candidate.read_bytes(), cover_media_type(candidate)
 
     # 2. Embedded artwork przez istniejącą logikę
     artwork = extract_embedded_artwork(audio_path)

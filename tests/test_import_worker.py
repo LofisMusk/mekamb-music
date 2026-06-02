@@ -90,6 +90,32 @@ async def test_worker_imports_only_audio_files_from_quarantine(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_worker_uses_downloaded_cover_file_for_import_thumbnail(tmp_path: Path):
+    quarantine = tmp_path / "quarantine" / "import-1"
+    library = tmp_path / "library"
+    quarantine.mkdir(parents=True)
+    (quarantine / "track.mp3").write_bytes(b"fake mp3 bytes")
+    (quarantine / "cover.jpg").write_bytes(b"cover bytes")
+
+    job = ImportJob(
+        torrent_id="1",
+        info_hash="ABC123",
+        magnet_link="magnet:?xt=urn:btih:ABC123",
+        uploader="mekamb",
+        source_url="https://1337x.to/torrent/1/mine/",
+        status="queued",
+        quarantine_path=str(quarantine),
+    )
+    session = FakeSession()
+
+    await process_job(job, session, LocalStorage(library))
+
+    assert job.status == "imported"
+    assert session.added[0].cover_key == "abc123/cover.jpg"
+    assert (library / "abc123" / "cover.jpg").read_bytes() == b"cover bytes"
+
+
+@pytest.mark.asyncio
 async def test_worker_does_not_import_until_torrent_is_complete(tmp_path: Path):
     quarantine = tmp_path / "quarantine" / "import-1"
     library = tmp_path / "library"

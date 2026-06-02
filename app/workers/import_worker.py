@@ -16,7 +16,12 @@ from app.db.session import AsyncSessionLocal, init_db
 from app.downloads.qbittorrent import QBittorrentDownloader
 from app.imports.domain import ImportStatus
 from app.imports.queue import RedisImportQueue
-from app.library.audio import extract_cover, is_allowed_audio_file, scan_audio_file
+from app.library.audio import (
+    extract_cover,
+    find_cover_image,
+    is_allowed_audio_file,
+    scan_audio_file,
+)
 from app.storage.library import LibraryStorage, build_library_storage
 
 logger = logging.getLogger(__name__)
@@ -137,7 +142,7 @@ async def process_job(job: ImportJob, session, storage: LibraryStorage) -> None:
         )
 
     # Wyciągnij okładkę raz dla całego importu
-    cover_key = _import_cover(audio_files, job.info_hash, storage)
+    cover_key = _import_cover(quarantine_path, audio_files, job.info_hash, storage)
     remove_non_audio_files(quarantine_path)
 
     track_records: list[Track] = []
@@ -168,7 +173,19 @@ async def process_job(job: ImportJob, session, storage: LibraryStorage) -> None:
     job.updated_at = utcnow()
 
 
-def _import_cover(audio_files: list[Path], info_hash: str, storage: LibraryStorage) -> str | None:
+def _import_cover(
+    quarantine_path: Path,
+    audio_files: list[Path],
+    info_hash: str,
+    storage: LibraryStorage,
+) -> str | None:
+    cover_file = find_cover_image(quarantine_path)
+    if cover_file is not None:
+        ext = cover_file.suffix.lower() or ".jpg"
+        cover_key = f"{info_hash.lower()}/cover{ext}"
+        storage.put_file(cover_file, cover_key)
+        return cover_key
+
     """Wyciągnij okładkę z pierwszego pliku który ją ma, zapisz w library."""
     for path in audio_files:
         result = extract_cover(path)

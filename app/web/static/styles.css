@@ -257,6 +257,42 @@ audio {
   padding: 10px;
 }
 
+.album-item {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.album-cover {
+  width: 88px;
+  aspect-ratio: 1;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background:
+    linear-gradient(135deg, rgba(29, 185, 145, 0.22), rgba(255, 255, 255, 0.04)),
+    var(--panel-soft);
+  object-fit: cover;
+}
+
+.album-cover.missing {
+  display: block;
+}
+
+.album-tracks {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.album-tracks .item {
+  min-height: 46px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
 .import-item {
   align-items: start;
 }
@@ -364,8 +400,14 @@ audio {
 @media (max-width: 520px) {
   .token-row,
   .search-row,
-  .item {
+  .item,
+  .album-item {
     grid-template-columns: 1fr;
+  }
+
+  .album-cover {
+    width: 100%;
+    max-width: 160px;
   }
 
   .actions {
