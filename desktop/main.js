@@ -3,7 +3,7 @@
 const { app, BrowserWindow, globalShortcut, ipcMain, Menu, shell } = require("electron");
 const path = require("node:path");
 
-const CLIENT_ENTRY = path.join(__dirname, "..", "app", "web", "index.html");
+const CLIENT_ENTRY = path.join(__dirname, "..", "client-dist", "index.html");
 const configuredApiEndpoints = (process.env.MEKAMB_MUSIC_URLS || process.env.MEKAMB_MUSIC_URL || "")
   .split(/[,\n]/)
   .map((url) => url.trim())

@@ -55,6 +55,26 @@ On macOS, media keys may require allowing the app in System Settings when the
 system asks for keyboard/accessibility permissions. On Linux, global media-key
 support depends on the desktop environment and window manager.
 
+## iOS App
+
+The iOS app is also a client only. It uses Capacitor to package the same
+React/Vite player UI and points it at the same external API endpoints.
+Capacitor native HTTP is enabled so the iOS WebView can call your backend
+without depending on browser CORS behavior.
+
+After installing npm dependencies:
+
+```bash
+npm run ios:add
+npm run ios:open
+```
+
+For later frontend changes:
+
+```bash
+npm run ios:sync
+```
+
 Compose waits for Postgres and Redis healthchecks before starting the app.
 MinIO readiness is handled by `minio-init`, which waits for MinIO and creates
 the configured bucket before API/worker containers continue.
@@ -95,6 +115,12 @@ python -m app.api.openapi_export openapi.json
 - `POST /imports/{id}/retry?delete_files=true`
 - `GET /downloads/{id}`
 - `GET /library/summary`
+- `GET /sync/actions?since=...&include_applied=true&limit=200`
+- `POST /sync/actions`
+- `POST /sync/apply`
+- `POST /sync/actions/{id}/apply`
+- `GET /sync/imports/{info_hash}/tracks`
+- `GET /sync/tracks/{track_id}/file`
 - `GET /tracks?q=...&artist=...&album=...&source_import_id=...&limit=50&offset=0`
 - `GET /tracks/liked?limit=50&offset=0`
 - `GET /tracks/recent?limit=50&offset=0`
@@ -123,6 +149,24 @@ python -m app.api.openapi_export openapi.json
 - `DELETE /playlists/{id}/tracks/{track_id}`
 
 Pass `Authorization: Bearer <API_TOKEN>` to every non-health endpoint.
+
+## Instance Sync
+
+Set `INSTANCE_ID` differently for each running backend, for example `local-mac`,
+`home-server`, or `cloud`. The backend records user actions in `user_actions`:
+torrent imports, likes/unlikes, and track deletions.
+
+Other instances can pull `GET /sync/actions`, push missing items with
+`POST /sync/actions`, then run `POST /sync/apply`. Imported torrent actions carry
+`source`, `torrent_id`, `info_hash`, `magnet_link`, `uploader`, and `source_url`,
+so a second instance can reproduce the import through the same sandboxed torrent
+flow. The recorded sync strategy is `peer_copy`, `remote_storage`, then `magnet`;
+v1 records the strategy and exposes peer-copy helper endpoints:
+`GET /sync/imports/{info_hash}/tracks` returns the tracks that came from a
+completed import on this instance, and `GET /sync/tracks/{track_id}/file`
+downloads a cached/restored audio file from that peer. The automatic peer client
+can use those endpoints first and fall back to the saved magnet link when no peer
+has the album.
 
 `/playback/state` stores the cross-session player snapshot for the private user:
 current track, playback position, playing/paused state, repeat/shuffle, active

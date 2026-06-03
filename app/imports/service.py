@@ -45,6 +45,14 @@ class NoopImportEventPublisher:
         return None
 
 
+class TorrentImportCandidate(Protocol):
+    torrent_id: str
+    info_hash: str
+    magnet_link: str
+    uploader: str
+    source_url: str
+
+
 @dataclass(frozen=True)
 class QuarantinePlan:
     import_id: UUID
@@ -119,9 +127,17 @@ class ImportService:
     async def create_piratebay_import(self, candidate: PirateBayImportCandidate) -> ImportRecord:
         return await self._create_torrent_import(candidate, source="piratebay")
 
+    async def create_synced_torrent_import(
+        self,
+        candidate: TorrentImportCandidate,
+        *,
+        source: str,
+    ) -> ImportRecord:
+        return await self._create_torrent_import(candidate, source=source)
+
     async def _create_torrent_import(
         self,
-        candidate: Personal1337xImportCandidate | PirateBayImportCandidate,
+        candidate: TorrentImportCandidate,
         *,
         source: str,
     ) -> ImportRecord:

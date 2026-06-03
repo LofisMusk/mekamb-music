@@ -3,10 +3,12 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv/
+.vite-temp/
 .env
 .DS_Store
 node_modules/
 dist/
+client-dist/
 dist-desktop/
 build/
 data/

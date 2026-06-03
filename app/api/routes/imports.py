@@ -30,6 +30,7 @@ from app.sources.piratebay import (
     PirateBayProvider,
     PirateBaySourceError,
 )
+from app.sync.actions import IMPORT_TORRENT, import_action_payload, record_user_action
 
 router = APIRouter(dependencies=[Depends(require_token)])
 
@@ -59,10 +60,12 @@ async def import_personal_1337x(
     torrent_id: str,
     provider: Personal1337xProvider = Depends(personal_1337x_provider),
     service: ImportService = Depends(import_service),
+    session: AsyncSession = Depends(db_session),
 ) -> ImportRecordResponse:
     try:
         candidate = await provider.resolve_for_import(torrent_id)
         record = await service.create_1337x_import(candidate)
+        await _record_import_action(session, record)
     except (MissingTorrentMetadata, InvalidImportCandidate, SandboxViolation) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (HTTPError, QBittorrentError) as exc:
@@ -83,10 +86,12 @@ async def import_piratebay(
     torrent_id: str,
     provider: PirateBayProvider = Depends(piratebay_provider),
     service: ImportService = Depends(import_service),
+    session: AsyncSession = Depends(db_session),
 ) -> ImportRecordResponse:
     try:
         candidate = await provider.resolve_for_import(torrent_id)
         record = await service.create_piratebay_import(candidate)
+        await _record_import_action(session, record)
     except (PirateBayMissingMetadata, InvalidImportCandidate, SandboxViolation) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PirateBaySourceError as exc:
@@ -98,6 +103,16 @@ async def import_piratebay(
         ) from exc
 
     return ImportRecordResponse(**record.to_dict())
+
+
+async def _record_import_action(session: AsyncSession, record: object) -> None:
+    await record_user_action(
+        session,
+        action_type=IMPORT_TORRENT,
+        entity_type="import",
+        entity_id=str(getattr(record, "id")),
+        payload=import_action_payload(record),
+    )
 
 
 @router.get("/{import_id}/tracks", response_model=TrackListResponse)

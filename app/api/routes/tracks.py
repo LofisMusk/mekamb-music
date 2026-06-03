@@ -42,6 +42,13 @@ from app.library.prefetch import prefetch_next_queue_tracks
 from app.storage.library import build_library_storage
 from app.workers.cache_cleanup import get_cache_stats, run_cleanup_once
 from app.api.routes.playback import clear_deleted_track_from_playback
+from app.sync.actions import (
+    DELETE_TRACK,
+    LIKE_TRACK,
+    UNLIKE_TRACK,
+    record_user_action,
+    track_action_payload,
+)
 
 router = APIRouter(dependencies=[Depends(require_token)])
 
@@ -208,6 +215,13 @@ async def like_track(
         session.add(liked_track)
         await session.commit()
         await session.refresh(liked_track)
+        await record_user_action(
+            session,
+            action_type=LIKE_TRACK,
+            entity_type="track",
+            entity_id=str(track_id),
+            payload=track_action_payload(track),
+        )
 
     return LikedTrackResponse(**_liked_track_to_dict(liked_track, track))
 
@@ -245,6 +259,13 @@ async def unlike_track(
     if liked_track is not None:
         await session.delete(liked_track)
         await session.commit()
+        await record_user_action(
+            session,
+            action_type=UNLIKE_TRACK,
+            entity_type="track",
+            entity_id=str(track_id),
+            payload=track_action_payload(track),
+        )
 
 
 @router.patch("/{track_id}", response_model=TrackResponse)
@@ -296,12 +317,20 @@ async def delete_track(
                 detail=f"Could not delete audio file from storage: {exc}",
             ) from exc
 
+    delete_payload = track_action_payload(track)
     await session.execute(delete(PlaylistTrack).where(PlaylistTrack.track_id == track_id))
     await session.execute(delete(LikedTrack).where(LikedTrack.track_id == track_id))
     await session.execute(delete(TrackPlay).where(TrackPlay.track_id == track_id))
     await clear_deleted_track_from_playback(session, track_id)
     await session.delete(track)
     await session.commit()
+    await record_user_action(
+        session,
+        action_type=DELETE_TRACK,
+        entity_type="track",
+        entity_id=str(track_id),
+        payload=delete_payload,
+    )
 
 
 @router.get("/{track_id}/artwork")

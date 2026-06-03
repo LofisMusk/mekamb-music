@@ -1,6 +1,8 @@
 from datetime import datetime
 from uuid import UUID
 
+from typing import Any
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -314,3 +316,52 @@ class CacheStatsResponse(BaseModel):
     stale_tracks: int
     cache_ttl_days: int
     library_root: str
+
+
+class SyncActionResponse(BaseModel):
+    id: UUID
+    action_type: str
+    entity_type: str
+    entity_id: str | None
+    payload: dict[str, Any]
+    origin_instance_id: str
+    created_at: datetime
+    applied_at: datetime | None
+    apply_error: str | None
+
+
+class SyncActionListResponse(PageBase):
+    items: list[SyncActionResponse]
+    since: datetime | None
+    include_applied: bool
+
+
+class SyncActionPushItem(BaseModel):
+    id: UUID
+    action_type: str = Field(min_length=1, max_length=64)
+    entity_type: str = Field(min_length=1, max_length=64)
+    entity_id: str | None = Field(default=None, max_length=255)
+    payload: dict[str, Any]
+    origin_instance_id: str = Field(min_length=1, max_length=255)
+    created_at: datetime
+
+
+class SyncActionPushRequest(BaseModel):
+    items: list[SyncActionPushItem] = Field(max_length=1000)
+
+
+class SyncActionPushResponse(BaseModel):
+    accepted: int
+    skipped_existing: int
+
+
+class SyncApplyResponse(BaseModel):
+    applied: int
+    failed: int
+    items: list[SyncActionResponse]
+
+
+class SyncImportManifestResponse(BaseModel):
+    info_hash: str
+    import_record: ImportRecordResponse
+    tracks: list[TrackResponse]

@@ -2,17 +2,38 @@
   "name": "mekamb-music-desktop",
   "version": "0.1.0",
   "private": true,
-  "description": "Desktop shell for Mekamb Music.",
+  "description": "Desktop client for Mekamb Music.",
   "main": "desktop/main.js",
   "scripts": {
-    "desktop": "electron .",
-    "desktop:dist": "electron-builder",
-    "desktop:dist:linux": "electron-builder --linux AppImage deb",
-    "desktop:dist:mac": "electron-builder --mac dmg zip"
+    "dev": "vite --configLoader runner",
+    "build": "vite build --configLoader runner",
+    "desktop": "npm run build && electron .",
+    "desktop:dist": "npm run build && electron-builder",
+    "desktop:dist:linux": "npm run build && electron-builder --linux AppImage deb",
+    "desktop:dist:mac": "npm run build && electron-builder --mac dmg zip",
+    "ios:add": "npm run build && npx cap add ios",
+    "ios:sync": "npm run build && npx cap sync ios",
+    "ios:open": "npm run ios:sync && npx cap open ios",
+    "ios:run": "npm run ios:sync && npx cap run ios"
+  },
+  "dependencies": {
+    "@capacitor/core": "^8.0.0",
+    "lucide-react": "0.487.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.0.0",
+    "@capacitor/ios": "^8.0.0",
+    "@tailwindcss/vite": "4.1.12",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@vitejs/plugin-react": "4.7.0",
     "electron": "^31.7.7",
-    "electron-builder": "^24.13.3"
+    "electron-builder": "^24.13.3",
+    "tailwindcss": "4.1.12",
+    "tw-animate-css": "1.3.8",
+    "vite": "6.3.5"
   },
   "build": {
     "appId": "pl.mekamb.music",
@@ -22,7 +43,7 @@
     },
     "files": [
       "desktop/**/*",
-      "app/web/**/*",
+      "client-dist/**/*",
       "package.json"
     ],
     "mac": {

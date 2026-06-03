@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     app_name: str = "Mekamb Music"
     environment: str = "local"
     api_token: str = Field(default="")
+    instance_id: str = "local"
 
     personal_1337x_base_url: str = "https://1337x.to"
     personal_1337x_max_pages: int = 1

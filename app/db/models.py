@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.imports.domain import ImportStatus
@@ -147,6 +147,33 @@ class PlaybackQueueItem(Base):
     track_id: Mapped[UUID] = mapped_column(ForeignKey("tracks.id"), nullable=False, index=True)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class UserAction(Base):
+    __tablename__ = "user_actions"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    action_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    entity_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    entity_id: Mapped[str | None] = mapped_column(String(255), index=True)
+    payload: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    origin_instance_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    apply_error: Mapped[str | None] = mapped_column(Text)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": str(self.id),
+            "action_type": self.action_type,
+            "entity_type": self.entity_type,
+            "entity_id": self.entity_id,
+            "payload": self.payload,
+            "origin_instance_id": self.origin_instance_id,
+            "created_at": self.created_at.isoformat(),
+            "applied_at": self.applied_at.isoformat() if self.applied_at else None,
+            "apply_error": self.apply_error,
+        }
 
 
 class Playlist(Base):
