@@ -71,39 +71,6 @@ In the app Settings screen, set the backend endpoint and API token. For a
 physical iPhone, do not use `localhost`; use your Mac/server LAN IP, for example
 `http://192.168.1.50:8000`.
 
-## Capacitor iOS App
-
-The older iOS app is a client only. It uses Capacitor to package the same
-React/Vite player UI and points it at the same external API endpoints.
-Capacitor native HTTP is enabled so the iOS WebView can call your backend
-without depending on browser CORS behavior.
-
-After installing npm dependencies:
-
-```bash
-npm install
-npm run ios:add
-npm run ios:open
-```
-
-In Xcode, select an iPhone 16 Pro simulator or your connected iPhone 16 Pro,
-choose the `Mekamb Music` scheme, and press Run. On a physical device you need
-your Apple Developer team selected under Signing & Capabilities.
-
-For later frontend changes:
-
-```bash
-npm run ios:sync
-```
-
-Useful local loop for mobile UI work:
-
-```bash
-npm run build
-npm run ios:sync
-npm run ios:open
-```
-
 Compose waits for Postgres and Redis healthchecks before starting the app.
 MinIO readiness is handled by `minio-init`, which waits for MinIO and creates
 the configured bucket before API/worker containers continue.
