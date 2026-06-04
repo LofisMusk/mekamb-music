@@ -42,7 +42,8 @@ permission on current iOS versions.
 ## Current native features
 
 - library list from `GET /tracks`
-- albums tab grouped from library tracks
+- albums tab grouped from library tracks by normalized album title so featured artists do not split one album into duplicates
+- stable alphabetical album ordering and stable track ordering
 - album detail pages with tracks in normal alphabetical order
 - album covers from `GET /tracks/{id}/artwork`, matching the browser frontend's cover.jpg behavior
 - liked tracks from `GET /tracks/liked`
