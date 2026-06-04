@@ -55,16 +55,28 @@ On macOS, media keys may require allowing the app in System Settings when the
 system asks for keyboard/accessibility permissions. On Linux, global media-key
 support depends on the desktop environment and window manager.
 
-## iOS App
+## Native iOS App
 
-The iOS app is a client only. It uses Capacitor to package the same React/Vite
-player UI and points it at the same external API endpoints. Capacitor native
-HTTP is enabled so the iOS WebView can call your backend without depending on
-browser CORS behavior.
+A native SwiftUI iPhone client lives in `native-ios/`. It does not use Electron,
+Capacitor, React, Vite, or a WebView. It talks directly to the FastAPI backend
+with `URLSession` and streams tracks with `AVPlayer`.
 
-The UI includes an iPhone-first layout for iPhone 16 Pro: safe-area/notch
-spacing, a bottom navigation/search area, mobile-sized playback controls,
-two-column album cards, and reduced desktop table columns on narrow screens.
+Open it with:
+
+```bash
+open native-ios/MekambMusicNative.xcodeproj
+```
+
+In the app Settings screen, set the backend endpoint and API token. For a
+physical iPhone, do not use `localhost`; use your Mac/server LAN IP, for example
+`http://192.168.1.50:8000`.
+
+## Capacitor iOS App
+
+The older iOS app is a client only. It uses Capacitor to package the same
+React/Vite player UI and points it at the same external API endpoints.
+Capacitor native HTTP is enabled so the iOS WebView can call your backend
+without depending on browser CORS behavior.
 
 After installing npm dependencies:
 
