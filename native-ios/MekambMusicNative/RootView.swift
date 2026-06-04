@@ -53,9 +53,7 @@ struct RootView: View {
                     .simultaneousGesture(TapGesture().onEnded { dismissSearch() })
             }
         }
-        .task {
-            await app.refreshLibrary()
-        }
+        .task { await app.refreshLibrary() }
         .onChange(of: app.searchText) { _ in
             guard app.searchMode == .torrent else { return }
             Task {
@@ -227,9 +225,7 @@ struct AlbumsView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    Button {
-                        app.selectedAlbumId = nil
-                    } label: {
+                    Button { app.selectedAlbumId = nil } label: {
                         if app.selectedAlbumId != nil {
                             Label("Albums", systemImage: "chevron.left")
                                 .font(.subheadline.weight(.semibold))
@@ -319,9 +315,7 @@ struct AlbumCardNative: View {
     let album: Album
 
     var body: some View {
-        Button {
-            app.selectedAlbumId = album.id
-        } label: {
+        Button { app.selectedAlbumId = album.id } label: {
             VStack(alignment: .leading, spacing: 9) {
                 AlbumArtworkView(album: album, size: nil)
                     .environmentObject(app)
@@ -391,9 +385,7 @@ struct TrackRowNative: View {
     let track: ApiTrack
 
     var body: some View {
-        Button {
-            app.play(track)
-        } label: {
+        Button { app.play(track) } label: {
             HStack(spacing: 12) {
                 TrackArtworkView(track: track, size: 52)
                     .environmentObject(app)
@@ -469,41 +461,75 @@ struct TorrentSearchView: View {
 
 struct TorrentRowNative: View {
     @EnvironmentObject private var app: AppState
+    @StateObject private var importController = TorrentImportController()
     let torrent: TorrentResult
-    @State private var importing = false
 
     var body: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(torrent.name)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                Text("\(torrent.uploader ?? "unknown") · \(torrent.sizeText) · S \(torrent.seeders ?? "0")")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button {
-                importing = true
-                Task {
-                    await app.importTorrent(torrent)
-                    importing = false
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(torrent.name)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                    Text("\(torrent.uploader ?? "unknown") · \(torrent.sizeText) · S \(torrent.seeders ?? "0")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-            } label: {
-                if importing {
-                    ProgressView()
-                } else {
-                    Text("Import")
-                        .font(.caption.weight(.bold))
+                Spacer()
+                Button {
+                    Task { await importController.start(torrent: torrent, app: app) }
+                } label: {
+                    if importController.isRunning {
+                        ProgressView()
+                            .tint(.white)
+                    } else {
+                        Text(importController.progress?.isFailure == true ? "Retry" : "Import")
+                            .font(.caption.weight(.bold))
+                    }
                 }
+                .buttonStyle(.borderedProminent)
+                .disabled(importController.isRunning)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(importing)
+
+            if let progress = importController.progress {
+                TorrentImportProgressView(progress: progress)
+            }
         }
         .padding(12)
         .background(Color.white.opacity(0.06))
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .animation(.easeInOut(duration: 0.2), value: importController.progress)
+    }
+}
+
+struct TorrentImportProgressView: View {
+    let progress: TorrentImportProgressState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text(progress.status)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(progress.isFailure ? .red : .secondary)
+                Spacer()
+                Text(progress.percentText)
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            ProgressView(value: progress.clampedProgress)
+                .tint(progress.isFailure ? .red : .blue)
+                .controlSize(.regular)
+
+            Text(progress.details)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+        .padding(10)
+        .background(Color.black.opacity(0.18))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
@@ -538,9 +564,7 @@ struct PlayerBar: View {
 
                 Spacer()
 
-                Button { app.previousTrack() } label: {
-                    Image(systemName: "backward.fill")
-                }
+                Button { app.previousTrack() } label: { Image(systemName: "backward.fill") }
                 Button { app.togglePlayback() } label: {
                     Image(systemName: app.isPlaying ? "pause.fill" : "play.fill")
                         .font(.title3.weight(.bold))
@@ -549,9 +573,7 @@ struct PlayerBar: View {
                         .foregroundStyle(.white)
                         .clipShape(Circle())
                 }
-                Button { app.nextTrack() } label: {
-                    Image(systemName: "forward.fill")
-                }
+                Button { app.nextTrack() } label: { Image(systemName: "forward.fill") }
             }
             .foregroundStyle(.white)
         }
