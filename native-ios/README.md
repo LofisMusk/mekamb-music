@@ -40,7 +40,18 @@ for example `http://192.168.1.50:8000`.
 - torrent search through `GET /sources/piratebay/search`
 - torrent import through `POST /imports/piratebay/{torrent_id}`
 - direct playback from `GET /tracks/{id}/stream`
+- background playback through iOS `audio` background mode
+- lock screen, Control Center, headphones, and Dynamic Island media controls through `MPNowPlayingInfoCenter` and `MPRemoteCommandCenter`
 - settings screen for endpoint and token
+
+## Background audio notes
+
+The app uses `AVAudioSession` with the `.playback` category and keeps `AVPlayer`
+running when the app is backgrounded. iOS will show the native Now Playing UI on
+the lock screen, in Control Center, and on supported Dynamic Island devices.
+
+This is not a custom Live Activity. It is the standard iOS media experience,
+which is the right path for music playback controls.
 
 ## Notes
 
