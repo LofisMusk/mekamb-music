@@ -109,6 +109,38 @@ enum MusicTab: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum RepeatMode: String, CaseIterable, Identifiable {
+    case off
+    case all
+    case one
+
+    var id: String { rawValue }
+
+    var iconName: String {
+        switch self {
+        case .off:
+            return "repeat"
+        case .all:
+            return "repeat"
+        case .one:
+            return "repeat.1"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .off:
+            return "Repeat Off"
+        case .all:
+            return "Repeat All"
+        case .one:
+            return "Repeat One"
+        }
+    }
+
+    var isActive: Bool { self != .off }
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @AppStorage("mekambMusicApiEndpoint") var apiEndpoint: String = ""
@@ -130,6 +162,9 @@ final class AppState: ObservableObject {
     @Published var currentTrack: ApiTrack?
     @Published var isPlaying = false
     @Published var playbackProgress: Double = 0
+    @Published var playbackQueue: [ApiTrack] = []
+    @Published var shuffleEnabled = false
+    @Published var repeatMode: RepeatMode = .off
 
     private var player: AVPlayer?
     private var timeObserver: Any?
@@ -209,6 +244,18 @@ final class AppState: ObservableObject {
         return albums.first { $0.id == selectedAlbumId }
     }
 
+    var queueTracks: [ApiTrack] {
+        playbackQueue.isEmpty ? playbackContextTracks() : playbackQueue
+    }
+
+    var upcomingQueueTracks: [ApiTrack] {
+        guard let currentTrack else { return queueTracks }
+        guard let index = queueTracks.firstIndex(where: { $0.id == currentTrack.id }) else { return queueTracks }
+        let nextIndex = queueTracks.index(after: index)
+        guard nextIndex < queueTracks.endIndex else { return [] }
+        return Array(queueTracks[nextIndex...])
+    }
+
     func testConnection() async {
         isTestingConnection = true
         errorMessage = nil
@@ -241,6 +288,7 @@ final class AppState: ObservableObject {
             let (newLikedIds, newTracks) = try await (likedIds, allTracks)
             likedTrackIds = newLikedIds
             tracks = mergeTracks(existing: tracks, incoming: newTracks).sorted(by: stableLibraryTrackOrder)
+            syncQueueWithLibrary()
             if currentTrack == nil { currentTrack = tracks.first }
             selectedAlbumId = selectedAlbumId.flatMap { id in albums.contains(where: { $0.id == id }) ? id : nil }
             Task { await loadMissingAlbumCovers() }
@@ -311,7 +359,11 @@ final class AppState: ObservableObject {
         }
     }
 
-    func play(_ track: ApiTrack) {
+    func play(_ track: ApiTrack, queue: [ApiTrack]? = nil, updateQueue: Bool = true) {
+        if updateQueue {
+            preparePlaybackQueue(for: track, from: queue ?? playbackContextTracks())
+        }
+
         currentTrack = track
         playbackProgress = 0
         configureAudioSession()
@@ -342,7 +394,7 @@ final class AppState: ObservableObject {
 
     func togglePlayback() {
         guard let player else {
-            if let currentTrack { play(currentTrack) }
+            if let currentTrack { play(currentTrack, updateQueue: false) }
             return
         }
         if isPlaying {
@@ -357,21 +409,99 @@ final class AppState: ObservableObject {
     }
 
     func nextTrack() {
-        let list = selectedTab == .albums ? (selectedAlbum?.tracks ?? tracks) : (filteredTracks.isEmpty ? tracks : filteredTracks)
-        guard let currentTrack, let index = list.firstIndex(where: { $0.id == currentTrack.id }), !list.isEmpty else {
-            if let first = list.first { play(first) }
+        guard let currentTrack else {
+            if let first = queueTracks.first { play(first, queue: queueTracks, updateQueue: false) }
             return
         }
-        play(list[(index + 1) % list.count])
+
+        if repeatMode == .one {
+            play(currentTrack, updateQueue: false)
+            return
+        }
+
+        let list = queueTracks
+        guard !list.isEmpty else { return }
+        guard let index = list.firstIndex(where: { $0.id == currentTrack.id }) else {
+            play(list[0], queue: list, updateQueue: false)
+            return
+        }
+
+        let nextIndex = list.index(after: index)
+        if nextIndex < list.endIndex {
+            play(list[nextIndex], queue: list, updateQueue: false)
+        } else if repeatMode == .all, let first = list.first {
+            play(first, queue: list, updateQueue: false)
+        } else {
+            player?.pause()
+            isPlaying = false
+            playbackProgress = 1
+            updateNowPlayingPlaybackRate()
+        }
     }
 
     func previousTrack() {
-        let list = selectedTab == .albums ? (selectedAlbum?.tracks ?? tracks) : (filteredTracks.isEmpty ? tracks : filteredTracks)
-        guard let currentTrack, let index = list.firstIndex(where: { $0.id == currentTrack.id }), !list.isEmpty else {
-            if let first = list.first { play(first) }
+        guard let currentTrack else {
+            if let first = queueTracks.first { play(first, queue: queueTracks, updateQueue: false) }
             return
         }
-        play(list[(index - 1 + list.count) % list.count])
+
+        let list = queueTracks
+        guard !list.isEmpty else { return }
+        guard let index = list.firstIndex(where: { $0.id == currentTrack.id }) else {
+            play(list[0], queue: list, updateQueue: false)
+            return
+        }
+
+        if index > list.startIndex {
+            let previousIndex = list.index(before: index)
+            play(list[previousIndex], queue: list, updateQueue: false)
+        } else if repeatMode == .all, let last = list.last {
+            play(last, queue: list, updateQueue: false)
+        } else {
+            play(currentTrack, updateQueue: false)
+        }
+    }
+
+    func toggleShuffle() {
+        shuffleEnabled.toggle()
+        guard let currentTrack else {
+            let context = playbackContextTracks()
+            playbackQueue = shuffleEnabled ? context.shuffled() : context
+            return
+        }
+        preparePlaybackQueue(for: currentTrack, from: playbackQueue.isEmpty ? playbackContextTracks() : playbackQueue)
+    }
+
+    func cycleRepeatMode() {
+        switch repeatMode {
+        case .off:
+            repeatMode = .all
+        case .all:
+            repeatMode = .one
+        case .one:
+            repeatMode = .off
+        }
+    }
+
+    func addToQueue(_ track: ApiTrack) {
+        if playbackQueue.isEmpty {
+            if let currentTrack {
+                playbackQueue = [currentTrack]
+            } else {
+                playbackQueue = []
+            }
+        }
+        guard !playbackQueue.contains(where: { $0.id == track.id }) else { return }
+        playbackQueue.append(track)
+    }
+
+    func removeFromQueue(_ track: ApiTrack) {
+        guard currentTrack?.id != track.id else { return }
+        playbackQueue.removeAll { $0.id == track.id }
+    }
+
+    func clearQueue() {
+        playbackQueue = currentTrack.map { [$0] } ?? []
     }
 
     private func loadAllTracks() async throws -> [ApiTrack] {
@@ -406,6 +536,39 @@ final class AppState: ObservableObject {
             merged[track.id] = track
         }
         return Array(merged.values)
+    }
+
+    private func playbackContextTracks() -> [ApiTrack] {
+        if selectedTab == .albums, let selectedAlbum {
+            return selectedAlbum.tracks
+        }
+        let context = filteredTracks
+        return context.isEmpty ? tracks : context
+    }
+
+    private func preparePlaybackQueue(for track: ApiTrack, from candidates: [ApiTrack]) {
+        var seen = Set<String>()
+        var unique = candidates.filter { candidate in
+            guard !seen.contains(candidate.id) else { return false }
+            seen.insert(candidate.id)
+            return true
+        }
+        if !unique.contains(where: { $0.id == track.id }) {
+            unique.insert(track, at: 0)
+        }
+
+        if shuffleEnabled {
+            let rest = unique.filter { $0.id != track.id }.shuffled()
+            playbackQueue = [track] + rest
+        } else {
+            playbackQueue = unique
+        }
+    }
+
+    private func syncQueueWithLibrary() {
+        guard !playbackQueue.isEmpty else { return }
+        let byId = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        playbackQueue = playbackQueue.compactMap { byId[$0.id] ?? $0 }
     }
 
     private func postPlay(_ track: ApiTrack) async throws {
