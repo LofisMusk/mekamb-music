@@ -13,6 +13,7 @@ struct ApiTrack: Identifiable, Codable, Hashable {
     let mediaType: String?
     let durationSeconds: Double?
     let sizeBytes: Int?
+    let createdAt: String?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -23,6 +24,7 @@ struct ApiTrack: Identifiable, Codable, Hashable {
         case mediaType = "media_type"
         case durationSeconds = "duration_seconds"
         case sizeBytes = "size_bytes"
+        case createdAt = "created_at"
     }
 
     var displayArtist: String { artist?.isEmpty == false ? artist! : "Unknown Artist" }
@@ -167,7 +169,7 @@ final class AppState: ObservableObject {
 
         return grouped
             .map { key, albumTracks in
-                let sortedTracks = albumTracks.sorted(by: stableTrackOrder)
+                let sortedTracks = albumTracks.sorted(by: originalAlbumTrackOrder)
                 let first = sortedTracks.first
                 let title = bestAlbumTitle(from: sortedTracks)
                 let artist = bestAlbumArtist(from: sortedTracks)
@@ -234,7 +236,7 @@ final class AppState: ObservableObject {
             async let trackResponse: TrackListResponse = request("/tracks?limit=200")
             let (liked, allTracks) = try await (likedResponse, trackResponse)
             likedTrackIds = Set(liked.items.map { $0.track.id })
-            tracks = allTracks.items.sorted(by: stableTrackOrder)
+            tracks = allTracks.items.sorted(by: stableLibraryTrackOrder)
             if currentTrack == nil { currentTrack = tracks.first }
             selectedAlbumId = selectedAlbumId.flatMap { id in albums.contains(where: { $0.id == id }) ? id : nil }
             Task { await loadMissingAlbumCovers() }
@@ -464,12 +466,68 @@ final class AppState: ObservableObject {
         return left.id < right.id
     }
 
-    private func stableTrackOrder(_ left: ApiTrack, _ right: ApiTrack) -> Bool {
+    private func stableLibraryTrackOrder(_ left: ApiTrack, _ right: ApiTrack) -> Bool {
         let albumOrder = left.displayAlbum.localizedStandardCompare(right.displayAlbum)
         if albumOrder != .orderedSame { return albumOrder == .orderedAscending }
+        return originalAlbumTrackOrder(left, right)
+    }
+
+    private func originalAlbumTrackOrder(_ left: ApiTrack, _ right: ApiTrack) -> Bool {
+        let leftNumber = trackNumber(left)
+        let rightNumber = trackNumber(right)
+        if leftNumber != rightNumber { return leftNumber < rightNumber }
+
+        let leftCreated = createdTimestamp(left)
+        let rightCreated = createdTimestamp(right)
+        if leftCreated != rightCreated { return leftCreated < rightCreated }
+
         let titleOrder = left.title.localizedStandardCompare(right.title)
         if titleOrder != .orderedSame { return titleOrder == .orderedAscending }
         return left.id < right.id
+    }
+
+    private func trackNumber(_ track: ApiTrack) -> Int {
+        let filenamePatterns = [
+            #"(?:^|[/\s_-])(\d{1,3})\s*[.)_-]"#,
+            #"(?:^|[/\s_-])(\d{1,3})\s+"#,
+            #"-(\d{1,3})\s*[.)_-]"#
+        ]
+        if let number = firstNumber(in: track.originalFilename, patterns: filenamePatterns) {
+            return number
+        }
+
+        let titlePatterns = [
+            #"^(\d{1,3})\s*[.)_-]"#,
+            #"^(\d{1,3})\s+"#
+        ]
+        if let number = firstNumber(in: track.title, patterns: titlePatterns) {
+            return number
+        }
+
+        return Int.max
+    }
+
+    private func firstNumber(in value: String?, patterns: [String]) -> Int? {
+        guard let value, !value.isEmpty else { return nil }
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            guard let match = regex.firstMatch(in: value, options: [], range: range), match.numberOfRanges > 1 else { continue }
+            guard let numberRange = Range(match.range(at: 1), in: value), let number = Int(value[numberRange]), number > 0 else { continue }
+            return number
+        }
+        return nil
+    }
+
+    private func createdTimestamp(_ track: ApiTrack) -> TimeInterval {
+        guard let createdAt = track.createdAt, !createdAt.isEmpty else { return 0 }
+        let fractionalFormatter = ISO8601DateFormatter()
+        fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractionalFormatter.date(from: createdAt) { return date.timeIntervalSince1970 }
+
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: createdAt)?.timeIntervalSince1970 ?? 0
     }
 
     private func stableStringOrder(_ left: String, _ right: String) -> Bool {
