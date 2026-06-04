@@ -43,22 +43,12 @@ struct Album: Identifiable, Hashable {
     let tracks: [ApiTrack]
     let coverTrackId: String?
 
-    var trackCountText: String {
-        tracks.count == 1 ? "1 song" : "\(tracks.count) songs"
-    }
+    var trackCountText: String { tracks.count == 1 ? "1 song" : "\(tracks.count) songs" }
 }
 
-struct TrackListResponse: Codable {
-    let items: [ApiTrack]
-}
-
-struct LikedTrackItem: Codable {
-    let track: ApiTrack
-}
-
-struct LikedTracksResponse: Codable {
-    let items: [LikedTrackItem]
-}
+struct TrackListResponse: Codable { let items: [ApiTrack] }
+struct LikedTrackItem: Codable { let track: ApiTrack }
+struct LikedTracksResponse: Codable { let items: [LikedTrackItem] }
 
 struct TorrentResult: Identifiable, Codable, Hashable {
     let name: String
@@ -91,9 +81,7 @@ struct TorrentResult: Identifiable, Codable, Hashable {
     }
 }
 
-struct TorrentSearchResponse: Codable {
-    let items: [TorrentResult]
-}
+struct TorrentSearchResponse: Codable { let items: [TorrentResult] }
 
 enum SearchMode: String, CaseIterable, Identifiable {
     case library = "Library"
@@ -118,9 +106,7 @@ enum RepeatMode: String, CaseIterable, Identifiable {
 
     var iconName: String {
         switch self {
-        case .off:
-            return "repeat"
-        case .all:
+        case .off, .all:
             return "repeat"
         case .one:
             return "repeat.1"
@@ -168,6 +154,7 @@ final class AppState: ObservableObject {
 
     private var player: AVPlayer?
     private var timeObserver: Any?
+    private weak var timeObserverPlayer: AVPlayer?
     private var playerItemEndObserver: NSObjectProtocol?
 
     init() {
@@ -176,13 +163,12 @@ final class AppState: ObservableObject {
     }
 
     deinit {
-        if let timeObserver { player?.removeTimeObserver(timeObserver) }
-        if let playerItemEndObserver { NotificationCenter.default.removeObserver(playerItemEndObserver) }
+        removeTimeObserver()
+        removePlayerItemEndObserver()
+        player?.pause()
     }
 
-    var normalizedEndpoint: String {
-        normalizeEndpoint(apiEndpoint)
-    }
+    var normalizedEndpoint: String { normalizeEndpoint(apiEndpoint) }
 
     var endpointWarning: String? {
         let normalized = normalizedEndpoint.lowercased()
@@ -198,22 +184,16 @@ final class AppState: ObservableObject {
     }
 
     var albums: [Album] {
-        let grouped = Dictionary(grouping: tracks) { track in
-            stableAlbumKey(for: track)
-        }
-
+        let grouped = Dictionary(grouping: tracks) { track in stableAlbumKey(for: track) }
         return grouped
             .map { key, albumTracks in
                 let sortedTracks = albumTracks.sorted(by: originalAlbumTrackOrder)
-                let first = sortedTracks.first
-                let title = bestAlbumTitle(from: sortedTracks)
-                let artist = bestAlbumArtist(from: sortedTracks)
                 return Album(
                     id: key,
-                    title: title,
-                    artist: artist,
+                    title: bestAlbumTitle(from: sortedTracks),
+                    artist: bestAlbumArtist(from: sortedTracks),
                     tracks: sortedTracks,
-                    coverTrackId: sortedTracks.first?.id ?? first?.id
+                    coverTrackId: sortedTracks.first?.id
                 )
             }
             .sorted(by: stableAlbumOrder)
@@ -293,9 +273,7 @@ final class AppState: ObservableObject {
             selectedAlbumId = selectedAlbumId.flatMap { id in albums.contains(where: { $0.id == id }) ? id : nil }
             Task { await loadMissingAlbumCovers() }
         } catch {
-            if !isCancellation(error) {
-                errorMessage = clean(error)
-            }
+            if !isCancellation(error) { errorMessage = clean(error) }
         }
         isLoading = false
     }
@@ -339,9 +317,7 @@ final class AppState: ObservableObject {
             let encodedId = encodePathComponent(torrent.torrentId)
             let _: EmptyResponse = try await request("/imports/piratebay/\(encodedId)", method: "POST")
         } catch {
-            if !isCancellation(error) {
-                errorMessage = clean(error)
-            }
+            if !isCancellation(error) { errorMessage = clean(error) }
         }
     }
 
@@ -353,9 +329,7 @@ final class AppState: ObservableObject {
             let _: EmptyResponse = try await request("/tracks/\(encodedId)/like", method: willLike ? "PUT" : "DELETE")
         } catch {
             if willLike { likedTrackIds.remove(track.id) } else { likedTrackIds.insert(track.id) }
-            if !isCancellation(error) {
-                errorMessage = clean(error)
-            }
+            if !isCancellation(error) { errorMessage = clean(error) }
         }
     }
 
@@ -364,17 +338,19 @@ final class AppState: ObservableObject {
             preparePlaybackQueue(for: track, from: queue ?? playbackContextTracks())
         }
 
-        currentTrack = track
-        playbackProgress = 0
-        configureAudioSession()
-
         let encodedId = encodePathComponent(track.id)
         guard let url = endpointURL(path: "/tracks/\(encodedId)/stream") else { return }
+
+        configureAudioSession()
+        removePlayerItemEndObserver()
+        removeTimeObserver()
+        player?.pause()
+
         let headers = ["Authorization": "Bearer \(apiToken)"]
         let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
         let item = AVPlayerItem(asset: asset)
+        let nextPlayer = AVPlayer(playerItem: item)
 
-        if let playerItemEndObserver { NotificationCenter.default.removeObserver(playerItemEndObserver) }
         playerItemEndObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: item,
@@ -383,10 +359,11 @@ final class AppState: ObservableObject {
             Task { @MainActor in self?.nextTrack() }
         }
 
-        player?.pause()
-        player = AVPlayer(playerItem: item)
-        addTimeObserver()
-        player?.play()
+        player = nextPlayer
+        currentTrack = track
+        playbackProgress = 0
+        addTimeObserver(to: nextPlayer)
+        nextPlayer.play()
         isPlaying = true
         updateNowPlayingInfo(for: track, elapsed: 0)
         Task { try? await postPlay(track) }
@@ -453,8 +430,7 @@ final class AppState: ObservableObject {
         }
 
         if index > list.startIndex {
-            let previousIndex = list.index(before: index)
-            play(list[previousIndex], queue: list, updateQueue: false)
+            play(list[list.index(before: index)], queue: list, updateQueue: false)
         } else if repeatMode == .all, let last = list.last {
             play(last, queue: list, updateQueue: false)
         } else {
@@ -484,12 +460,8 @@ final class AppState: ObservableObject {
     }
 
     func addToQueue(_ track: ApiTrack) {
-        if playbackQueue.isEmpty {
-            if let currentTrack {
-                playbackQueue = [currentTrack]
-            } else {
-                playbackQueue = []
-            }
+        if playbackQueue.isEmpty, let currentTrack {
+            playbackQueue = [currentTrack]
         }
         guard !playbackQueue.contains(where: { $0.id == track.id }) else { return }
         playbackQueue.append(track)
@@ -532,16 +504,12 @@ final class AppState: ObservableObject {
 
     private func mergeTracks(existing: [ApiTrack], incoming: [ApiTrack]) -> [ApiTrack] {
         var merged = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
-        for track in incoming {
-            merged[track.id] = track
-        }
+        for track in incoming { merged[track.id] = track }
         return Array(merged.values)
     }
 
     private func playbackContextTracks() -> [ApiTrack] {
-        if selectedTab == .albums, let selectedAlbum {
-            return selectedAlbum.tracks
-        }
+        if selectedTab == .albums, let selectedAlbum { return selectedAlbum.tracks }
         let context = filteredTracks
         return context.isEmpty ? tracks : context
     }
@@ -588,7 +556,9 @@ final class AppState: ObservableObject {
     }
 
     private func request<T: Decodable>(_ path: String, method: String = "GET", requiresAuth: Bool = true) async throws -> T {
-        guard let url = endpointURL(path: path) else { throw BackendError.message("Bad API endpoint. Use http://IP:8000, for example http://192.168.1.50:8000.") }
+        guard let url = endpointURL(path: path) else {
+            throw BackendError.message("Bad API endpoint. Use http://IP:8000, for example http://192.168.1.50:8000.")
+        }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = 20
@@ -604,8 +574,7 @@ final class AppState: ObservableObject {
             throw BackendError.message("API error \(http.statusCode)")
         }
         if T.self == EmptyResponse.self { return EmptyResponse() as! T }
-        let decoder = JSONDecoder()
-        return try decoder.decode(T.self, from: data)
+        return try JSONDecoder().decode(T.self, from: data)
     }
 
     private func endpointURL(path: String) -> URL? {
@@ -708,18 +677,10 @@ final class AppState: ObservableObject {
             #"(?:^|[/\s_-])(\d{1,3})\s+"#,
             #"-(\d{1,3})\s*[.)_-]"#
         ]
-        if let number = firstNumber(in: track.originalFilename, patterns: filenamePatterns) {
-            return number
-        }
+        if let number = firstNumber(in: track.originalFilename, patterns: filenamePatterns) { return number }
 
-        let titlePatterns = [
-            #"^(\d{1,3})\s*[.)_-]"#,
-            #"^(\d{1,3})\s+"#
-        ]
-        if let number = firstNumber(in: track.title, patterns: titlePatterns) {
-            return number
-        }
-
+        let titlePatterns = [#"^(\d{1,3})\s*[.)_-]"#, #"^(\d{1,3})\s+"#]
+        if let number = firstNumber(in: track.title, patterns: titlePatterns) { return number }
         return Int.max
     }
 
@@ -764,7 +725,6 @@ final class AppState: ObservableObject {
 
     private func configureRemoteCommandCenter() {
         let commandCenter = MPRemoteCommandCenter.shared()
-
         commandCenter.playCommand.isEnabled = true
         commandCenter.pauseCommand.isEnabled = true
         commandCenter.togglePlayPauseCommand.isEnabled = true
@@ -843,20 +803,37 @@ final class AppState: ObservableObject {
     }
 
     private func currentElapsedTime() -> TimeInterval {
-        player?.currentTime().seconds.isFinite == true ? player?.currentTime().seconds ?? 0 : 0
+        guard let seconds = player?.currentTime().seconds, seconds.isFinite else { return 0 }
+        return seconds
     }
 
-    private func addTimeObserver() {
-        if let timeObserver { player?.removeTimeObserver(timeObserver) }
+    private func addTimeObserver(to observedPlayer: AVPlayer) {
+        removeTimeObserver()
         let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
-        timeObserver = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+        timeObserver = observedPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self, weak observedPlayer] time in
             guard let self else { return }
-            let duration = self.player?.currentItem?.duration.seconds ?? 0
+            let duration = observedPlayer?.currentItem?.duration.seconds ?? 0
             if duration.isFinite, duration > 0 {
                 self.playbackProgress = min(max(time.seconds / duration, 0), 1)
             }
             self.updateNowPlayingPlaybackRate(elapsed: time.seconds)
         }
+        timeObserverPlayer = observedPlayer
+    }
+
+    private func removeTimeObserver() {
+        if let timeObserver, let timeObserverPlayer {
+            timeObserverPlayer.removeTimeObserver(timeObserver)
+        }
+        timeObserver = nil
+        timeObserverPlayer = nil
+    }
+
+    private func removePlayerItemEndObserver() {
+        if let playerItemEndObserver {
+            NotificationCenter.default.removeObserver(playerItemEndObserver)
+        }
+        playerItemEndObserver = nil
     }
 
     private func clean(_ error: Error) -> String {
@@ -875,9 +852,7 @@ final class AppState: ObservableObject {
 
 struct EmptyResponse: Decodable {}
 
-struct ApiError: Decodable {
-    let detail: String
-}
+struct ApiError: Decodable { let detail: String }
 
 enum BackendError: LocalizedError {
     case message(String)
