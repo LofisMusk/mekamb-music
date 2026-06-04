@@ -12,7 +12,7 @@
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
-  --mobile-search-height: 6.75rem;
+  --mobile-search-height: 4.65rem;
   --mobile-player-height: 8.2rem;
   --mobile-tabbar-height: 4.75rem;
 }
@@ -54,6 +54,10 @@ input {
       var(--background);
   }
 
+  #root:has(aside > div:first-child:focus-within) {
+    --mobile-search-height: 6.95rem;
+  }
+
   #root > div.size-full {
     height: 100dvh !important;
     padding-top: 0 !important;
@@ -81,13 +85,15 @@ input {
     z-index: 50;
   }
 
-  /* Top search + source toggle */
+  /* Top search. The Library/Torrent switch appears only after focusing search. */
   aside > div:first-child {
     position: fixed;
     top: 0;
     left: 0;
     right: 0;
     z-index: 60;
+    display: flex;
+    flex-direction: column;
     padding: calc(0.75rem + var(--safe-top)) calc(0.85rem + var(--safe-right)) 0.7rem calc(0.85rem + var(--safe-left)) !important;
     border-bottom: 1px solid var(--border) !important;
     background: rgba(10, 15, 26, 0.94) !important;
@@ -97,7 +103,26 @@ input {
   }
 
   aside > div:first-child > div:first-child {
-    margin-bottom: 0.45rem !important;
+    order: 2;
+    max-height: 0;
+    margin: 0 !important;
+    opacity: 0;
+    overflow: hidden;
+    pointer-events: none;
+    transform: translateY(-0.25rem);
+    transition: max-height 180ms ease, margin-top 180ms ease, opacity 140ms ease, transform 180ms ease;
+  }
+
+  aside > div:first-child:focus-within > div:first-child {
+    max-height: 3rem;
+    margin-top: 0.45rem !important;
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+  }
+
+  aside > div:first-child > div:nth-child(2) {
+    order: 1;
   }
 
   /* Real bottom tab bar */
