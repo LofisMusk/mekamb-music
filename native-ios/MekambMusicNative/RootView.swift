@@ -27,11 +27,17 @@ struct RootView: View {
 
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(TapGesture().onEnded { dismissSearch() })
 
                 PlayerBar()
                     .environmentObject(app)
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(TapGesture().onEnded { dismissSearch() })
 
                 tabBar
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(TapGesture().onEnded { dismissSearch() })
             }
         }
         .task {
@@ -62,6 +68,7 @@ struct RootView: View {
                     .autocorrectionDisabled()
                     .submitLabel(.search)
                     .onSubmit {
+                        dismissSearch()
                         if app.searchMode == .torrent { Task { await app.searchTorrents() } }
                     }
                 if !app.searchText.isEmpty {
@@ -114,6 +121,7 @@ struct RootView: View {
         HStack(spacing: 8) {
             ForEach(MusicTab.allCases) { tab in
                 Button {
+                    dismissSearch()
                     app.selectedTab = tab
                     if tab == .settings { app.searchMode = .library }
                 } label: {
@@ -137,11 +145,18 @@ struct RootView: View {
         .background(.ultraThinMaterial)
     }
 
+    private func dismissSearch() {
+        searchFocused = false
+    }
+
     private func icon(for tab: MusicTab) -> String {
         switch tab {
-        case .library: "music.note.list"
-        case .liked: "heart.fill"
-        case .settings: "gearshape.fill"
+        case .library:
+            return "music.note.list"
+        case .liked:
+            return "heart.fill"
+        case .settings:
+            return "gearshape.fill"
         }
     }
 }
