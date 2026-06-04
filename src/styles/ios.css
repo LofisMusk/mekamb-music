@@ -12,6 +12,9 @@
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
+  --mobile-search-height: 4.65rem;
+  --mobile-player-height: 8.2rem;
+  --mobile-tabbar-height: 4.75rem;
 }
 
 html {
@@ -51,9 +54,13 @@ input {
       var(--background);
   }
 
+  #root:has(aside > div:first-child:focus-within) {
+    --mobile-search-height: 6.95rem;
+  }
+
   #root > div.size-full {
     height: 100dvh !important;
-    padding-top: max(0.75rem, var(--safe-top));
+    padding-top: 0 !important;
     padding-left: max(0rem, var(--safe-left));
     padding-right: max(0rem, var(--safe-right));
     background: transparent !important;
@@ -62,39 +69,80 @@ input {
   #root > div > .flex.flex-1 {
     flex-direction: column !important;
     min-height: 0;
+    flex: 1 1 auto;
   }
 
   aside {
     width: 100% !important;
-    height: auto !important;
-    max-height: none !important;
+    height: 0 !important;
+    max-height: 0 !important;
     order: 2;
-    flex-direction: column !important;
+    flex: 0 0 0 !important;
     border-right: 0 !important;
-    border-top: 1px solid var(--border) !important;
-    background: rgba(15, 22, 35, 0.94) !important;
-    backdrop-filter: blur(22px);
-    -webkit-backdrop-filter: blur(22px);
-    padding-bottom: calc(0.35rem + var(--safe-bottom));
+    border-top: 0 !important;
+    background: transparent !important;
+    overflow: visible !important;
+    z-index: 50;
   }
 
+  /* Top search. The Library/Torrent switch appears only after focusing search. */
   aside > div:first-child {
-    order: 2;
-    padding: 0.5rem 0.85rem 0.35rem !important;
-    border-bottom: 0 !important;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 60;
+    display: flex;
+    flex-direction: column;
+    padding: calc(0.75rem + var(--safe-top)) calc(0.85rem + var(--safe-right)) 0.7rem calc(0.85rem + var(--safe-left)) !important;
+    border-bottom: 1px solid var(--border) !important;
+    background: rgba(10, 15, 26, 0.94) !important;
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.25);
   }
 
   aside > div:first-child > div:first-child {
-    margin-bottom: 0.45rem !important;
+    order: 2;
+    max-height: 0;
+    margin: 0 !important;
+    opacity: 0;
+    overflow: hidden;
+    pointer-events: none;
+    transform: translateY(-0.25rem);
+    transition: max-height 180ms ease, margin-top 180ms ease, opacity 140ms ease, transform 180ms ease;
   }
 
-  aside > nav {
+  aside > div:first-child:focus-within > div:first-child {
+    max-height: 3rem;
+    margin-top: 0.45rem !important;
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+  }
+
+  aside > div:first-child > div:nth-child(2) {
     order: 1;
+  }
+
+  /* Real bottom tab bar */
+  aside > nav {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 60;
+    min-height: calc(var(--mobile-tabbar-height) + var(--safe-bottom));
     flex-direction: row !important;
     justify-content: space-around;
     gap: 0.25rem !important;
-    padding: 0.45rem 0.65rem 0.25rem !important;
+    padding: 0.45rem calc(0.65rem + var(--safe-right)) calc(0.35rem + var(--safe-bottom)) calc(0.65rem + var(--safe-left)) !important;
     flex: 0 0 auto !important;
+    border-top: 1px solid var(--border);
+    background: rgba(15, 22, 35, 0.96) !important;
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    box-shadow: 0 -18px 40px rgba(0, 0, 0, 0.25);
   }
 
   aside > nav button {
@@ -117,11 +165,12 @@ input {
 
   main {
     order: 1;
-    padding: 0.9rem 1rem 1rem !important;
+    padding: calc(var(--mobile-search-height) + var(--safe-top)) 1rem calc(var(--mobile-player-height) + var(--mobile-tabbar-height) + var(--safe-bottom) + 1rem) !important;
     flex: 1 1 auto !important;
     min-height: 0 !important;
     -webkit-overflow-scrolling: touch;
-    scroll-padding-bottom: 9rem;
+    scroll-padding-top: calc(var(--mobile-search-height) + var(--safe-top));
+    scroll-padding-bottom: calc(var(--mobile-player-height) + var(--mobile-tabbar-height) + var(--safe-bottom));
   }
 
   main h2 {
@@ -161,11 +210,18 @@ input {
     height: 8.5rem !important;
   }
 
+  /* Playback sits directly above the bottom tab bar */
   footer {
-    position: relative;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: calc(var(--mobile-tabbar-height) + var(--safe-bottom));
+    z-index: 55;
     order: 3;
-    padding: 0.7rem 1rem calc(0.85rem + var(--safe-bottom)) !important;
+    padding: 0.7rem calc(1rem + var(--safe-right)) 0.75rem calc(1rem + var(--safe-left)) !important;
     background: rgba(15, 22, 35, 0.96) !important;
+    border-top: 1px solid var(--border);
+    box-shadow: 0 -18px 40px rgba(0, 0, 0, 0.24);
     backdrop-filter: blur(24px);
     -webkit-backdrop-filter: blur(24px);
   }
