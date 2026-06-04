@@ -16,11 +16,15 @@ struct TorrentImportProgressState: Equatable {
     }
 
     var isTerminal: Bool {
-        ["imported", "failed", "canceled"].contains(status.lowercased())
+        ["imported", "failed", "canceled", "cancelled"].contains(normalizedStatus)
     }
 
     var isFailure: Bool {
-        ["failed", "canceled"].contains(status.lowercased())
+        ["failed"].contains(normalizedStatus)
+    }
+
+    var normalizedStatus: String {
+        status.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -89,6 +93,11 @@ final class TorrentImportController: ObservableObject {
             progress = progressState(importRecord: record, torrent: nil, fallbackTitle: torrent.name)
             await pollImport(record.id, torrentTitle: torrent.name, app: app)
         } catch {
+            guard !isCancellation(error) else {
+                progress = nil
+                isRunning = false
+                return
+            }
             let message = clean(error, app: app)
             progress = TorrentImportProgressState(importId: nil, status: "failed", progress: 0, details: message)
             app.errorMessage = message
@@ -97,6 +106,8 @@ final class TorrentImportController: ObservableObject {
     }
 
     private func pollImport(_ importId: String, torrentTitle: String, app: AppState) async {
+        var sawImported = false
+
         for _ in 0..<900 {
             do {
                 let encodedId = encodePathComponent(importId)
@@ -108,10 +119,32 @@ final class TorrentImportController: ObservableObject {
                 )
                 progress = nextProgress
 
-                if nextProgress.status == "imported" {
+                if nextProgress.normalizedStatus == "imported" {
+                    sawImported = true
                     await app.refreshLibrary()
+                    progress = TorrentImportProgressState(
+                        importId: importId,
+                        status: "imported",
+                        progress: 1,
+                        details: "Imported successfully"
+                    )
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     progress = nil
+                    isRunning = false
+                    return
+                }
+
+                if ["canceled", "cancelled"].contains(nextProgress.normalizedStatus) {
+                    if sawImported {
+                        progress = nil
+                    } else {
+                        progress = TorrentImportProgressState(
+                            importId: importId,
+                            status: "stopped",
+                            progress: nextProgress.clampedProgress,
+                            details: "Import stopped"
+                        )
+                    }
                     isRunning = false
                     return
                 }
@@ -121,6 +154,10 @@ final class TorrentImportController: ObservableObject {
                     return
                 }
             } catch {
+                if isCancellation(error) {
+                    isRunning = false
+                    return
+                }
                 progress = TorrentImportProgressState(
                     importId: importId,
                     status: "downloading",
@@ -200,6 +237,13 @@ final class TorrentImportController: ObservableObject {
 
     private func encodePathComponent(_ value: String) -> String {
         value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
+    }
+
+    private func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+        let text = error.localizedDescription.lowercased()
+        return text == "cancelled" || text == "canceled"
     }
 
     private func formatBytes(_ bytes: Int) -> String {
