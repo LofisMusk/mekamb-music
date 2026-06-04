@@ -1,0 +1,239 @@
+@supports (padding: max(0px)) {
+  :root {
+    --safe-top: env(safe-area-inset-top);
+    --safe-right: env(safe-area-inset-right);
+    --safe-bottom: env(safe-area-inset-bottom);
+    --safe-left: env(safe-area-inset-left);
+  }
+}
+
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+}
+
+html {
+  min-height: 100%;
+  background: var(--background);
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  min-height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  touch-action: manipulation;
+}
+
+button,
+input {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button {
+  min-height: 34px;
+}
+
+input {
+  font-size: 16px !important;
+}
+
+@media (max-width: 767px), (hover: none) and (pointer: coarse) {
+  #root {
+    height: 100dvh;
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 20% 0%, rgba(96, 165, 250, 0.18), transparent 32rem),
+      var(--background);
+  }
+
+  #root > div.size-full {
+    height: 100dvh !important;
+    padding-top: max(0.75rem, var(--safe-top));
+    padding-left: max(0rem, var(--safe-left));
+    padding-right: max(0rem, var(--safe-right));
+    background: transparent !important;
+  }
+
+  #root > div > .flex.flex-1 {
+    flex-direction: column !important;
+    min-height: 0;
+  }
+
+  aside {
+    width: 100% !important;
+    height: auto !important;
+    max-height: none !important;
+    order: 2;
+    flex-direction: column !important;
+    border-right: 0 !important;
+    border-top: 1px solid var(--border) !important;
+    background: rgba(15, 22, 35, 0.94) !important;
+    backdrop-filter: blur(22px);
+    -webkit-backdrop-filter: blur(22px);
+    padding-bottom: calc(0.35rem + var(--safe-bottom));
+  }
+
+  aside > div:first-child {
+    order: 2;
+    padding: 0.5rem 0.85rem 0.35rem !important;
+    border-bottom: 0 !important;
+  }
+
+  aside > div:first-child > div:first-child {
+    margin-bottom: 0.45rem !important;
+  }
+
+  aside > nav {
+    order: 1;
+    flex-direction: row !important;
+    justify-content: space-around;
+    gap: 0.25rem !important;
+    padding: 0.45rem 0.65rem 0.25rem !important;
+    flex: 0 0 auto !important;
+  }
+
+  aside > nav button {
+    flex: 1 1 0;
+    min-width: 0;
+    flex-direction: column !important;
+    justify-content: center;
+    gap: 0.18rem !important;
+    padding: 0.45rem 0.15rem !important;
+    border-left: 0 !important;
+    border-bottom: 2px solid transparent;
+    font-size: 0.68rem !important;
+    border-radius: 0.95rem !important;
+  }
+
+  aside > nav button svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  main {
+    order: 1;
+    padding: 0.9rem 1rem 1rem !important;
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    -webkit-overflow-scrolling: touch;
+    scroll-padding-bottom: 9rem;
+  }
+
+  main h2 {
+    font-size: 1.4rem !important;
+    line-height: 1.1 !important;
+  }
+
+  main h3 {
+    font-size: 1.6rem !important;
+  }
+
+  .grid[style*="2rem 1fr 1fr 3rem 3rem"] {
+    grid-template-columns: 1.6rem minmax(0, 1fr) 3.2rem 2.4rem !important;
+  }
+
+  .grid[style*="2rem 1fr 5rem 5rem 6rem"] {
+    grid-template-columns: 1.6rem minmax(0, 1fr) 3.6rem 4.5rem !important;
+  }
+
+  .grid[style*="2rem 1fr 5rem 5rem 6rem"] > span:nth-child(4),
+  .grid[style*="2rem 1fr 5rem 5rem 6rem"] > div:nth-child(4) {
+    display: none !important;
+  }
+
+  .grid[style*="2rem 1fr 1fr 3rem 3rem"] > span:nth-child(3),
+  .grid[style*="2rem 1fr 1fr 3rem 3rem"] > div:nth-child(3) {
+    display: none !important;
+  }
+
+  .grid[style*="repeat(auto-fill, minmax(160px, 1fr))"] {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 0.75rem !important;
+  }
+
+  main .w-40.h-40 {
+    width: 8.5rem !important;
+    height: 8.5rem !important;
+  }
+
+  footer {
+    position: relative;
+    order: 3;
+    padding: 0.7rem 1rem calc(0.85rem + var(--safe-bottom)) !important;
+    background: rgba(15, 22, 35, 0.96) !important;
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+  }
+
+  footer > div:first-child {
+    gap: 0.5rem !important;
+  }
+
+  footer > div:first-child span {
+    min-width: 2.15rem !important;
+  }
+
+  footer > div:last-child {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "track play"
+      "volume volume";
+    row-gap: 0.6rem;
+    column-gap: 0.65rem;
+    align-items: center;
+  }
+
+  footer > div:last-child > div:nth-child(1) {
+    grid-area: track;
+    width: auto !important;
+    min-width: 0;
+  }
+
+  footer > div:last-child > div:nth-child(2) {
+    grid-area: play;
+    justify-content: flex-end !important;
+    gap: 0.7rem !important;
+  }
+
+  footer > div:last-child > div:nth-child(2) button:first-child,
+  footer > div:last-child > div:nth-child(2) button:last-child {
+    display: none !important;
+  }
+
+  footer > div:last-child > div:nth-child(3) {
+    grid-area: volume;
+    width: 100% !important;
+    justify-content: stretch !important;
+  }
+
+  footer > div:last-child > div:nth-child(3) svg {
+    flex: 0 0 auto;
+  }
+}
+
+@media (min-width: 393px) and (max-width: 767px) {
+  main {
+    padding-left: 1.1rem !important;
+    padding-right: 1.1rem !important;
+  }
+
+  .grid[style*="repeat(auto-fill, minmax(160px, 1fr))"] {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 374px) {
+  aside > nav button {
+    font-size: 0.62rem !important;
+  }
+
+  .grid[style*="repeat(auto-fill, minmax(160px, 1fr))"] {
+    grid-template-columns: 1fr !important;
+  }
+}
