@@ -41,15 +41,16 @@ permission on current iOS versions.
 
 ## Current native features
 
-- library list from `GET /tracks`
+- library list from `GET /tracks`, fetched page-by-page so imports do not hide older albums
 - albums tab grouped from library tracks by normalized album title so featured artists do not split one album into duplicates
-- stable alphabetical album ordering and stable track ordering
-- album detail pages with tracks in normal alphabetical order
+- stable alphabetical album ordering and original album track ordering
+- album detail pages with tracks in original album order when filenames contain track numbers
 - album covers from `GET /tracks/{id}/artwork`, matching the browser frontend's cover.jpg behavior
 - liked tracks from `GET /tracks/liked`
 - like/unlike with `PUT` / `DELETE /tracks/{id}/like`
 - torrent search through `GET /sources/piratebay/search`
-- torrent import through `POST /imports/piratebay/{torrent_id}`
+- torrent import through `POST /imports/piratebay/{torrent_id}` with a native progress bar
+- stable library refresh after imports without showing false `cancelled` errors
 - direct playback from `GET /tracks/{id}/stream`
 - background playback through iOS `audio` background mode
 - lock screen, Control Center, headphones, and Dynamic Island media controls through `MPNowPlayingInfoCenter` and `MPRemoteCommandCenter`
