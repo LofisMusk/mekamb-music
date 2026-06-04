@@ -2,6 +2,7 @@ import AVFoundation
 import Foundation
 import MediaPlayer
 import SwiftUI
+import UIKit
 
 struct ApiTrack: Identifiable, Codable, Hashable {
     let id: String
@@ -30,6 +31,18 @@ struct ApiTrack: Identifiable, Codable, Hashable {
         guard let durationSeconds, durationSeconds.isFinite, durationSeconds > 0 else { return "0:00" }
         let total = Int(durationSeconds.rounded())
         return "\(total / 60):\(String(format: "%02d", total % 60))"
+    }
+}
+
+struct Album: Identifiable, Hashable {
+    let id: String
+    let title: String
+    let artist: String
+    let tracks: [ApiTrack]
+    let coverTrackId: String?
+
+    var trackCountText: String {
+        tracks.count == 1 ? "1 song" : "\(tracks.count) songs"
     }
 }
 
@@ -88,6 +101,7 @@ enum SearchMode: String, CaseIterable, Identifiable {
 
 enum MusicTab: String, CaseIterable, Identifiable {
     case library = "Library"
+    case albums = "Albums"
     case liked = "Liked"
     case settings = "Settings"
     var id: String { rawValue }
@@ -95,7 +109,7 @@ enum MusicTab: String, CaseIterable, Identifiable {
 
 @MainActor
 final class AppState: ObservableObject {
-    @AppStorage("mekambMusicApiEndpoint") var apiEndpoint: String = "http://localhost:8000"
+    @AppStorage("mekambMusicApiEndpoint") var apiEndpoint: String = ""
     @AppStorage("mekambMusicApiToken") var apiToken: String = ""
 
     @Published var searchMode: SearchMode = .library
@@ -104,8 +118,12 @@ final class AppState: ObservableObject {
     @Published var tracks: [ApiTrack] = []
     @Published var likedTrackIds: Set<String> = []
     @Published var torrents: [TorrentResult] = []
+    @Published var albumCovers: [String: UIImage] = [:]
+    @Published var selectedAlbumId: String?
     @Published var isLoading = false
     @Published var isSearchingTorrents = false
+    @Published var isTestingConnection = false
+    @Published var connectionStatus: String?
     @Published var errorMessage: String?
     @Published var currentTrack: ApiTrack?
     @Published var isPlaying = false
@@ -125,6 +143,47 @@ final class AppState: ObservableObject {
         if let playerItemEndObserver { NotificationCenter.default.removeObserver(playerItemEndObserver) }
     }
 
+    var normalizedEndpoint: String {
+        normalizeEndpoint(apiEndpoint)
+    }
+
+    var endpointWarning: String? {
+        let normalized = normalizedEndpoint.lowercased()
+        if normalized.isEmpty { return "Set your backend URL, for example http://192.168.1.50:8000." }
+        if normalized.contains("localhost") || normalized.contains("127.0.0.1") {
+            return "On a real iPhone, localhost points to the iPhone. Use your Mac/server LAN IP instead."
+        }
+        return nil
+    }
+
+    var canUseApi: Bool {
+        !normalizedEndpoint.isEmpty && !apiToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var albums: [Album] {
+        let grouped = Dictionary(grouping: tracks) { track in
+            "\(track.displayArtist.lowercased())|\(track.displayAlbum.lowercased())"
+        }
+        return grouped.values.map { albumTracks in
+            let sortedTracks = albumTracks.sorted { left, right in
+                left.title.localizedCaseInsensitiveCompare(right.title) == .orderedAscending
+            }
+            let first = sortedTracks.first
+            return Album(
+                id: "\(first?.displayArtist ?? "Unknown Artist")|\(first?.displayAlbum ?? "Unknown Album")",
+                title: first?.displayAlbum ?? "Unknown Album",
+                artist: first?.displayArtist ?? "Unknown Artist",
+                tracks: sortedTracks,
+                coverTrackId: sortedTracks.first?.id
+            )
+        }
+        .sorted { left, right in
+            let titleOrder = left.title.localizedCaseInsensitiveCompare(right.title)
+            if titleOrder != .orderedSame { return titleOrder == .orderedAscending }
+            return left.artist.localizedCaseInsensitiveCompare(right.artist) == .orderedAscending
+        }
+    }
+
     var filteredTracks: [ApiTrack] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let base = selectedTab == .liked ? tracks.filter { likedTrackIds.contains($0.id) } : tracks
@@ -136,14 +195,38 @@ final class AppState: ObservableObject {
         }
     }
 
-    var canUseApi: Bool {
-        !apiEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        && !apiToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    var filteredAlbums: [Album] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty, searchMode == .library else { return albums }
+        return albums.filter {
+            $0.title.lowercased().contains(query)
+            || $0.artist.lowercased().contains(query)
+        }
+    }
+
+    var selectedAlbum: Album? {
+        guard let selectedAlbumId else { return nil }
+        return albums.first { $0.id == selectedAlbumId }
+    }
+
+    func testConnection() async {
+        isTestingConnection = true
+        errorMessage = nil
+        connectionStatus = nil
+        do {
+            let _: EmptyResponse = try await request("/health", requiresAuth: false)
+            connectionStatus = "Connected to \(normalizedEndpoint)"
+        } catch {
+            let message = clean(error)
+            connectionStatus = "Connection failed: \(message)"
+            errorMessage = message
+        }
+        isTestingConnection = false
     }
 
     func refreshLibrary() async {
         guard canUseApi else {
-            errorMessage = "Set API endpoint and token in Settings."
+            errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
             return
         }
         isLoading = true
@@ -153,12 +236,28 @@ final class AppState: ObservableObject {
             async let trackResponse: TrackListResponse = request("/tracks?limit=200")
             let (liked, allTracks) = try await (likedResponse, trackResponse)
             likedTrackIds = Set(liked.items.map { $0.track.id })
-            tracks = allTracks.items
+            tracks = allTracks.items.sorted { left, right in
+                left.title.localizedCaseInsensitiveCompare(right.title) == .orderedAscending
+            }
             if currentTrack == nil { currentTrack = tracks.first }
+            selectedAlbumId = selectedAlbumId.flatMap { id in albums.contains(where: { $0.id == id }) ? id : nil }
+            Task { await loadMissingAlbumCovers() }
         } catch {
             errorMessage = clean(error)
         }
         isLoading = false
+    }
+
+    func loadMissingAlbumCovers() async {
+        let targets = albums.compactMap { album -> (String, String)? in
+            guard albumCovers[album.id] == nil, let trackId = album.coverTrackId else { return nil }
+            return (album.id, trackId)
+        }
+        for (albumId, trackId) in targets {
+            if let image = try? await loadArtwork(trackId: trackId) {
+                albumCovers[albumId] = image
+            }
+        }
     }
 
     func searchTorrents() async {
@@ -248,7 +347,7 @@ final class AppState: ObservableObject {
     }
 
     func nextTrack() {
-        let list = filteredTracks.isEmpty ? tracks : filteredTracks
+        let list = selectedTab == .albums ? (selectedAlbum?.tracks ?? tracks) : (filteredTracks.isEmpty ? tracks : filteredTracks)
         guard let currentTrack, let index = list.firstIndex(where: { $0.id == currentTrack.id }), !list.isEmpty else {
             if let first = list.first { play(first) }
             return
@@ -257,7 +356,7 @@ final class AppState: ObservableObject {
     }
 
     func previousTrack() {
-        let list = filteredTracks.isEmpty ? tracks : filteredTracks
+        let list = selectedTab == .albums ? (selectedAlbum?.tracks ?? tracks) : (filteredTracks.isEmpty ? tracks : filteredTracks)
         guard let currentTrack, let index = list.firstIndex(where: { $0.id == currentTrack.id }), !list.isEmpty else {
             if let first = list.first { play(first) }
             return
@@ -270,12 +369,23 @@ final class AppState: ObservableObject {
         let _: EmptyResponse = try await request("/tracks/\(encodedId)/plays", method: "POST")
     }
 
-    private func request<T: Decodable>(_ path: String, method: String = "GET") async throws -> T {
-        guard let url = endpointURL(path: path) else { throw URLError(.badURL) }
+    private func loadArtwork(trackId: String) async throws -> UIImage? {
+        let encodedId = encodePathComponent(trackId)
+        guard let url = endpointURL(path: "/tracks/\(encodedId)/artwork") else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
+        return UIImage(data: data)
+    }
+
+    private func request<T: Decodable>(_ path: String, method: String = "GET", requiresAuth: Bool = true) async throws -> T {
+        guard let url = endpointURL(path: path) else { throw BackendError.message("Bad API endpoint. Use http://IP:8000, for example http://192.168.1.50:8000.") }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = 20
-        if path != "/health" {
+        if requiresAuth {
             request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
         }
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -292,8 +402,16 @@ final class AppState: ObservableObject {
     }
 
     private func endpointURL(path: String) -> URL? {
-        let base = apiEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let base = normalizedEndpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !base.isEmpty else { return nil }
         return URL(string: base + path)
+    }
+
+    private func normalizeEndpoint(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !trimmed.isEmpty else { return "" }
+        if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") { return trimmed }
+        return "http://\(trimmed)"
     }
 
     private func encodePathComponent(_ value: String) -> String {
@@ -409,6 +527,14 @@ final class AppState: ObservableObject {
 
     private func clean(_ error: Error) -> String {
         if let backend = error as? BackendError { return backend.localizedDescription }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .cannotConnectToHost, .notConnectedToInternet, .timedOut, .networkConnectionLost:
+                return "Cannot reach backend at \(normalizedEndpoint). Make sure the backend is running, the iPhone is on the same Wi‑Fi, and you used the LAN IP, not localhost."
+            default:
+                return urlError.localizedDescription
+            }
+        }
         return error.localizedDescription
     }
 }
