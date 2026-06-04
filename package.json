@@ -10,21 +10,14 @@
     "desktop": "npm run build && electron .",
     "desktop:dist": "npm run build && electron-builder",
     "desktop:dist:linux": "npm run build && electron-builder --linux AppImage deb",
-    "desktop:dist:mac": "npm run build && electron-builder --mac dmg zip",
-    "ios:add": "npm run build && npx cap add ios",
-    "ios:sync": "npm run build && npx cap sync ios",
-    "ios:open": "npm run ios:sync && npx cap open ios",
-    "ios:run": "npm run ios:sync && npx cap run ios"
+    "desktop:dist:mac": "npm run build && electron-builder --mac dmg zip"
   },
   "dependencies": {
-    "@capacitor/core": "^8.0.0",
     "lucide-react": "0.487.0",
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },
   "devDependencies": {
-    "@capacitor/cli": "^8.0.0",
-    "@capacitor/ios": "^8.0.0",
     "@tailwindcss/vite": "4.1.12",
     "@types/react": "18.3.12",
     "@types/react-dom": "18.3.1",
