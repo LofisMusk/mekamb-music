@@ -217,6 +217,10 @@ final class AppState: ObservableObject {
             let _: EmptyResponse = try await request("/health", requiresAuth: false)
             connectionStatus = "Connected to \(normalizedEndpoint)"
         } catch {
+            guard !isCancellation(error) else {
+                isTestingConnection = false
+                return
+            }
             let message = clean(error)
             connectionStatus = "Connection failed: \(message)"
             errorMessage = message
@@ -232,16 +236,18 @@ final class AppState: ObservableObject {
         isLoading = true
         errorMessage = nil
         do {
-            async let likedResponse: LikedTracksResponse = request("/tracks/liked?limit=200")
-            async let trackResponse: TrackListResponse = request("/tracks?limit=200")
-            let (liked, allTracks) = try await (likedResponse, trackResponse)
-            likedTrackIds = Set(liked.items.map { $0.track.id })
-            tracks = allTracks.items.sorted(by: stableLibraryTrackOrder)
+            async let likedIds = loadAllLikedTrackIds()
+            async let allTracks = loadAllTracks()
+            let (newLikedIds, newTracks) = try await (likedIds, allTracks)
+            likedTrackIds = newLikedIds
+            tracks = mergeTracks(existing: tracks, incoming: newTracks).sorted(by: stableLibraryTrackOrder)
             if currentTrack == nil { currentTrack = tracks.first }
             selectedAlbumId = selectedAlbumId.flatMap { id in albums.contains(where: { $0.id == id }) ? id : nil }
             Task { await loadMissingAlbumCovers() }
         } catch {
-            errorMessage = clean(error)
+            if !isCancellation(error) {
+                errorMessage = clean(error)
+            }
         }
         isLoading = false
     }
@@ -271,8 +277,10 @@ final class AppState: ObservableObject {
             let response: TorrentSearchResponse = try await request("/sources/piratebay/search?q=\(encoded)")
             torrents = response.items.sorted { Int($0.seeders ?? "0") ?? 0 > Int($1.seeders ?? "0") ?? 0 }
         } catch {
-            errorMessage = clean(error)
-            torrents = []
+            if !isCancellation(error) {
+                errorMessage = clean(error)
+                torrents = []
+            }
         }
         isSearchingTorrents = false
     }
@@ -283,7 +291,9 @@ final class AppState: ObservableObject {
             let encodedId = encodePathComponent(torrent.torrentId)
             let _: EmptyResponse = try await request("/imports/piratebay/\(encodedId)", method: "POST")
         } catch {
-            errorMessage = clean(error)
+            if !isCancellation(error) {
+                errorMessage = clean(error)
+            }
         }
     }
 
@@ -295,7 +305,9 @@ final class AppState: ObservableObject {
             let _: EmptyResponse = try await request("/tracks/\(encodedId)/like", method: willLike ? "PUT" : "DELETE")
         } catch {
             if willLike { likedTrackIds.remove(track.id) } else { likedTrackIds.insert(track.id) }
-            errorMessage = clean(error)
+            if !isCancellation(error) {
+                errorMessage = clean(error)
+            }
         }
     }
 
@@ -362,6 +374,40 @@ final class AppState: ObservableObject {
         play(list[(index - 1 + list.count) % list.count])
     }
 
+    private func loadAllTracks() async throws -> [ApiTrack] {
+        var items: [ApiTrack] = []
+        let limit = 200
+        var offset = 0
+        while true {
+            let response: TrackListResponse = try await request("/tracks?limit=\(limit)&offset=\(offset)")
+            items.append(contentsOf: response.items)
+            if response.items.count < limit { break }
+            offset += limit
+        }
+        return items
+    }
+
+    private func loadAllLikedTrackIds() async throws -> Set<String> {
+        var ids = Set<String>()
+        let limit = 200
+        var offset = 0
+        while true {
+            let response: LikedTracksResponse = try await request("/tracks/liked?limit=\(limit)&offset=\(offset)")
+            ids.formUnion(response.items.map { $0.track.id })
+            if response.items.count < limit { break }
+            offset += limit
+        }
+        return ids
+    }
+
+    private func mergeTracks(existing: [ApiTrack], incoming: [ApiTrack]) -> [ApiTrack] {
+        var merged = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+        for track in incoming {
+            merged[track.id] = track
+        }
+        return Array(merged.values)
+    }
+
     private func postPlay(_ track: ApiTrack) async throws {
         let encodedId = encodePathComponent(track.id)
         let _: EmptyResponse = try await request("/tracks/\(encodedId)/plays", method: "POST")
@@ -414,6 +460,13 @@ final class AppState: ObservableObject {
 
     private func encodePathComponent(_ value: String) -> String {
         value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
+    }
+
+    private func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+        let text = error.localizedDescription.lowercased()
+        return text == "cancelled" || text == "canceled"
     }
 
     private func stableAlbumKey(for track: ApiTrack) -> String {
