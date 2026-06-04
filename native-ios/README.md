@@ -25,16 +25,26 @@ docker compose up --build
 
 In the iOS app, open Settings and enter:
 
-- API endpoint: `http://YOUR_MAC_OR_SERVER_LAN_IP:8000`
+- API endpoint: `YOUR_MAC_OR_SERVER_LAN_IP:8000`
 - API token: the same value as `API_TOKEN` from your backend `.env`
+
+The app automatically adds `http://` when you type only `192.168.1.50:8000`.
+Use the **Test connection** button in Settings before refreshing the library.
 
 Do not use `http://localhost:8000` on a physical iPhone. On iPhone,
 `localhost` means the iPhone itself, not your Mac or server. Use your LAN IP,
-for example `http://192.168.1.50:8000`.
+for example `192.168.1.50:8000`.
+
+If iOS asks for local network permission, allow it. The app includes
+`NSLocalNetworkUsageDescription` because local LAN backend access requires that
+permission on current iOS versions.
 
 ## Current native features
 
 - library list from `GET /tracks`
+- albums tab grouped from library tracks
+- album detail pages with tracks in normal alphabetical order
+- album covers from `GET /tracks/{id}/artwork`, matching the browser frontend's cover.jpg behavior
 - liked tracks from `GET /tracks/liked`
 - like/unlike with `PUT` / `DELETE /tracks/{id}/like`
 - torrent search through `GET /sources/piratebay/search`
