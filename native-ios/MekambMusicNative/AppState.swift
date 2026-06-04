@@ -171,7 +171,8 @@ final class AppState: ObservableObject {
     func importTorrent(_ torrent: TorrentResult) async {
         errorMessage = nil
         do {
-            let _: EmptyResponse = try await request("/imports/piratebay/\(torrent.torrentId)", method: "POST")
+            let encodedId = encodePathComponent(torrent.torrentId)
+            let _: EmptyResponse = try await request("/imports/piratebay/\(encodedId)", method: "POST")
         } catch {
             errorMessage = clean(error)
         }
@@ -181,7 +182,8 @@ final class AppState: ObservableObject {
         let willLike = !likedTrackIds.contains(track.id)
         if willLike { likedTrackIds.insert(track.id) } else { likedTrackIds.remove(track.id) }
         do {
-            let _: EmptyResponse = try await request("/tracks/\(track.id)/like", method: willLike ? "PUT" : "DELETE")
+            let encodedId = encodePathComponent(track.id)
+            let _: EmptyResponse = try await request("/tracks/\(encodedId)/like", method: willLike ? "PUT" : "DELETE")
         } catch {
             if willLike { likedTrackIds.remove(track.id) } else { likedTrackIds.insert(track.id) }
             errorMessage = clean(error)
@@ -190,10 +192,11 @@ final class AppState: ObservableObject {
 
     func play(_ track: ApiTrack) {
         currentTrack = track
-        guard let url = endpointURL(path: "/tracks/\(track.id)/stream") else { return }
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
-        let item = AVPlayerItem(asset: AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": request.allHTTPHeaderFields ?? [:]]))
+        let encodedId = encodePathComponent(track.id)
+        guard let url = endpointURL(path: "/tracks/\(encodedId)/stream") else { return }
+        let headers = ["Authorization": "Bearer \(apiToken)"]
+        let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+        let item = AVPlayerItem(asset: asset)
         player?.pause()
         player = AVPlayer(playerItem: item)
         addTimeObserver()
@@ -235,7 +238,8 @@ final class AppState: ObservableObject {
     }
 
     private func postPlay(_ track: ApiTrack) async throws {
-        let _: EmptyResponse = try await request("/tracks/\(track.id)/plays", method: "POST")
+        let encodedId = encodePathComponent(track.id)
+        let _: EmptyResponse = try await request("/tracks/\(encodedId)/plays", method: "POST")
     }
 
     private func request<T: Decodable>(_ path: String, method: String = "GET") async throws -> T {
@@ -264,6 +268,10 @@ final class AppState: ObservableObject {
         return URL(string: base + path)
     }
 
+    private func encodePathComponent(_ value: String) -> String {
+        value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
+    }
+
     private func addTimeObserver() {
         if let timeObserver { player?.removeTimeObserver(timeObserver) }
         let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
@@ -290,6 +298,9 @@ struct ApiError: Decodable {
 enum BackendError: LocalizedError {
     case message(String)
     var errorDescription: String? {
-        switch self { case .message(let value): value }
+        switch self {
+        case .message(let value):
+            return value
+        }
     }
 }
