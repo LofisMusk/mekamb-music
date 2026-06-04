@@ -57,22 +57,39 @@ support depends on the desktop environment and window manager.
 
 ## iOS App
 
-The iOS app is also a client only. It uses Capacitor to package the same
-React/Vite player UI and points it at the same external API endpoints.
-Capacitor native HTTP is enabled so the iOS WebView can call your backend
-without depending on browser CORS behavior.
+The iOS app is a client only. It uses Capacitor to package the same React/Vite
+player UI and points it at the same external API endpoints. Capacitor native
+HTTP is enabled so the iOS WebView can call your backend without depending on
+browser CORS behavior.
+
+The UI includes an iPhone-first layout for iPhone 16 Pro: safe-area/notch
+spacing, a bottom navigation/search area, mobile-sized playback controls,
+two-column album cards, and reduced desktop table columns on narrow screens.
 
 After installing npm dependencies:
 
 ```bash
+npm install
 npm run ios:add
 npm run ios:open
 ```
+
+In Xcode, select an iPhone 16 Pro simulator or your connected iPhone 16 Pro,
+choose the `Mekamb Music` scheme, and press Run. On a physical device you need
+your Apple Developer team selected under Signing & Capabilities.
 
 For later frontend changes:
 
 ```bash
 npm run ios:sync
+```
+
+Useful local loop for mobile UI work:
+
+```bash
+npm run build
+npm run ios:sync
+npm run ios:open
 ```
 
 Compose waits for Postgres and Redis healthchecks before starting the app.
@@ -124,8 +141,8 @@ python -m app.api.openapi_export openapi.json
 - `GET /tracks?q=...&artist=...&album=...&source_import_id=...&limit=50&offset=0`
 - `GET /tracks/liked?limit=50&offset=0`
 - `GET /tracks/recent?limit=50&offset=0`
-- `GET /tracks/artists?q=...&limit=50&offset=0`
-- `GET /tracks/albums?q=...&limit=50&offset=0`
+- `GET /tracks/artists?q=...&limit=50`
+- `GET /tracks/albums?q=...&limit=50`
 - `GET /tracks/{id}`
 - `GET /tracks/{id}/stats`
 - `PATCH /tracks/{id}`
