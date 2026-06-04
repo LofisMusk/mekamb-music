@@ -162,26 +162,24 @@ final class AppState: ObservableObject {
 
     var albums: [Album] {
         let grouped = Dictionary(grouping: tracks) { track in
-            "\(track.displayArtist.lowercased())|\(track.displayAlbum.lowercased())"
+            stableAlbumKey(for: track)
         }
-        return grouped.values.map { albumTracks in
-            let sortedTracks = albumTracks.sorted { left, right in
-                left.title.localizedCaseInsensitiveCompare(right.title) == .orderedAscending
+
+        return grouped
+            .map { key, albumTracks in
+                let sortedTracks = albumTracks.sorted(by: stableTrackOrder)
+                let first = sortedTracks.first
+                let title = bestAlbumTitle(from: sortedTracks)
+                let artist = bestAlbumArtist(from: sortedTracks)
+                return Album(
+                    id: key,
+                    title: title,
+                    artist: artist,
+                    tracks: sortedTracks,
+                    coverTrackId: sortedTracks.first?.id ?? first?.id
+                )
             }
-            let first = sortedTracks.first
-            return Album(
-                id: "\(first?.displayArtist ?? "Unknown Artist")|\(first?.displayAlbum ?? "Unknown Album")",
-                title: first?.displayAlbum ?? "Unknown Album",
-                artist: first?.displayArtist ?? "Unknown Artist",
-                tracks: sortedTracks,
-                coverTrackId: sortedTracks.first?.id
-            )
-        }
-        .sorted { left, right in
-            let titleOrder = left.title.localizedCaseInsensitiveCompare(right.title)
-            if titleOrder != .orderedSame { return titleOrder == .orderedAscending }
-            return left.artist.localizedCaseInsensitiveCompare(right.artist) == .orderedAscending
-        }
+            .sorted(by: stableAlbumOrder)
     }
 
     var filteredTracks: [ApiTrack] {
@@ -236,9 +234,7 @@ final class AppState: ObservableObject {
             async let trackResponse: TrackListResponse = request("/tracks?limit=200")
             let (liked, allTracks) = try await (likedResponse, trackResponse)
             likedTrackIds = Set(liked.items.map { $0.track.id })
-            tracks = allTracks.items.sorted { left, right in
-                left.title.localizedCaseInsensitiveCompare(right.title) == .orderedAscending
-            }
+            tracks = allTracks.items.sorted(by: stableTrackOrder)
             if currentTrack == nil { currentTrack = tracks.first }
             selectedAlbumId = selectedAlbumId.flatMap { id in albums.contains(where: { $0.id == id }) ? id : nil }
             Task { await loadMissingAlbumCovers() }
@@ -416,6 +412,70 @@ final class AppState: ObservableObject {
 
     private func encodePathComponent(_ value: String) -> String {
         value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
+    }
+
+    private func stableAlbumKey(for track: ApiTrack) -> String {
+        let normalizedAlbum = normalizedGroupingValue(track.album) ?? normalizedGroupingValue(track.originalFilename) ?? track.id
+        return "album|\(normalizedAlbum)"
+    }
+
+    private func normalizedGroupingValue(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let folded = value
+            .folding(options: [.diacriticInsensitive, .caseInsensitive, .widthInsensitive], locale: .current)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return folded.isEmpty ? nil : folded
+    }
+
+    private func bestAlbumTitle(from tracks: [ApiTrack]) -> String {
+        mostCommonDisplayValue(tracks.compactMap { cleanDisplayValue($0.album) }) ?? "Unknown Album"
+    }
+
+    private func bestAlbumArtist(from tracks: [ApiTrack]) -> String {
+        mostCommonDisplayValue(tracks.compactMap { cleanDisplayValue($0.artist) }) ?? "Various Artists"
+    }
+
+    private func cleanDisplayValue(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let cleaned = value
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+
+    private func mostCommonDisplayValue(_ values: [String]) -> String? {
+        let grouped = Dictionary(grouping: values, by: { normalizedGroupingValue($0) ?? $0.lowercased() })
+        return grouped
+            .map { _, group in (value: group.sorted(by: stableStringOrder).first ?? group[0], count: group.count) }
+            .sorted { left, right in
+                if left.count != right.count { return left.count > right.count }
+                return stableStringOrder(left.value, right.value)
+            }
+            .first?.value
+    }
+
+    private func stableAlbumOrder(_ left: Album, _ right: Album) -> Bool {
+        let titleOrder = left.title.localizedStandardCompare(right.title)
+        if titleOrder != .orderedSame { return titleOrder == .orderedAscending }
+        let artistOrder = left.artist.localizedStandardCompare(right.artist)
+        if artistOrder != .orderedSame { return artistOrder == .orderedAscending }
+        return left.id < right.id
+    }
+
+    private func stableTrackOrder(_ left: ApiTrack, _ right: ApiTrack) -> Bool {
+        let albumOrder = left.displayAlbum.localizedStandardCompare(right.displayAlbum)
+        if albumOrder != .orderedSame { return albumOrder == .orderedAscending }
+        let titleOrder = left.title.localizedStandardCompare(right.title)
+        if titleOrder != .orderedSame { return titleOrder == .orderedAscending }
+        return left.id < right.id
+    }
+
+    private func stableStringOrder(_ left: String, _ right: String) -> Bool {
+        let order = left.localizedStandardCompare(right)
+        if order != .orderedSame { return order == .orderedAscending }
+        return left < right
     }
 
     private func configureAudioSession() {
