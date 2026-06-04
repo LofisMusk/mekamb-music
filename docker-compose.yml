@@ -114,6 +114,9 @@ services:
 
   qbittorrent:
     image: lscr.io/linuxserver/qbittorrent:latest
+    depends_on:
+      qbittorrent-config-init:
+        condition: service_completed_successfully
     environment:
       PUID: 1000
       PGID: 1000
@@ -128,6 +131,16 @@ services:
       - qbittorrent-config:/config
       - quarantine:/downloads/incomplete
     restart: unless-stopped
+
+  qbittorrent-config-init:
+    image: python:3.12-alpine
+    env_file: .env
+    environment:
+      WEBUI_PORT: 8080
+    command: ["python", "/app/scripts/qbittorrent_configure.py"]
+    volumes:
+      - qbittorrent-config:/config
+      - ./scripts/qbittorrent_configure.py:/app/scripts/qbittorrent_configure.py:ro
 
 volumes:
   postgres:
