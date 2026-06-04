@@ -288,12 +288,26 @@ struct AlbumDetailView: View {
                     Text(album.trackCountText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Button {
-                        if let first = album.tracks.first { app.play(first) }
-                    } label: {
-                        Label("Play Album", systemImage: "play.fill")
+                    HStack(spacing: 10) {
+                        Button {
+                            if let first = album.tracks.first { app.play(first, queue: album.tracks) }
+                        } label: {
+                            Label("Play", systemImage: "play.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button {
+                            if let first = album.tracks.first {
+                                let previousShuffle = app.shuffleEnabled
+                                if !app.shuffleEnabled { app.shuffleEnabled = true }
+                                app.play(first, queue: album.tracks)
+                                app.shuffleEnabled = previousShuffle || app.shuffleEnabled
+                            }
+                        } label: {
+                            Image(systemName: "shuffle")
+                        }
+                        .buttonStyle(.bordered)
                     }
-                    .buttonStyle(.borderedProminent)
                     .padding(.top, 6)
                 }
             }
@@ -407,13 +421,22 @@ struct TrackRowNative: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
 
-                Button {
-                    Task { await app.toggleLike(track) }
+                Menu {
+                    Button {
+                        app.addToQueue(track)
+                    } label: {
+                        Label("Add to Queue", systemImage: "text.badge.plus")
+                    }
+                    Button {
+                        Task { await app.toggleLike(track) }
+                    } label: {
+                        Label(app.likedTrackIds.contains(track.id) ? "Unlike" : "Like", systemImage: app.likedTrackIds.contains(track.id) ? "heart.slash" : "heart")
+                    }
                 } label: {
-                    Image(systemName: app.likedTrackIds.contains(track.id) ? "heart.fill" : "heart")
-                        .foregroundStyle(app.likedTrackIds.contains(track.id) ? .blue : .secondary)
+                    Image(systemName: "ellipsis")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
                 }
-                .buttonStyle(.plain)
             }
             .padding(12)
             .background(app.currentTrack?.id == track.id ? Color.blue.opacity(0.18) : Color.white.opacity(0.06))
@@ -535,11 +558,35 @@ struct TorrentImportProgressView: View {
 
 struct PlayerBar: View {
     @EnvironmentObject private var app: AppState
+    @State private var showingQueue = false
 
     var body: some View {
         VStack(spacing: 10) {
             ProgressView(value: app.playbackProgress)
                 .tint(.blue)
+
+            HStack(spacing: 10) {
+                Button { app.toggleShuffle() } label: {
+                    Image(systemName: "shuffle")
+                        .foregroundStyle(app.shuffleEnabled ? .blue : .secondary)
+                }
+                .accessibilityLabel("Shuffle")
+
+                Spacer()
+
+                Text(app.repeatMode.label)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Button { app.cycleRepeatMode() } label: {
+                    Image(systemName: app.repeatMode.iconName)
+                        .foregroundStyle(app.repeatMode.isActive ? .blue : .secondary)
+                }
+                .accessibilityLabel(app.repeatMode.label)
+            }
+            .padding(.horizontal, 4)
 
             HStack(spacing: 12) {
                 if let track = app.currentTrack {
@@ -574,6 +621,10 @@ struct PlayerBar: View {
                         .clipShape(Circle())
                 }
                 Button { app.nextTrack() } label: { Image(systemName: "forward.fill") }
+                Button { showingQueue = true } label: {
+                    Image(systemName: "list.bullet")
+                }
+                .accessibilityLabel("Queue")
             }
             .foregroundStyle(.white)
         }
@@ -581,6 +632,113 @@ struct PlayerBar: View {
         .padding(.top, 10)
         .padding(.bottom, 12)
         .background(.ultraThinMaterial)
+        .sheet(isPresented: $showingQueue) {
+            QueueSheetView()
+                .environmentObject(app)
+                .presentationDetents([.medium, .large])
+        }
+    }
+}
+
+struct QueueSheetView: View {
+    @EnvironmentObject private var app: AppState
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    HStack {
+                        Label(app.shuffleEnabled ? "Shuffle On" : "Shuffle Off", systemImage: "shuffle")
+                            .foregroundStyle(app.shuffleEnabled ? .blue : .primary)
+                        Spacer()
+                        Button(app.shuffleEnabled ? "Turn Off" : "Turn On") {
+                            app.toggleShuffle()
+                        }
+                    }
+
+                    HStack {
+                        Label(app.repeatMode.label, systemImage: app.repeatMode.iconName)
+                            .foregroundStyle(app.repeatMode.isActive ? .blue : .primary)
+                        Spacer()
+                        Button("Change") {
+                            app.cycleRepeatMode()
+                        }
+                    }
+
+                    Button(role: .destructive) {
+                        app.clearQueue()
+                    } label: {
+                        Label("Clear Upcoming Queue", systemImage: "trash")
+                    }
+                }
+
+                Section("Now Playing") {
+                    if let currentTrack = app.currentTrack {
+                        QueueTrackRow(track: currentTrack, isCurrent: true)
+                            .environmentObject(app)
+                    } else {
+                        Text("Nothing playing")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Section("Up Next") {
+                    if app.upcomingQueueTracks.isEmpty {
+                        Text("No upcoming tracks")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(app.upcomingQueueTracks) { track in
+                            QueueTrackRow(track: track, isCurrent: false)
+                                .environmentObject(app)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Queue")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+struct QueueTrackRow: View {
+    @EnvironmentObject private var app: AppState
+    let track: ApiTrack
+    let isCurrent: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            TrackArtworkView(track: track, size: 42)
+                .environmentObject(app)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(track.title)
+                    .font(.subheadline.weight(isCurrent ? .bold : .regular))
+                    .lineLimit(1)
+                Text(track.displayArtist)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            if isCurrent {
+                Image(systemName: "speaker.wave.2.fill")
+                    .foregroundStyle(.blue)
+            } else {
+                Button(role: .destructive) {
+                    app.removeFromQueue(track)
+                } label: {
+                    Image(systemName: "minus.circle")
+                }
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            app.play(track, queue: app.queueTracks, updateQueue: false)
+        }
     }
 }
 
