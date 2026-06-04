@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import MediaPlayer
 import SwiftUI
 
 struct ApiTrack: Identifiable, Codable, Hashable {
@@ -112,6 +113,17 @@ final class AppState: ObservableObject {
 
     private var player: AVPlayer?
     private var timeObserver: Any?
+    private var playerItemEndObserver: NSObjectProtocol?
+
+    init() {
+        configureAudioSession()
+        configureRemoteCommandCenter()
+    }
+
+    deinit {
+        if let timeObserver { player?.removeTimeObserver(timeObserver) }
+        if let playerItemEndObserver { NotificationCenter.default.removeObserver(playerItemEndObserver) }
+    }
 
     var filteredTracks: [ApiTrack] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -192,16 +204,30 @@ final class AppState: ObservableObject {
 
     func play(_ track: ApiTrack) {
         currentTrack = track
+        playbackProgress = 0
+        configureAudioSession()
+
         let encodedId = encodePathComponent(track.id)
         guard let url = endpointURL(path: "/tracks/\(encodedId)/stream") else { return }
         let headers = ["Authorization": "Bearer \(apiToken)"]
         let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
         let item = AVPlayerItem(asset: asset)
+
+        if let playerItemEndObserver { NotificationCenter.default.removeObserver(playerItemEndObserver) }
+        playerItemEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.nextTrack() }
+        }
+
         player?.pause()
         player = AVPlayer(playerItem: item)
         addTimeObserver()
         player?.play()
         isPlaying = true
+        updateNowPlayingInfo(for: track, elapsed: 0)
         Task { try? await postPlay(track) }
     }
 
@@ -214,9 +240,11 @@ final class AppState: ObservableObject {
             player.pause()
             isPlaying = false
         } else {
+            configureAudioSession()
             player.play()
             isPlaying = true
         }
+        updateNowPlayingPlaybackRate()
     }
 
     func nextTrack() {
@@ -272,14 +300,110 @@ final class AppState: ObservableObject {
         value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
     }
 
+    private func configureAudioSession() {
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .default, policy: .longFormAudio)
+            try session.setActive(true)
+        } catch {
+            errorMessage = "Audio session error: \(error.localizedDescription)"
+        }
+    }
+
+    private func configureRemoteCommandCenter() {
+        let commandCenter = MPRemoteCommandCenter.shared()
+
+        commandCenter.playCommand.isEnabled = true
+        commandCenter.pauseCommand.isEnabled = true
+        commandCenter.togglePlayPauseCommand.isEnabled = true
+        commandCenter.nextTrackCommand.isEnabled = true
+        commandCenter.previousTrackCommand.isEnabled = true
+        commandCenter.changePlaybackPositionCommand.isEnabled = true
+
+        commandCenter.playCommand.addTarget { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if !self.isPlaying { self.togglePlayback() }
+            }
+            return .success
+        }
+
+        commandCenter.pauseCommand.addTarget { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if self.isPlaying { self.togglePlayback() }
+            }
+            return .success
+        }
+
+        commandCenter.togglePlayPauseCommand.addTarget { [weak self] _ in
+            Task { @MainActor in self?.togglePlayback() }
+            return .success
+        }
+
+        commandCenter.nextTrackCommand.addTarget { [weak self] _ in
+            Task { @MainActor in self?.nextTrack() }
+            return .success
+        }
+
+        commandCenter.previousTrackCommand.addTarget { [weak self] _ in
+            Task { @MainActor in self?.previousTrack() }
+            return .success
+        }
+
+        commandCenter.changePlaybackPositionCommand.addTarget { [weak self] event in
+            guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+            Task { @MainActor in self?.seek(to: event.positionTime) }
+            return .success
+        }
+    }
+
+    private func seek(to seconds: TimeInterval) {
+        let time = CMTime(seconds: seconds, preferredTimescale: 600)
+        player?.seek(to: time)
+        updateNowPlayingPlaybackRate(elapsed: seconds)
+    }
+
+    private func updateNowPlayingInfo(for track: ApiTrack, elapsed: TimeInterval) {
+        var info: [String: Any] = [
+            MPMediaItemPropertyTitle: track.title,
+            MPMediaItemPropertyArtist: track.displayArtist,
+            MPMediaItemPropertyAlbumTitle: track.displayAlbum,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0
+        ]
+        if let duration = track.durationSeconds, duration.isFinite, duration > 0 {
+            info[MPMediaItemPropertyPlaybackDuration] = duration
+        }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    private func updateNowPlayingPlaybackRate(elapsed: TimeInterval? = nil) {
+        guard var info = MPNowPlayingInfoCenter.default().nowPlayingInfo else {
+            if let currentTrack {
+                updateNowPlayingInfo(for: currentTrack, elapsed: elapsed ?? currentElapsedTime())
+            }
+            return
+        }
+        info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = elapsed ?? currentElapsedTime()
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    private func currentElapsedTime() -> TimeInterval {
+        player?.currentTime().seconds.isFinite == true ? player?.currentTime().seconds ?? 0 : 0
+    }
+
     private func addTimeObserver() {
         if let timeObserver { player?.removeTimeObserver(timeObserver) }
         let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
         timeObserver = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
             guard let self else { return }
             let duration = self.player?.currentItem?.duration.seconds ?? 0
-            guard duration.isFinite, duration > 0 else { return }
-            self.playbackProgress = min(max(time.seconds / duration, 0), 1)
+            if duration.isFinite, duration > 0 {
+                self.playbackProgress = min(max(time.seconds / duration, 0), 1)
+            }
+            self.updateNowPlayingPlaybackRate(elapsed: time.seconds)
         }
     }
 
