@@ -12,6 +12,19 @@ struct RootView: View {
             VStack(spacing: 0) {
                 searchHeader
 
+                if let warning = app.endpointWarning, app.selectedTab == .settings {
+                    Text(warning)
+                        .font(.footnote)
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.yellow.opacity(0.85))
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .padding(.horizontal)
+                        .padding(.bottom, 8)
+                }
+
                 if let error = app.errorMessage {
                     Text(error)
                         .font(.footnote)
@@ -52,8 +65,12 @@ struct RootView: View {
         }
         .onChange(of: app.searchMode) { mode in
             if mode == .torrent {
+                app.selectedAlbumId = nil
                 Task { await app.searchTorrents() }
             }
+        }
+        .onChange(of: app.selectedTab) { tab in
+            if tab != .albums { app.selectedAlbumId = nil }
         }
     }
 
@@ -62,7 +79,7 @@ struct RootView: View {
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)
-                TextField(app.searchMode == .torrent ? "Search torrents…" : "Search library…", text: $app.searchText)
+                TextField(app.searchMode == .torrent ? "Search torrents…" : app.selectedTab == .albums ? "Search albums…" : "Search library…", text: $app.searchText)
                     .focused($searchFocused)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -108,26 +125,33 @@ struct RootView: View {
         if app.searchMode == .torrent {
             TorrentSearchView()
                 .environmentObject(app)
-        } else if app.selectedTab == .settings {
-            SettingsView()
-                .environmentObject(app)
         } else {
-            LibraryView()
-                .environmentObject(app)
+            switch app.selectedTab {
+            case .library, .liked:
+                LibraryView()
+                    .environmentObject(app)
+            case .albums:
+                AlbumsView()
+                    .environmentObject(app)
+            case .settings:
+                SettingsView()
+                    .environmentObject(app)
+            }
         }
     }
 
     private var tabBar: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             ForEach(MusicTab.allCases) { tab in
                 Button {
                     dismissSearch()
+                    app.searchMode = .library
                     app.selectedTab = tab
-                    if tab == .settings { app.searchMode = .library }
+                    if tab != .albums { app.selectedAlbumId = nil }
                 } label: {
                     VStack(spacing: 4) {
                         Image(systemName: icon(for: tab))
-                            .font(.system(size: 18, weight: .semibold))
+                            .font(.system(size: 17, weight: .semibold))
                         Text(tab.rawValue)
                             .font(.caption2.weight(.semibold))
                     }
@@ -139,7 +163,7 @@ struct RootView: View {
                 }
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 10)
         .padding(.top, 8)
         .padding(.bottom, 10)
         .background(.ultraThinMaterial)
@@ -153,6 +177,8 @@ struct RootView: View {
         switch tab {
         case .library:
             return "music.note.list"
+        case .albums:
+            return "square.grid.2x2.fill"
         case .liked:
             return "heart.fill"
         case .settings:
@@ -194,6 +220,172 @@ struct LibraryView: View {
     }
 }
 
+struct AlbumsView: View {
+    @EnvironmentObject private var app: AppState
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Button {
+                        app.selectedAlbumId = nil
+                    } label: {
+                        if app.selectedAlbumId != nil {
+                            Label("Albums", systemImage: "chevron.left")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    Text(app.selectedAlbum?.title ?? "Albums")
+                        .font(.title2.bold())
+                        .lineLimit(1)
+
+                    Spacer()
+                    if app.isLoading { ProgressView() }
+                }
+                .padding(.horizontal)
+                .padding(.top, 12)
+
+                if let album = app.selectedAlbum {
+                    AlbumDetailView(album: album)
+                        .environmentObject(app)
+                } else if app.filteredAlbums.isEmpty {
+                    ContentUnavailableView(app.canUseApi ? "No albums" : "Connect API", systemImage: app.canUseApi ? "square.grid.2x2" : "wifi.exclamationmark", description: Text(app.canUseApi ? "Albums will appear after library refresh." : "Open Settings and set endpoint + token."))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 48)
+                } else {
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 14) {
+                        ForEach(app.filteredAlbums) { album in
+                            AlbumCardNative(album: album)
+                                .environmentObject(app)
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+            }
+            .padding(.bottom, 10)
+        }
+        .refreshable { await app.refreshLibrary() }
+        .task { await app.loadMissingAlbumCovers() }
+    }
+}
+
+struct AlbumDetailView: View {
+    @EnvironmentObject private var app: AppState
+    let album: Album
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .bottom, spacing: 16) {
+                AlbumArtworkView(album: album, size: 132)
+                    .environmentObject(app)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(album.title)
+                        .font(.title2.bold())
+                        .lineLimit(2)
+                    Text(album.artist)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Text(album.trackCountText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button {
+                        if let first = album.tracks.first { app.play(first) }
+                    } label: {
+                        Label("Play Album", systemImage: "play.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.top, 6)
+                }
+            }
+            .padding(.horizontal)
+
+            LazyVStack(spacing: 10) {
+                ForEach(album.tracks) { track in
+                    TrackRowNative(track: track)
+                        .environmentObject(app)
+                }
+            }
+            .padding(.horizontal)
+        }
+    }
+}
+
+struct AlbumCardNative: View {
+    @EnvironmentObject private var app: AppState
+    let album: Album
+
+    var body: some View {
+        Button {
+            app.selectedAlbumId = album.id
+        } label: {
+            VStack(alignment: .leading, spacing: 9) {
+                AlbumArtworkView(album: album, size: nil)
+                    .environmentObject(app)
+                    .aspectRatio(1, contentMode: .fit)
+                Text(album.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Text("\(album.artist) · \(album.trackCountText)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .padding(10)
+            .background(Color.white.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct AlbumArtworkView: View {
+    @EnvironmentObject private var app: AppState
+    let album: Album
+    let size: CGFloat?
+
+    var body: some View {
+        Group {
+            if let image = app.albumCovers[album.id] {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                LinearGradient(colors: [.blue.opacity(0.7), .purple.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    .overlay(Image(systemName: "music.note").font(.title).foregroundStyle(.white))
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+}
+
+struct TrackArtworkView: View {
+    @EnvironmentObject private var app: AppState
+    let track: ApiTrack
+    let size: CGFloat
+
+    var body: some View {
+        let album = app.albums.first { $0.tracks.contains(where: { $0.id == track.id }) }
+        Group {
+            if let album, let image = app.albumCovers[album.id] {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                LinearGradient(colors: [.blue.opacity(0.55), .purple.opacity(0.45)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    .overlay(Image(systemName: "music.note").foregroundStyle(.white))
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
 struct TrackRowNative: View {
     @EnvironmentObject private var app: AppState
     let track: ApiTrack
@@ -203,10 +395,8 @@ struct TrackRowNative: View {
             app.play(track)
         } label: {
             HStack(spacing: 12) {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(LinearGradient(colors: [.blue.opacity(0.55), .purple.opacity(0.45)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .frame(width: 52, height: 52)
-                    .overlay(Image(systemName: "music.note").foregroundStyle(.white))
+                TrackArtworkView(track: track, size: 52)
+                    .environmentObject(app)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(track.title)
@@ -326,10 +516,15 @@ struct PlayerBar: View {
                 .tint(.blue)
 
             HStack(spacing: 12) {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(LinearGradient(colors: [.blue.opacity(0.7), .purple.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .frame(width: 46, height: 46)
-                    .overlay(Image(systemName: "music.note").foregroundStyle(.white))
+                if let track = app.currentTrack {
+                    TrackArtworkView(track: track, size: 46)
+                        .environmentObject(app)
+                } else {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(LinearGradient(colors: [.blue.opacity(0.7), .purple.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 46, height: 46)
+                        .overlay(Image(systemName: "music.note").foregroundStyle(.white))
+                }
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(app.currentTrack?.title ?? "Nothing playing")
@@ -373,20 +568,43 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section("Backend") {
-                TextField("http://192.168.1.10:8000", text: $app.apiEndpoint)
+                TextField("192.168.1.50:8000", text: $app.apiEndpoint)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
                 SecureField("API_TOKEN", text: $app.apiToken)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                Button("Test / refresh library") {
+
+                if let status = app.connectionStatus {
+                    Text(status)
+                        .font(.footnote)
+                        .foregroundStyle(status.lowercased().contains("connected") ? .green : .red)
+                }
+
+                Button {
+                    Task { await app.testConnection() }
+                } label: {
+                    if app.isTestingConnection {
+                        ProgressView()
+                    } else {
+                        Text("Test connection")
+                    }
+                }
+
+                Button("Refresh library") {
                     Task { await app.refreshLibrary() }
                 }
             }
 
+            Section("Detected endpoint") {
+                Text(app.normalizedEndpoint.isEmpty ? "Not set" : app.normalizedEndpoint)
+                    .font(.footnote.monospaced())
+                    .textSelection(.enabled)
+            }
+
             Section("Tip") {
-                Text("For iPhone + backend on your computer/server, use the LAN IP, for example http://192.168.1.50:8000. localhost on iPhone means the iPhone itself, not your Mac.")
+                Text("For iPhone + backend on your computer/server, use the LAN IP, for example 192.168.1.50:8000. localhost on iPhone means the iPhone itself, not your Mac.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
