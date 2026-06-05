@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     personal_1337x_max_pages: int = 1
     piratebay_api_base_url: str = "https://apibay.org"
     piratebay_category: int = 100
+    music_indexer_prowlarr_url: str = ""
     music_indexer_torznab_urls: str = ""
     music_indexer_api_key: str = ""
     music_indexer_categories: str = "3000"

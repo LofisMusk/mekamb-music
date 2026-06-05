@@ -208,9 +208,13 @@ storage.
 
 - `QUARANTINE_ROOT` is the path seen by API/worker containers.
 - `TORRENT_DOWNLOAD_ROOT` is the path sent to qBittorrent over RPC.
-- `MUSIC_INDEXER_TORZNAB_URLS` can contain one or more Torznab/Prowlarr URLs,
-  separated by commas or newlines.
-- `MUSIC_INDEXER_API_KEY` is appended as `apikey` when querying those indexers.
+- `MUSIC_INDEXER_PROWLARR_URL` points at the Prowlarr service, for example
+  `http://prowlarr:9696`; the backend queries `/api/v1/search` across configured
+  Prowlarr indexers.
+- `MUSIC_INDEXER_TORZNAB_URLS` can contain one or more raw Torznab/Prowlarr URLs,
+  separated by commas or newlines, if you prefer per-indexer URLs.
+- `MUSIC_INDEXER_API_KEY` is used as Prowlarr's `X-Api-Key` header and as
+  `apikey` for raw Torznab URLs.
 - `MUSIC_INDEXER_CATEGORIES` defaults to `3000` for audio/music Torznab searches.
 - In Docker Compose both paths point to the same named volume, mounted at different
   container paths, so qBittorrent can write downloads while the worker scans them.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -54,10 +55,12 @@ class MusicIndexerProvider:
     def __init__(
         self,
         *,
+        prowlarr_url: str = "",
         torznab_urls: list[str] | tuple[str, ...] | None = None,
         api_key: str = "",
         categories: list[str] | tuple[str, ...] | None = None,
     ) -> None:
+        self.prowlarr_url = prowlarr_url.strip().rstrip("/")
         self.torznab_urls = _normalize_urls(torznab_urls or [])
         self.api_key = api_key.strip()
         self.categories = [category.strip() for category in categories or ["3000"] if category.strip()]
@@ -65,21 +68,40 @@ class MusicIndexerProvider:
     @classmethod
     def from_settings(cls, settings: object) -> "MusicIndexerProvider":
         return cls(
+            prowlarr_url=getattr(settings, "music_indexer_prowlarr_url", ""),
             torznab_urls=_split(getattr(settings, "music_indexer_torznab_urls", "")),
             api_key=getattr(settings, "music_indexer_api_key", ""),
             categories=_split(getattr(settings, "music_indexer_categories", "3000")),
         )
 
+    def with_api_key(self, api_key: str | None) -> "MusicIndexerProvider":
+        override = (api_key or "").strip()
+        if not override:
+            return self
+        return MusicIndexerProvider(
+            prowlarr_url=self.prowlarr_url,
+            torznab_urls=self.torznab_urls,
+            api_key=override,
+            categories=self.categories,
+        )
+
     async def search(self, query: str) -> list[MusicIndexerSearchResult]:
         query = query.strip()
-        if not query or not self.torznab_urls:
+        if not query or (not self.prowlarr_url and not self.torznab_urls):
             return []
 
         results: list[MusicIndexerSearchResult] = []
         last_error: Exception | None = None
+        if self.prowlarr_url:
+            try:
+                payload = await asyncio.to_thread(self._fetch_prowlarr, query)
+                results.extend(_parse_prowlarr_results(payload, source_url=self.prowlarr_url))
+            except Exception as exc:
+                last_error = exc
+
         for url in self.torznab_urls:
             try:
-                payload = await asyncio.to_thread(self._fetch, url, query)
+                payload = await asyncio.to_thread(self._fetch_torznab, url, query)
             except Exception as exc:
                 last_error = exc
                 continue
@@ -122,7 +144,29 @@ class MusicIndexerProvider:
             fetched_at=datetime.now(UTC),
         )
 
-    def _fetch(self, base_url: str, query: str) -> str:
+    def _fetch_prowlarr(self, query: str) -> Any:
+        params = {
+            "query": query,
+            "indexerIds": "-1",
+            "categories": ",".join(self.categories),
+            "type": "search",
+        }
+        url = f"{self.prowlarr_url}/api/v1/search?{urlencode(params)}"
+        headers = {"User-Agent": _user_agent()}
+        if self.api_key:
+            headers["X-Api-Key"] = self.api_key
+        request = Request(url, headers=headers)
+        try:
+            with urlopen(request, timeout=20) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            raise MusicIndexerSourceError(f"Prowlarr returned HTTP {exc.code}.") from exc
+        except (URLError, TimeoutError) as exc:
+            raise MusicIndexerSourceError(f"Could not reach Prowlarr: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise MusicIndexerSourceError("Prowlarr returned invalid JSON.") from exc
+
+    def _fetch_torznab(self, base_url: str, query: str) -> str:
         params = {
             "t": "search",
             "q": query,
@@ -140,6 +184,42 @@ class MusicIndexerProvider:
             raise MusicIndexerSourceError(f"Indexer returned HTTP {exc.code}.") from exc
         except (URLError, TimeoutError) as exc:
             raise MusicIndexerSourceError(f"Could not reach indexer: {exc}") from exc
+
+
+def _parse_prowlarr_results(payload: Any, *, source_url: str) -> list[MusicIndexerSearchResult]:
+    if not isinstance(payload, list):
+        raise MusicIndexerSourceError("Prowlarr returned an unexpected response.")
+
+    now = datetime.now(UTC)
+    results: list[MusicIndexerSearchResult] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        title = _string(item.get("title") or item.get("releaseTitle"))
+        magnet_link = _string(item.get("magnetUrl") or item.get("magnetLink"))
+        download_url = _string(item.get("downloadUrl"))
+        if not magnet_link.startswith("magnet:"):
+            magnet_link = download_url if download_url.startswith("magnet:") else ""
+        info_hash = _string(item.get("infoHash")).upper() or _info_hash_from_magnet(magnet_link)
+        if not title or not magnet_link or not info_hash:
+            continue
+
+        results.append(
+            MusicIndexerSearchResult(
+                source="indexer",
+                name=title,
+                torrent_id=info_hash,
+                info_hash=info_hash,
+                magnet_link=magnet_link,
+                url=_string(item.get("infoUrl") or item.get("guid") or item.get("commentUrl"), source_url),
+                seeders=_string(item.get("seeders"), "0"),
+                leechers=_string(item.get("leechers"), "0"),
+                size_bytes=_integer(item.get("size")),
+                uploader=_string(item.get("indexer"), "prowlarr"),
+                discovered_at=now,
+            )
+        )
+    return results
 
 
 def _parse_torznab_results(payload: str, *, source_url: str) -> list[MusicIndexerSearchResult]:

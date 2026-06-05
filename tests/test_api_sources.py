@@ -59,6 +59,13 @@ class FakePirateBayProvider:
 
 
 class FakeMusicIndexerProvider:
+    def __init__(self) -> None:
+        self.api_key = ""
+
+    def with_api_key(self, api_key: str | None):
+        self.api_key = api_key or ""
+        return self
+
     async def search(self, q: str):
         assert q == "ambient"
         return [
@@ -109,10 +116,14 @@ def test_unified_search_endpoint_returns_source_tagged_results():
 
 
 def test_indexer_search_endpoint_returns_importable_results():
+    provider = FakeMusicIndexerProvider()
     app.dependency_overrides[require_token] = lambda: None
-    app.dependency_overrides[music_indexer_provider] = lambda: FakeMusicIndexerProvider()
+    app.dependency_overrides[music_indexer_provider] = lambda: provider
     try:
-        response = TestClient(app).get("/sources/indexers/search?q=ambient")
+        response = TestClient(app).get(
+            "/sources/indexers/search?q=ambient",
+            headers={"X-Prowlarr-Api-Key": "device-key"},
+        )
     finally:
         app.dependency_overrides.clear()
 
@@ -121,3 +132,4 @@ def test_indexer_search_endpoint_returns_importable_results():
     assert payload["items"][0]["source"] == "indexer"
     assert payload["items"][0]["info_hash"] == "ABC123"
     assert payload["items"][0]["magnet_link"].startswith("magnet:")
+    assert provider.api_key == "device-key"

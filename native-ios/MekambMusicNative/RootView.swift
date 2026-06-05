@@ -840,6 +840,16 @@ struct SettingsView: View {
                     .textSelection(.enabled)
             }
 
+            Section("Indexers") {
+                SecureField("Prowlarr API key", text: $app.prowlarrApiKey)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+
+                Text(app.prowlarrApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Using backend .env key" : "Using this device key")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Playback") {
                 Toggle(isOn: $app.autoplaySimilarEnabled) {
                     Label("Autoplay Similar Songs", systemImage: "infinity")

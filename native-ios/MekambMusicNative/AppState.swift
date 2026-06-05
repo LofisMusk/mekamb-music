@@ -266,6 +266,7 @@ enum RepeatMode: String, CaseIterable, Identifiable {
 final class AppState: ObservableObject {
     @AppStorage("mekambMusicApiEndpoint") var apiEndpoint: String = ""
     @AppStorage("mekambMusicApiToken") var apiToken: String = ""
+    @AppStorage("mekambMusicProwlarrApiKey") var prowlarrApiKey: String = ""
     @AppStorage("mekambMusicAutoplaySimilarEnabled") var autoplaySimilarEnabled: Bool = true
     @AppStorage("mekambMusicLastTrackId") private var savedPlaybackTrackId: String = ""
     @AppStorage("mekambMusicLastElapsedTime") private var savedPlaybackElapsedTime: Double = 0
@@ -458,7 +459,10 @@ final class AppState: ObservableObject {
             let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
             let items: [TorrentResult]
             if searchMode == .indexer {
-                let response: TorrentSearchResponse = try await request("/sources/indexers/search?q=\(encoded)")
+                let response: TorrentSearchResponse = try await request(
+                    "/sources/indexers/search?q=\(encoded)",
+                    extraHeaders: indexerSearchHeaders()
+                )
                 items = response.items
             } else {
                 do {
@@ -907,6 +911,7 @@ final class AppState: ObservableObject {
         _ path: String,
         method: String = "GET",
         body: Data? = nil,
+        extraHeaders: [String: String] = [:],
         requiresAuth: Bool = true
     ) async throws -> T {
         guard let url = endpointURL(path: path) else {
@@ -921,6 +926,9 @@ final class AppState: ObservableObject {
         }
         if requiresAuth {
             request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        }
+        for (name, value) in extraHeaders {
+            request.setValue(value, forHTTPHeaderField: name)
         }
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
@@ -938,6 +946,12 @@ final class AppState: ObservableObject {
         let base = normalizedEndpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard !base.isEmpty else { return nil }
         return URL(string: base + path)
+    }
+
+    private func indexerSearchHeaders() -> [String: String] {
+        let key = prowlarrApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return [:] }
+        return ["X-Prowlarr-Api-Key": key]
     }
 
     private func normalizeEndpoint(_ value: String) -> String {

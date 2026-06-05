@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from redis.asyncio import Redis
 
 from app.api.deps import (
@@ -67,9 +67,10 @@ async def search_sources(
 async def search_indexers(
     q: str = Query(min_length=1, max_length=120),
     provider: MusicIndexerProvider = Depends(music_indexer_provider),
+    prowlarr_api_key: str | None = Header(default=None, alias="X-Prowlarr-Api-Key"),
 ) -> SourceSearchResponse:
     try:
-        results = await provider.search(q)
+        results = await provider.with_api_key(prowlarr_api_key).search(q)
     except MusicIndexerSourceError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
