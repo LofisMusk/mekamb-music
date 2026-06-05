@@ -101,9 +101,11 @@ python -m app.api.openapi_export openapi.json
 - `GET /health`
 - `GET /health/ready`
 - `GET /sources/search?q=...`
+- `GET /sources/indexers/search?q=...`
 - `GET /sources/1337x/search?q=...`
 - `GET /sources/piratebay/search?q=...`
 - `POST /imports/1337x/{torrent_id}`
+- `POST /imports/indexer`
 - `POST /imports/piratebay/{torrent_id}`
 - `GET /imports?status=queued&limit=50&offset=0`
 - `GET /imports/{id}`
@@ -181,6 +183,9 @@ storage.
 - `/sources/search` runs a unified music search across configured torrent sources,
   tries normalized artist/title query variants, deduplicates results, and keeps
   working when one source is temporarily blocked/unavailable.
+- `/sources/indexers/search` queries configured Torznab/Prowlarr music indexers
+  and returns importable magnet-backed results. The app still imports through this
+  backend, qBittorrent, and the quarantine/library pipeline.
 - 1337x searches are limited to Music category results and sorted by seeders by default.
 - Import resolves the torrent with `info()` before enqueueing it.
 - qBittorrent only receives the quarantine volume, never the library volume.
@@ -203,6 +208,10 @@ storage.
 
 - `QUARANTINE_ROOT` is the path seen by API/worker containers.
 - `TORRENT_DOWNLOAD_ROOT` is the path sent to qBittorrent over RPC.
+- `MUSIC_INDEXER_TORZNAB_URLS` can contain one or more Torznab/Prowlarr URLs,
+  separated by commas or newlines.
+- `MUSIC_INDEXER_API_KEY` is appended as `apikey` when querying those indexers.
+- `MUSIC_INDEXER_CATEGORIES` defaults to `3000` for audio/music Torznab searches.
 - In Docker Compose both paths point to the same named volume, mounted at different
   container paths, so qBittorrent can write downloads while the worker scans them.
 - `LIBRARY_ROOT` must never point inside quarantine, and quarantine must never

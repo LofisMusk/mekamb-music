@@ -84,6 +84,9 @@ class SourceSearchItem(BaseModel):
     source: str
     name: str
     torrent_id: str
+    info_hash: str | None = None
+    magnet_link: str | None = None
+    source_url: str | None = None
     seeders: str
     leechers: str
     size: str | None = None
@@ -93,6 +96,15 @@ class SourceSearchItem(BaseModel):
 
 class SourceSearchResponse(BaseModel):
     items: list[SourceSearchItem]
+
+
+class IndexerImportRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=512)
+    torrent_id: str | None = Field(default=None, max_length=128)
+    info_hash: str = Field(min_length=1, max_length=128)
+    magnet_link: str = Field(min_length=1)
+    uploader: str | None = Field(default=None, max_length=255)
+    source_url: str | None = Field(default=None, max_length=2048)
 
 
 class ImportRecordResponse(BaseModel):

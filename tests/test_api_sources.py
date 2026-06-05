@@ -2,8 +2,14 @@ from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
-from app.api.deps import personal_1337x_provider, piratebay_provider, require_token
+from app.api.deps import (
+    music_indexer_provider,
+    personal_1337x_provider,
+    piratebay_provider,
+    require_token,
+)
 from app.main import app
+from app.sources.indexers import MusicIndexerSearchResult
 from app.sources.personal_1337x import Personal1337xSearchResult
 from app.sources.piratebay import PirateBaySearchResult
 
@@ -52,6 +58,26 @@ class FakePirateBayProvider:
         ]
 
 
+class FakeMusicIndexerProvider:
+    async def search(self, q: str):
+        assert q == "ambient"
+        return [
+            MusicIndexerSearchResult(
+                source="indexer",
+                name="ambient indexer record",
+                torrent_id="ABC123",
+                info_hash="ABC123",
+                magnet_link="magnet:?xt=urn:btih:ABC123",
+                url="https://indexer.example/details/1",
+                seeders="60",
+                leechers="3",
+                size_bytes=1234,
+                uploader="indexer",
+                discovered_at=datetime.now(UTC),
+            )
+        ]
+
+
 def test_search_endpoint_returns_provider_results():
     app.dependency_overrides[require_token] = lambda: None
     app.dependency_overrides[personal_1337x_provider] = lambda: FakeProvider()
@@ -80,3 +106,18 @@ def test_unified_search_endpoint_returns_source_tagged_results():
         ("piratebay", "pb-1"),
         ("1337x", "1"),
     ]
+
+
+def test_indexer_search_endpoint_returns_importable_results():
+    app.dependency_overrides[require_token] = lambda: None
+    app.dependency_overrides[music_indexer_provider] = lambda: FakeMusicIndexerProvider()
+    try:
+        response = TestClient(app).get("/sources/indexers/search?q=ambient")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["items"][0]["source"] == "indexer"
+    assert payload["items"][0]["info_hash"] == "ABC123"
+    assert payload["items"][0]["magnet_link"].startswith("magnet:")

@@ -14,6 +14,7 @@ from app.imports.repository import SqlAlchemyImportRepository
 from app.imports.service import ImportEventPublisher, ImportService
 from app.playlists.repository import SqlAlchemyPlaylistRepository
 from app.playlists.service import PlaylistService
+from app.sources.indexers import MusicIndexerProvider
 from app.sources.personal_1337x import Personal1337xProvider
 from app.sources.piratebay import PirateBayProvider
 
@@ -38,6 +39,10 @@ def personal_1337x_provider() -> Personal1337xProvider:
 
 def piratebay_provider() -> PirateBayProvider:
     return PirateBayProvider.from_settings(settings)
+
+
+def music_indexer_provider() -> MusicIndexerProvider:
+    return MusicIndexerProvider.from_settings(settings)
 
 
 def torrent_downloader() -> QBittorrentDownloader:

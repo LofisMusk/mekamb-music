@@ -18,6 +18,9 @@ class UnifiedTorrentSearchItem:
     source: str
     name: str
     torrent_id: str
+    info_hash: str | None
+    magnet_link: str | None
+    source_url: str | None
     seeders: str
     leechers: str
     size: str | None
@@ -115,6 +118,9 @@ def _from_piratebay(item: PirateBaySearchResult) -> UnifiedTorrentSearchItem:
         source="piratebay",
         name=item.name,
         torrent_id=item.torrent_id,
+        info_hash=item.info_hash,
+        magnet_link=item.magnet_link,
+        source_url=item.url,
         seeders=item.seeders,
         leechers=item.leechers,
         size=None,
@@ -128,6 +134,9 @@ def _from_1337x(item: Personal1337xSearchResult) -> UnifiedTorrentSearchItem:
         source="1337x",
         name=item.name,
         torrent_id=item.torrent_id,
+        info_hash=None,
+        magnet_link=None,
+        source_url=item.url,
         seeders=item.seeders,
         leechers=item.leechers,
         size=item.size,

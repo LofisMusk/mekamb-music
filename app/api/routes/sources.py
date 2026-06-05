@@ -1,7 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from redis.asyncio import Redis
 
-from app.api.deps import personal_1337x_provider, piratebay_provider, require_token
+from app.api.deps import (
+    music_indexer_provider,
+    personal_1337x_provider,
+    piratebay_provider,
+    require_token,
+)
 from app.api.schemas import (
     Source1337xSearchResponse,
     SourcePirateBaySearchResponse,
@@ -9,6 +14,7 @@ from app.api.schemas import (
 )
 from app.imports.queue import RedisImportQueue
 from app.core.config import settings
+from app.sources.indexers import MusicIndexerProvider, MusicIndexerSourceError
 from app.sources.personal_1337x import (
     Personal1337xProvider,
     SourceBlockedError,
@@ -55,6 +61,36 @@ async def search_sources(
     )
     results = await search.search(q, redis=redis)
     return SourceSearchResponse(items=[item.to_dict() for item in results])
+
+
+@router.get("/indexers/search", response_model=SourceSearchResponse)
+async def search_indexers(
+    q: str = Query(min_length=1, max_length=120),
+    provider: MusicIndexerProvider = Depends(music_indexer_provider),
+) -> SourceSearchResponse:
+    try:
+        results = await provider.search(q)
+    except MusicIndexerSourceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    return SourceSearchResponse(
+        items=[
+            {
+                "source": item.source,
+                "name": item.name,
+                "torrent_id": item.torrent_id,
+                "info_hash": item.info_hash,
+                "magnet_link": item.magnet_link,
+                "source_url": item.url,
+                "seeders": item.seeders,
+                "leechers": item.leechers,
+                "size": None,
+                "size_bytes": item.size_bytes,
+                "uploader": item.uploader,
+            }
+            for item in results
+        ],
+    )
 
 
 @router.get("/piratebay/search", response_model=SourcePirateBaySearchResponse)

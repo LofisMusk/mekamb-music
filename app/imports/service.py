@@ -9,6 +9,7 @@ from typing import Protocol
 from uuid import UUID, uuid4
 
 from app.imports.domain import ImportRecord, ImportRepository, ImportStatus
+from app.sources.indexers import MusicIndexerImportCandidate
 from app.sources.personal_1337x import Personal1337xImportCandidate
 from app.sources.piratebay import PirateBayImportCandidate
 
@@ -126,6 +127,9 @@ class ImportService:
 
     async def create_piratebay_import(self, candidate: PirateBayImportCandidate) -> ImportRecord:
         return await self._create_torrent_import(candidate, source="piratebay")
+
+    async def create_indexer_import(self, candidate: MusicIndexerImportCandidate) -> ImportRecord:
+        return await self._create_torrent_import(candidate, source="indexer")
 
     async def create_synced_torrent_import(
         self,

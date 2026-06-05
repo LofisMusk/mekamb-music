@@ -54,6 +54,7 @@ struct LikedTracksResponse: Codable { let items: [LikedTrackItem] }
 enum TorrentSource: String, Codable, CaseIterable, Identifiable {
     case pirateBay = "piratebay"
     case thirteenThirtySevenX = "1337x"
+    case indexer = "indexer"
 
     var id: String { rawValue }
 
@@ -63,6 +64,8 @@ enum TorrentSource: String, Codable, CaseIterable, Identifiable {
             return "Pirate Bay"
         case .thirteenThirtySevenX:
             return "1337x"
+        case .indexer:
+            return "Indexers"
         }
     }
 
@@ -72,6 +75,8 @@ enum TorrentSource: String, Codable, CaseIterable, Identifiable {
             return "/sources/piratebay/search"
         case .thirteenThirtySevenX:
             return "/sources/1337x/search"
+        case .indexer:
+            return "/sources/indexers/search"
         }
     }
 
@@ -81,6 +86,8 @@ enum TorrentSource: String, Codable, CaseIterable, Identifiable {
             return "/imports/piratebay"
         case .thirteenThirtySevenX:
             return "/imports/1337x"
+        case .indexer:
+            return "/imports/indexer"
         }
     }
 }
@@ -89,6 +96,9 @@ struct TorrentResult: Identifiable, Codable, Hashable {
     let name: String
     let torrentId: String
     let source: TorrentSource
+    let infoHash: String?
+    let magnetLink: String?
+    let sourceUrl: String?
     let seeders: String?
     let leechers: String?
     let sizeBytes: Int?
@@ -99,6 +109,9 @@ struct TorrentResult: Identifiable, Codable, Hashable {
         case name
         case torrentId = "torrent_id"
         case source
+        case infoHash = "info_hash"
+        case magnetLink = "magnet_link"
+        case sourceUrl = "source_url"
         case seeders
         case leechers
         case sizeBytes = "size_bytes"
@@ -110,6 +123,9 @@ struct TorrentResult: Identifiable, Codable, Hashable {
         name: String,
         torrentId: String,
         source: TorrentSource,
+        infoHash: String?,
+        magnetLink: String?,
+        sourceUrl: String?,
         seeders: String?,
         leechers: String?,
         sizeBytes: Int?,
@@ -119,6 +135,9 @@ struct TorrentResult: Identifiable, Codable, Hashable {
         self.name = name
         self.torrentId = torrentId
         self.source = source
+        self.infoHash = infoHash
+        self.magnetLink = magnetLink
+        self.sourceUrl = sourceUrl
         self.seeders = seeders
         self.leechers = leechers
         self.sizeBytes = sizeBytes
@@ -131,6 +150,9 @@ struct TorrentResult: Identifiable, Codable, Hashable {
         name = try container.decode(String.self, forKey: .name)
         torrentId = try container.decode(String.self, forKey: .torrentId)
         source = (try? container.decode(TorrentSource.self, forKey: .source)) ?? .pirateBay
+        infoHash = try container.decodeIfPresent(String.self, forKey: .infoHash)
+        magnetLink = try container.decodeIfPresent(String.self, forKey: .magnetLink)
+        sourceUrl = try container.decodeIfPresent(String.self, forKey: .sourceUrl)
         seeders = try container.decodeIfPresent(String.self, forKey: .seeders)
         leechers = try container.decodeIfPresent(String.self, forKey: .leechers)
         sizeBytes = try container.decodeIfPresent(Int.self, forKey: .sizeBytes)
@@ -159,6 +181,9 @@ struct TorrentResult: Identifiable, Codable, Hashable {
             name: name,
             torrentId: torrentId,
             source: source,
+            infoHash: infoHash,
+            magnetLink: magnetLink,
+            sourceUrl: sourceUrl,
             seeders: seeders,
             leechers: leechers,
             sizeBytes: sizeBytes,
@@ -170,10 +195,33 @@ struct TorrentResult: Identifiable, Codable, Hashable {
 
 struct TorrentSearchResponse: Codable { let items: [TorrentResult] }
 
+struct IndexerImportPayload: Encodable {
+    let name: String
+    let torrentId: String?
+    let infoHash: String
+    let magnetLink: String
+    let uploader: String?
+    let sourceUrl: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case torrentId = "torrent_id"
+        case infoHash = "info_hash"
+        case magnetLink = "magnet_link"
+        case uploader
+        case sourceUrl = "source_url"
+    }
+}
+
 enum SearchMode: String, CaseIterable, Identifiable {
     case library = "Library"
     case torrent = "Torrent"
+    case indexer = "Indexers"
     var id: String { rawValue }
+
+    var searchesRemoteSources: Bool {
+        self == .torrent || self == .indexer
+    }
 }
 
 enum MusicTab: String, CaseIterable, Identifiable {
@@ -409,12 +457,17 @@ final class AppState: ObservableObject {
         do {
             let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
             let items: [TorrentResult]
-            do {
-                let response: TorrentSearchResponse = try await request("/sources/search?q=\(encoded)")
+            if searchMode == .indexer {
+                let response: TorrentSearchResponse = try await request("/sources/indexers/search?q=\(encoded)")
                 items = response.items
-            } catch {
-                guard isNotFound(error) else { throw error }
-                items = try await searchLegacyTorrentSources(encodedQuery: encoded)
+            } else {
+                do {
+                    let response: TorrentSearchResponse = try await request("/sources/search?q=\(encoded)")
+                    items = response.items
+                } catch {
+                    guard isNotFound(error) else { throw error }
+                    items = try await searchLegacyTorrentSources(encodedQuery: encoded)
+                }
             }
             torrents = items.sorted { left, right in
                 Int(left.seeders ?? "0") ?? 0 > Int(right.seeders ?? "0") ?? 0
@@ -431,8 +484,13 @@ final class AppState: ObservableObject {
     func importTorrent(_ torrent: TorrentResult) async {
         errorMessage = nil
         do {
-            let encodedId = encodePathComponent(torrent.torrentId)
-            let _: EmptyResponse = try await request("\(torrent.source.importPath)/\(encodedId)", method: "POST")
+            if torrent.source == .indexer {
+                let body = try indexerImportBody(for: torrent)
+                let _: EmptyResponse = try await request(torrent.source.importPath, method: "POST", body: body)
+            } else {
+                let encodedId = encodePathComponent(torrent.torrentId)
+                let _: EmptyResponse = try await request("\(torrent.source.importPath)/\(encodedId)", method: "POST")
+            }
         } catch {
             if !isCancellation(error) { errorMessage = clean(error) }
         }
@@ -829,13 +887,38 @@ final class AppState: ObservableObject {
         return UIImage(cgImage: image)
     }
 
-    private func request<T: Decodable>(_ path: String, method: String = "GET", requiresAuth: Bool = true) async throws -> T {
+    func indexerImportBody(for torrent: TorrentResult) throws -> Data {
+        guard let infoHash = torrent.infoHash, !infoHash.isEmpty,
+              let magnetLink = torrent.magnetLink, !magnetLink.isEmpty else {
+            throw BackendError.message("Indexer result is missing a magnet link.")
+        }
+        let payload = IndexerImportPayload(
+            name: torrent.name,
+            torrentId: torrent.torrentId,
+            infoHash: infoHash,
+            magnetLink: magnetLink,
+            uploader: torrent.uploader,
+            sourceUrl: torrent.sourceUrl
+        )
+        return try JSONEncoder().encode(payload)
+    }
+
+    private func request<T: Decodable>(
+        _ path: String,
+        method: String = "GET",
+        body: Data? = nil,
+        requiresAuth: Bool = true
+    ) async throws -> T {
         guard let url = endpointURL(path: path) else {
             throw BackendError.message("Bad API endpoint. Use http://IP:8000, for example http://192.168.1.50:8000.")
         }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = 20
+        request.httpBody = body
+        if body != nil {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
         if requiresAuth {
             request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
         }

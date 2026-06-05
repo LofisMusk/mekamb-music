@@ -7,11 +7,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import (
     db_session,
     import_service,
+    music_indexer_provider,
     personal_1337x_provider,
     piratebay_provider,
     require_token,
 )
-from app.api.schemas import ImportListResponse, ImportRecordResponse, TrackListResponse
+from app.api.schemas import (
+    ImportListResponse,
+    ImportRecordResponse,
+    IndexerImportRequest,
+    TrackListResponse,
+)
 from app.downloads.qbittorrent import QBittorrentError
 from app.imports.domain import ImportNotFound
 from app.imports.service import (
@@ -21,6 +27,10 @@ from app.imports.service import (
     SandboxViolation,
 )
 from app.library.queries import build_track_list_query
+from app.sources.indexers import (
+    MusicIndexerMissingMetadata,
+    MusicIndexerProvider,
+)
 from app.sources.personal_1337x import (
     MissingTorrentMetadata,
     Personal1337xProvider,
@@ -96,6 +106,32 @@ async def import_piratebay(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PirateBaySourceError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except (HTTPError, QBittorrentError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not enqueue torrent in qBittorrent: {exc}",
+        ) from exc
+
+    return ImportRecordResponse(**record.to_dict())
+
+
+@router.post(
+    "/indexer",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=ImportRecordResponse,
+)
+async def import_indexer_result(
+    request: IndexerImportRequest,
+    provider: MusicIndexerProvider = Depends(music_indexer_provider),
+    service: ImportService = Depends(import_service),
+    session: AsyncSession = Depends(db_session),
+) -> ImportRecordResponse:
+    try:
+        candidate = provider.candidate_from_payload(request.model_dump())
+        record = await service.create_indexer_import(candidate)
+        await _record_import_action(session, record)
+    except (MusicIndexerMissingMetadata, InvalidImportCandidate, SandboxViolation) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (HTTPError, QBittorrentError) as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

@@ -84,10 +84,20 @@ final class TorrentImportController: ObservableObject {
         progress = TorrentImportProgressState(importId: nil, status: "queued", progress: 0, details: "Adding to import queue…")
 
         do {
-            let encodedId = encodePathComponent(torrent.torrentId)
+            let path: String
+            let body: Data?
+            if torrent.source == .indexer {
+                path = torrent.source.importPath
+                body = try app.indexerImportBody(for: torrent)
+            } else {
+                let encodedId = encodePathComponent(torrent.torrentId)
+                path = "\(torrent.source.importPath)/\(encodedId)"
+                body = nil
+            }
             let record: NativeImportRecord = try await request(
-                path: "\(torrent.source.importPath)/\(encodedId)",
+                path: path,
                 method: "POST",
+                body: body,
                 app: app
             )
             progress = progressState(importRecord: record, torrent: nil, fallbackTitle: torrent.name)
@@ -209,13 +219,22 @@ final class TorrentImportController: ObservableObject {
         }
     }
 
-    private func request<T: Decodable>(path: String, method: String = "GET", app: AppState) async throws -> T {
+    private func request<T: Decodable>(
+        path: String,
+        method: String = "GET",
+        body: Data? = nil,
+        app: AppState
+    ) async throws -> T {
         guard let url = endpointURL(path: path, app: app) else {
             throw BackendError.message("Bad API endpoint. Use http://IP:8000.")
         }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = 20
+        request.httpBody = body
+        if body != nil {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
         request.setValue("Bearer \(app.apiToken)", forHTTPHeaderField: "Authorization")
 
         let (data, response) = try await URLSession.shared.data(for: request)

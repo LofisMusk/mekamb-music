@@ -55,15 +55,16 @@ struct RootView: View {
         }
         .task { await app.refreshLibrary() }
         .onChange(of: app.searchText) { _ in
-            guard app.searchMode == .torrent else { return }
+            guard app.searchMode.searchesRemoteSources else { return }
             Task {
                 try? await Task.sleep(nanoseconds: 350_000_000)
                 await app.searchTorrents()
             }
         }
         .onChange(of: app.searchMode) { mode in
-            if mode == .torrent {
+            if mode.searchesRemoteSources {
                 app.selectedAlbumId = nil
+                app.torrents = []
                 Task { await app.searchTorrents() }
             }
         }
@@ -77,14 +78,14 @@ struct RootView: View {
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)
-                TextField(app.searchMode == .torrent ? "Search torrents…" : app.selectedTab == .albums ? "Search albums…" : "Search library…", text: $app.searchText)
+                TextField(searchPlaceholder, text: $app.searchText)
                     .focused($searchFocused)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .submitLabel(.search)
                     .onSubmit {
                         dismissSearch()
-                        if app.searchMode == .torrent { Task { await app.searchTorrents() } }
+                        if app.searchMode.searchesRemoteSources { Task { await app.searchTorrents() } }
                     }
                 if !app.searchText.isEmpty {
                     Button {
@@ -100,7 +101,7 @@ struct RootView: View {
             .background(Color.white.opacity(0.08))
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 
-            if searchFocused || !app.searchText.isEmpty || app.searchMode == .torrent {
+            if searchFocused || !app.searchText.isEmpty || app.searchMode.searchesRemoteSources {
                 Picker("Search mode", selection: $app.searchMode) {
                     ForEach(SearchMode.allCases) { mode in
                         Text(mode.rawValue).tag(mode)
@@ -120,7 +121,7 @@ struct RootView: View {
 
     @ViewBuilder
     private var content: some View {
-        if app.searchMode == .torrent {
+        if app.searchMode.searchesRemoteSources {
             TorrentSearchView()
                 .environmentObject(app)
         } else {
@@ -169,6 +170,17 @@ struct RootView: View {
 
     private func dismissSearch() {
         searchFocused = false
+    }
+
+    private var searchPlaceholder: String {
+        switch app.searchMode {
+        case .torrent:
+            return "Search torrents..."
+        case .indexer:
+            return "Search indexers..."
+        case .library:
+            return app.selectedTab == .albums ? "Search albums..." : "Search library..."
+        }
     }
 
     private func icon(for tab: MusicTab) -> String {
@@ -487,7 +499,7 @@ struct TorrentSearchView: View {
         ScrollView {
             LazyVStack(spacing: 10) {
                 HStack {
-                    Text(app.searchText.isEmpty ? "Torrent Search" : "Torrent Results")
+                    Text(title)
                         .font(.title2.bold())
                     Spacer()
                     if app.isSearchingTorrents { ProgressView() }
@@ -496,11 +508,11 @@ struct TorrentSearchView: View {
                 .padding(.top, 12)
 
                 if app.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    ContentUnavailableView("Search torrents", systemImage: "magnifyingglass", description: Text("Type an artist, album, or song above."))
+                    ContentUnavailableView(emptyTitle, systemImage: "magnifyingglass", description: Text("Type an artist, album, or song above."))
                         .foregroundStyle(.secondary)
                         .padding(.top, 48)
                 } else if app.torrents.isEmpty && !app.isSearchingTorrents {
-                    ContentUnavailableView("No torrent results", systemImage: "tray", description: Text("Try a different query."))
+                    ContentUnavailableView("No results", systemImage: "tray", description: Text("Try a different query."))
                         .foregroundStyle(.secondary)
                         .padding(.top, 48)
                 } else {
@@ -513,6 +525,17 @@ struct TorrentSearchView: View {
             }
         }
         .refreshable { await app.searchTorrents() }
+    }
+
+    private var title: String {
+        if app.searchMode == .indexer {
+            return app.searchText.isEmpty ? "Indexer Search" : "Indexer Results"
+        }
+        return app.searchText.isEmpty ? "Torrent Search" : "Torrent Results"
+    }
+
+    private var emptyTitle: String {
+        app.searchMode == .indexer ? "Search indexers" : "Search torrents"
     }
 }
 
