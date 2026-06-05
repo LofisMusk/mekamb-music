@@ -132,6 +132,18 @@ services:
       - quarantine:/downloads/incomplete
     restart: unless-stopped
 
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: Europe/Warsaw
+    ports:
+      - "9696:9696"
+    volumes:
+      - prowlarr-config:/config
+    restart: unless-stopped
+
   qbittorrent-config-init:
     image: python:3.12-alpine
     env_file: .env
@@ -148,3 +160,4 @@ volumes:
   quarantine:
   library:
   qbittorrent-config:
+  prowlarr-config:
