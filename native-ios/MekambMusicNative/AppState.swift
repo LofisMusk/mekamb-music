@@ -894,7 +894,7 @@ final class AppState: ObservableObject {
     func indexerImportBody(for torrent: TorrentResult) throws -> Data {
         guard let infoHash = torrent.infoHash, !infoHash.isEmpty,
               let magnetLink = torrent.magnetLink, !magnetLink.isEmpty else {
-            throw BackendError.message("Indexer result is missing a magnet link.")
+            throw BackendError.message("Indexer result is missing a download link.")
         }
         let payload = IndexerImportPayload(
             name: torrent.name,

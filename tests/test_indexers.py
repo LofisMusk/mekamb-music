@@ -16,10 +16,10 @@ class FakeProwlarrProvider(MusicIndexerProvider):
     def __init__(self, payload):
         super().__init__(prowlarr_url="http://prowlarr:9696", api_key="secret")
         self.payload = payload
-        self.queries: list[str] = []
+        self.queries: list[tuple[str, tuple[str, ...]]] = []
 
-    def _fetch_prowlarr(self, query: str):
-        self.queries.append(query)
+    def _fetch_prowlarr(self, query: str, categories=None):
+        self.queries.append((query, tuple(categories or [])))
         return self.payload
 
 
@@ -70,11 +70,58 @@ async def test_music_indexer_search_parses_prowlarr_api_results():
 
     results = await provider.search("Daft Punk Discovery")
 
-    assert provider.queries == ["Daft Punk Discovery"]
+    assert provider.queries == [("Daft Punk Discovery", ("3000",))]
     assert len(results) == 1
     assert results[0].source == "indexer"
     assert results[0].torrent_id == "ABC123"
     assert results[0].uploader == "Prowlarr Indexer"
+
+
+async def test_music_indexer_search_accepts_prowlarr_download_url_results():
+    provider = FakeProwlarrProvider(
+        [
+            {
+                "title": "Daft Punk - Discovery FLAC",
+                "infoHash": "ABC123",
+                "downloadUrl": "http://prowlarr:9696/api/v1/search?apikey=secret&link=1",
+                "infoUrl": "https://indexer.example/details/1",
+                "seeders": 44,
+                "leechers": 2,
+                "size": 1234,
+                "indexer": "Prowlarr Indexer",
+            }
+        ]
+    )
+
+    results = await provider.search("Daft Punk Discovery")
+
+    assert len(results) == 1
+    assert results[0].info_hash == "ABC123"
+    assert results[0].magnet_link.startswith("http://prowlarr:9696/")
+
+
+async def test_music_indexer_search_retries_prowlarr_without_categories_when_empty():
+    class CategoryFallbackProvider(FakeProwlarrProvider):
+        def _fetch_prowlarr(self, query: str, categories=None):
+            self.queries.append((query, tuple(categories or [])))
+            if categories:
+                return []
+            return self.payload
+
+    provider = CategoryFallbackProvider(
+        [
+            {
+                "title": "Daft Punk - Discovery FLAC",
+                "infoHash": "ABC123",
+                "magnetUrl": "magnet:?xt=urn:btih:ABC123&dn=Discovery",
+            }
+        ]
+    )
+
+    results = await provider.search("Daft Punk Discovery")
+
+    assert [categories for _, categories in provider.queries] == [("3000",), ()]
+    assert len(results) == 1
 
 
 async def test_music_indexer_candidate_from_payload_accepts_selected_result():

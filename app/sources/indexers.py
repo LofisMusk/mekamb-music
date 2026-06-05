@@ -94,8 +94,15 @@ class MusicIndexerProvider:
         last_error: Exception | None = None
         if self.prowlarr_url:
             try:
-                payload = await asyncio.to_thread(self._fetch_prowlarr, query)
-                results.extend(_parse_prowlarr_results(payload, source_url=self.prowlarr_url))
+                payload = await asyncio.to_thread(self._fetch_prowlarr, query, self.categories)
+                prowlarr_results = _parse_prowlarr_results(payload, source_url=self.prowlarr_url)
+                if not prowlarr_results and self.categories:
+                    payload = await asyncio.to_thread(self._fetch_prowlarr, query, [])
+                    prowlarr_results = _parse_prowlarr_results(
+                        payload,
+                        source_url=self.prowlarr_url,
+                    )
+                results.extend(prowlarr_results)
             except Exception as exc:
                 last_error = exc
 
@@ -130,7 +137,7 @@ class MusicIndexerProvider:
         if not name:
             raise MusicIndexerMissingMetadata("Indexer import is missing a title.")
         if not magnet_link:
-            raise MusicIndexerMissingMetadata("Indexer import is missing a magnet link.")
+            raise MusicIndexerMissingMetadata("Indexer import is missing a download link.")
         if not info_hash:
             raise MusicIndexerMissingMetadata("Indexer import is missing an info hash.")
 
@@ -144,13 +151,14 @@ class MusicIndexerProvider:
             fetched_at=datetime.now(UTC),
         )
 
-    def _fetch_prowlarr(self, query: str) -> Any:
+    def _fetch_prowlarr(self, query: str, categories: list[str] | tuple[str, ...] | None = None) -> Any:
         params = {
             "query": query,
             "indexerIds": "-1",
-            "categories": ",".join(self.categories),
             "type": "search",
         }
+        if categories:
+            params["categories"] = ",".join(categories)
         url = f"{self.prowlarr_url}/api/v1/search?{urlencode(params)}"
         headers = {"User-Agent": _user_agent()}
         if self.api_key:
@@ -198,10 +206,9 @@ def _parse_prowlarr_results(payload: Any, *, source_url: str) -> list[MusicIndex
         title = _string(item.get("title") or item.get("releaseTitle"))
         magnet_link = _string(item.get("magnetUrl") or item.get("magnetLink"))
         download_url = _string(item.get("downloadUrl"))
-        if not magnet_link.startswith("magnet:"):
-            magnet_link = download_url if download_url.startswith("magnet:") else ""
-        info_hash = _string(item.get("infoHash")).upper() or _info_hash_from_magnet(magnet_link)
-        if not title or not magnet_link or not info_hash:
+        download_link = magnet_link if magnet_link.startswith("magnet:") else download_url
+        info_hash = _string(item.get("infoHash")).upper() or _info_hash_from_magnet(download_link)
+        if not title or not download_link or not info_hash:
             continue
 
         results.append(
@@ -210,7 +217,7 @@ def _parse_prowlarr_results(payload: Any, *, source_url: str) -> list[MusicIndex
                 name=title,
                 torrent_id=info_hash,
                 info_hash=info_hash,
-                magnet_link=magnet_link,
+                magnet_link=download_link,
                 url=_string(item.get("infoUrl") or item.get("guid") or item.get("commentUrl"), source_url),
                 seeders=_string(item.get("seeders"), "0"),
                 leechers=_string(item.get("leechers"), "0"),
@@ -233,11 +240,9 @@ def _parse_torznab_results(payload: str, *, source_url: str) -> list[MusicIndexe
     for item in root.findall(".//channel/item"):
         attrs = _torznab_attrs(item)
         title = _text(item, "title")
-        magnet_link = attrs.get("magneturl") or _enclosure_url(item) or _text(item, "link")
-        if not magnet_link.startswith("magnet:"):
-            continue
-        info_hash = (attrs.get("infohash") or _info_hash_from_magnet(magnet_link)).upper()
-        if not title or not info_hash:
+        download_link = attrs.get("magneturl") or attrs.get("downloadurl") or _enclosure_url(item) or _text(item, "link")
+        info_hash = (attrs.get("infohash") or _info_hash_from_magnet(download_link)).upper()
+        if not title or not download_link or not info_hash:
             continue
 
         results.append(
@@ -246,7 +251,7 @@ def _parse_torznab_results(payload: str, *, source_url: str) -> list[MusicIndexe
                 name=title,
                 torrent_id=info_hash,
                 info_hash=info_hash,
-                magnet_link=magnet_link,
+                magnet_link=download_link,
                 url=_text(item, "guid") or _text(item, "link") or source_url,
                 seeders=attrs.get("seeders") or "0",
                 leechers=attrs.get("leechers") or attrs.get("peers") or "0",
