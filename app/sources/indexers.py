@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -18,6 +19,9 @@ class MusicIndexerSourceError(RuntimeError):
 
 class MusicIndexerMissingMetadata(RuntimeError):
     pass
+
+
+logger = logging.getLogger("uvicorn.error")
 
 
 @dataclass(frozen=True)
@@ -88,35 +92,73 @@ class MusicIndexerProvider:
     async def search(self, query: str) -> list[MusicIndexerSearchResult]:
         query = query.strip()
         if not query or (not self.prowlarr_url and not self.torznab_urls):
+            logger.warning(
+                "Music indexer search skipped: query_present=%s prowlarr_configured=%s torznab_count=%d",
+                bool(query),
+                bool(self.prowlarr_url),
+                len(self.torznab_urls),
+            )
             return []
 
         results: list[MusicIndexerSearchResult] = []
         last_error: Exception | None = None
         if self.prowlarr_url:
             try:
+                logger.warning(
+                    "Searching Prowlarr indexers: query=%r categories=%s",
+                    query,
+                    ",".join(self.categories) or "all",
+                )
                 payload = await asyncio.to_thread(self._fetch_prowlarr, query, self.categories)
                 prowlarr_results = _parse_prowlarr_results(payload, source_url=self.prowlarr_url)
+                logger.warning(
+                    "Prowlarr search returned raw_count=%d parsed_count=%d with categories=%s",
+                    _payload_count(payload),
+                    len(prowlarr_results),
+                    ",".join(self.categories) or "all",
+                )
                 if not prowlarr_results and self.categories:
+                    logger.warning(
+                        "Prowlarr returned no importable music results with categories=%s; retrying without categories",
+                        ",".join(self.categories),
+                    )
                     payload = await asyncio.to_thread(self._fetch_prowlarr, query, [])
                     prowlarr_results = _parse_prowlarr_results(
                         payload,
                         source_url=self.prowlarr_url,
                     )
+                    logger.warning(
+                        "Prowlarr category-free retry returned raw_count=%d parsed_count=%d",
+                        _payload_count(payload),
+                        len(prowlarr_results),
+                    )
                 results.extend(prowlarr_results)
             except Exception as exc:
+                logger.warning("Prowlarr music indexer search failed for %r: %s", query, exc)
                 last_error = exc
 
         for url in self.torznab_urls:
             try:
+                logger.warning("Searching Torznab indexer: url=%s query=%r", _redact_query(url), query)
                 payload = await asyncio.to_thread(self._fetch_torznab, url, query)
+                parsed = _parse_torznab_results(payload, source_url=url)
+                logger.warning("Torznab search parsed_count=%d url=%s", len(parsed), _redact_query(url))
+                results.extend(parsed)
             except Exception as exc:
+                logger.warning("Torznab music indexer search failed for %s: %s", _redact_query(url), exc)
                 last_error = exc
                 continue
-            results.extend(_parse_torznab_results(payload, source_url=url))
 
         if not results and last_error is not None:
             raise MusicIndexerSourceError(f"Music indexer search failed: {last_error}") from last_error
-        return _dedupe(results)
+        deduped = _dedupe(results)
+        logger.warning(
+            "Music indexer search complete: query=%r total_importable=%d deduped=%d",
+            query,
+            len(results),
+            len(deduped),
+        )
+        return deduped
 
     def candidate_from_result(self, result: MusicIndexerSearchResult) -> MusicIndexerImportCandidate:
         return MusicIndexerImportCandidate(
@@ -229,6 +271,10 @@ def _parse_prowlarr_results(payload: Any, *, source_url: str) -> list[MusicIndex
     return results
 
 
+def _payload_count(payload: Any) -> int:
+    return len(payload) if isinstance(payload, list) else 0
+
+
 def _parse_torznab_results(payload: str, *, source_url: str) -> list[MusicIndexerSearchResult]:
     try:
         root = ElementTree.fromstring(payload)
@@ -336,6 +382,11 @@ def _normalize_urls(urls: list[str] | tuple[str, ...]) -> list[str]:
 
 def _split(raw: str) -> list[str]:
     return [part.strip() for part in raw.replace("\n", ",").split(",") if part.strip()]
+
+
+def _redact_query(url: str) -> str:
+    parsed = urlparse(url)
+    return parsed._replace(query="...").geturl() if parsed.query else url
 
 
 def _local_name(tag: str) -> str:
