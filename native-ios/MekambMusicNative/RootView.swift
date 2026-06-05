@@ -378,9 +378,8 @@ struct TrackArtworkView: View {
     let size: CGFloat
 
     var body: some View {
-        let album = app.albums.first { $0.tracks.contains(where: { $0.id == track.id }) }
         Group {
-            if let album, let image = app.albumCovers[album.id] {
+            if let image = app.coverImage(for: track) {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
@@ -396,10 +395,18 @@ struct TrackArtworkView: View {
 
 struct TrackRowNative: View {
     @EnvironmentObject private var app: AppState
+    @State private var dragOffset: CGFloat = 0
     let track: ApiTrack
 
     var body: some View {
-        Button { app.play(track) } label: {
+        ZStack(alignment: .trailing) {
+            Label("Queue", systemImage: "text.badge.plus")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .frame(maxHeight: .infinity)
+                .opacity(dragOffset < -8 ? 1 : 0)
+
             HStack(spacing: 12) {
                 TrackArtworkView(track: track, size: 52)
                     .environmentObject(app)
@@ -441,8 +448,35 @@ struct TrackRowNative: View {
             .padding(12)
             .background(app.currentTrack?.id == track.id ? Color.blue.opacity(0.18) : Color.white.opacity(0.06))
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .offset(x: dragOffset)
         }
-        .buttonStyle(.plain)
+        .background(Color.blue.opacity(dragOffset < 0 ? 0.8 : 0))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            app.play(track)
+        }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 24)
+                .onChanged { value in
+                    guard value.translation.width < 0,
+                          abs(value.translation.width) > abs(value.translation.height) * 1.2 else { return }
+                    dragOffset = max(value.translation.width, -96)
+                }
+                .onEnded { value in
+                    let shouldAddToQueue = value.translation.width < -70
+                        && abs(value.translation.width) > abs(value.translation.height) * 1.2
+                    if shouldAddToQueue {
+                        app.addToQueue(track)
+                    }
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                        dragOffset = 0
+                    }
+                }
+        )
+        .accessibilityAction(named: "Add to Queue") {
+            app.addToQueue(track)
+        }
     }
 }
 
@@ -495,7 +529,7 @@ struct TorrentRowNative: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.white)
                         .lineLimit(2)
-                    Text("\(torrent.uploader ?? "unknown") · \(torrent.sizeText) · S \(torrent.seeders ?? "0")")
+                    Text("\(torrent.source.displayName) · \(torrent.uploader ?? "unknown") · \(torrent.sizeText) · S \(torrent.seeders ?? "0")")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -781,6 +815,12 @@ struct SettingsView: View {
                 Text(app.normalizedEndpoint.isEmpty ? "Not set" : app.normalizedEndpoint)
                     .font(.footnote.monospaced())
                     .textSelection(.enabled)
+            }
+
+            Section("Playback") {
+                Toggle(isOn: $app.autoplaySimilarEnabled) {
+                    Label("Autoplay Similar Songs", systemImage: "infinity")
+                }
             }
 
             Section("Tip") {

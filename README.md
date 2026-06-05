@@ -100,6 +100,7 @@ python -m app.api.openapi_export openapi.json
 
 - `GET /health`
 - `GET /health/ready`
+- `GET /sources/search?q=...`
 - `GET /sources/1337x/search?q=...`
 - `GET /sources/piratebay/search?q=...`
 - `POST /imports/1337x/{torrent_id}`
@@ -177,6 +178,9 @@ storage.
 
 ## Safety Model
 
+- `/sources/search` runs a unified music search across configured torrent sources,
+  tries normalized artist/title query variants, deduplicates results, and keeps
+  working when one source is temporarily blocked/unavailable.
 - 1337x searches are limited to Music category results and sorted by seeders by default.
 - Import resolves the torrent with `info()` before enqueueing it.
 - qBittorrent only receives the quarantine volume, never the library volume.

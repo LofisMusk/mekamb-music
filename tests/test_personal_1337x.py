@@ -1,5 +1,6 @@
 import unittest
 from dataclasses import dataclass
+from unittest.mock import patch
 
 from app.sources.personal_1337x import (
     MissingTorrentMetadata,
@@ -43,6 +44,16 @@ class FakeClient:
         return self.info_item
 
 
+class FailingSearchClient(FakeClient):
+    def search(self, *args, **kwargs):
+        raise RuntimeError("blocked")
+
+
+class FailingInfoClient(FakeClient):
+    def info(self, *args, **kwargs):
+        raise RuntimeError("blocked")
+
+
 class Personal1337xProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_search_returns_all_music_results(self):
         client = FakeClient(
@@ -59,6 +70,26 @@ class Personal1337xProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item.torrent_id for item in results], ["1", "2"])
         self.assertEqual(client.search_kwargs["category"].lower(), "music")
 
+    async def test_search_falls_back_to_next_mirror(self):
+        clients = {
+            "https://blocked.example": FailingSearchClient([], FakeItem("mine", "1", "mekamb")),
+            "https://mirror.example": FakeClient(
+                [FakeItem("mine", "1", "mekamb")],
+                FakeItem("mine", "1", "mekamb"),
+            ),
+        }
+        with patch(
+            "app.sources.personal_1337x._build_default_client",
+            side_effect=lambda base_url: clients[base_url],
+        ):
+            provider = Personal1337xProvider(
+                base_urls=["https://blocked.example", "https://mirror.example"]
+            )
+            results = await provider.search("ambient")
+
+        self.assertEqual([item.torrent_id for item in results], ["1"])
+        self.assertEqual(clients["https://mirror.example"].search_kwargs["category"].lower(), "music")
+
     async def test_import_accepts_any_uploader(self):
         client = FakeClient([], FakeItem("not mine", "1", "other"))
         provider = Personal1337xProvider(client=client)
@@ -66,6 +97,23 @@ class Personal1337xProviderTests(unittest.IsolatedAsyncioTestCase):
         candidate = await provider.resolve_for_import("1")
 
         self.assertEqual(candidate.uploader, "other")
+
+    async def test_import_falls_back_to_next_mirror(self):
+        clients = {
+            "https://blocked.example": FailingInfoClient([], FakeItem("mine", "1", "mekamb")),
+            "https://mirror.example": FakeClient([], FakeItem("mine", "1", "mekamb")),
+        }
+        with patch(
+            "app.sources.personal_1337x._build_default_client",
+            side_effect=lambda base_url: clients[base_url],
+        ):
+            provider = Personal1337xProvider(
+                base_urls=["https://blocked.example", "https://mirror.example"]
+            )
+            candidate = await provider.resolve_for_import("1")
+
+        self.assertEqual(candidate.info_hash, "ABC")
+        self.assertEqual(clients["https://mirror.example"].info_kwargs["torrent_id"], "1")
 
     async def test_import_rejects_missing_magnet_or_hash(self):
         provider = Personal1337xProvider(

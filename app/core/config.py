@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     instance_id: str = "local"
 
     personal_1337x_base_url: str = "https://1337x.to"
+    personal_1337x_base_urls: str = ""
     personal_1337x_max_pages: int = 1
     piratebay_api_base_url: str = "https://apibay.org"
     piratebay_category: int = 100

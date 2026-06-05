@@ -2,7 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from redis.asyncio import Redis
 
 from app.api.deps import personal_1337x_provider, piratebay_provider, require_token
-from app.api.schemas import Source1337xSearchResponse, SourcePirateBaySearchResponse
+from app.api.schemas import (
+    Source1337xSearchResponse,
+    SourcePirateBaySearchResponse,
+    SourceSearchResponse,
+)
 from app.imports.queue import RedisImportQueue
 from app.core.config import settings
 from app.sources.personal_1337x import (
@@ -10,6 +14,7 @@ from app.sources.personal_1337x import (
     SourceBlockedError,
 )
 from app.sources.piratebay import PirateBayProvider, PirateBaySourceError
+from app.sources.search import UnifiedTorrentSearch
 
 router = APIRouter(dependencies=[Depends(require_token)])
 
@@ -35,6 +40,21 @@ async def search_personal_1337x(
     return Source1337xSearchResponse(
         items=[item.to_dict() for item in results],
     )
+
+
+@router.get("/search", response_model=SourceSearchResponse)
+async def search_sources(
+    q: str = Query(min_length=1, max_length=120),
+    personal_1337x: Personal1337xProvider = Depends(personal_1337x_provider),
+    piratebay: PirateBayProvider = Depends(piratebay_provider),
+) -> SourceSearchResponse:
+    redis = await _get_redis()
+    search = UnifiedTorrentSearch(
+        piratebay=piratebay,
+        personal_1337x=personal_1337x,
+    )
+    results = await search.search(q, redis=redis)
+    return SourceSearchResponse(items=[item.to_dict() for item in results])
 
 
 @router.get("/piratebay/search", response_model=SourcePirateBaySearchResponse)

@@ -91,6 +91,22 @@ def _seeders_sort() -> str:
     return str(getattr(sort, "SEEDERS", "seeders"))
 
 
+def _split_base_urls(raw: str) -> list[str]:
+    return [part.strip() for part in raw.replace("\n", ",").split(",") if part.strip()]
+
+
+def _normalize_base_urls(base_urls: list[str] | tuple[str, ...]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for base_url in base_urls:
+        value = base_url.strip().rstrip("/")
+        if not value or value in seen:
+            continue
+        normalized.append(value)
+        seen.add(value)
+    return normalized or ["https://1337x.to"]
+
+
 def _build_default_client(base_url: str) -> Py1337xLike:
     from py1337x import Py1337x
 
@@ -102,30 +118,43 @@ class Personal1337xProvider:
         self,
         *,
         base_url: str = "https://1337x.to",
+        base_urls: list[str] | tuple[str, ...] | None = None,
         max_pages: int = 1,
         client: Py1337xLike | None = None,
         category: str | None = None,
         search_cache_ttl: int = 300,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_urls = _normalize_base_urls(base_urls or [base_url])
+        self.base_url = self.base_urls[0]
         self.max_pages = max(1, max_pages)
         self._client = client
+        self._clients: dict[str, Py1337xLike] = {}
         self._category = category or _music_category()
         self._search_cache_ttl = search_cache_ttl
 
     @classmethod
     def from_settings(cls, settings: object) -> "Personal1337xProvider":
+        base_url = getattr(settings, "personal_1337x_base_url", "https://1337x.to")
+        configured_base_urls = _split_base_urls(
+            getattr(settings, "personal_1337x_base_urls", "")
+        )
         return cls(
-            base_url=getattr(settings, "personal_1337x_base_url", "https://1337x.to"),
+            base_url=base_url,
+            base_urls=configured_base_urls or [base_url],
             max_pages=getattr(settings, "personal_1337x_max_pages", 1),
             search_cache_ttl=getattr(settings, "search_cache_ttl_seconds", 300),
         )
 
     @property
     def client(self) -> Py1337xLike:
-        if self._client is None:
-            self._client = _build_default_client(self.base_url)
-        return self._client
+        return self._client_for(self.base_url)
+
+    def _client_for(self, base_url: str) -> Py1337xLike:
+        if self._client is not None and base_url == self.base_url:
+            return self._client
+        if base_url not in self._clients:
+            self._clients[base_url] = _build_default_client(base_url)
+        return self._clients[base_url]
 
     async def search(
         self,
@@ -150,15 +179,87 @@ class Personal1337xProvider:
                 logger.warning("Redis get failed (ignored): %s", exc)
 
         selected_sort = _seeders_sort() if sort_by in (None, "seeders") else sort_by
-        result = await asyncio.to_thread(
-            self.client.search,
-            query,
-            page=page,
-            category=self._category,
-            sort_by=selected_sort,
-            order="desc",
-        )
+        last_blocked_error: SourceBlockedError | None = None
+        last_search_error: Exception | None = None
 
+        for base_url in self.base_urls:
+            try:
+                result = await asyncio.to_thread(
+                    self._client_for(base_url).search,
+                    query,
+                    page=page,
+                    category=self._category,
+                    sort_by=selected_sort,
+                    order="desc",
+                )
+            except Exception as exc:
+                logger.warning("1337x search failed for %s: %s", base_url, exc)
+                last_search_error = exc
+                continue
+
+            results = self._search_results_from_response(result)
+            if results:
+                if redis is not None:
+                    try:
+                        await redis.setex(cache_key, self._search_cache_ttl, _serialize_results(results))
+                        logger.debug("Search cache set: %s (TTL=%ds)", cache_key, self._search_cache_ttl)
+                    except Exception as exc:
+                        logger.warning("Redis set failed (ignored): %s", exc)
+                return results
+
+            try:
+                await asyncio.to_thread(self._raise_if_search_is_blocked, base_url, query)
+            except SourceBlockedError as exc:
+                logger.warning("1337x mirror blocked for %s: %s", base_url, exc)
+                last_blocked_error = exc
+                continue
+
+            return []
+
+        if last_blocked_error is not None:
+            raise SourceBlockedError(
+                "All configured 1337x mirrors are returning a Cloudflare challenge to the backend."
+            ) from last_blocked_error
+        if last_search_error is not None:
+            raise last_search_error
+        return []
+
+    async def resolve_for_import(self, torrent_id: str) -> Personal1337xImportCandidate:
+        torrent_id = torrent_id.strip()
+        if not torrent_id:
+            raise MissingTorrentMetadata("Missing torrent id.")
+
+        last_error: Exception | None = None
+        for base_url in self.base_urls:
+            try:
+                info = await asyncio.to_thread(self._client_for(base_url).info, torrent_id=torrent_id)
+            except Exception as exc:
+                logger.warning("1337x info lookup failed for %s: %s", base_url, exc)
+                last_error = exc
+                continue
+
+            magnet_link = _get_attr(info, "magnet_link")
+            info_hash = _get_attr(info, "info_hash")
+            if magnet_link and info_hash:
+                return Personal1337xImportCandidate(
+                    torrent_id=torrent_id,
+                    info_hash=info_hash,
+                    magnet_link=magnet_link,
+                    uploader=_get_attr(info, "uploader"),
+                    source_url=self._source_url(info, torrent_id, base_url),
+                    name=_get_attr(info, "name") or None,
+                    fetched_at=datetime.now(UTC),
+                )
+
+            last_error = MissingTorrentMetadata(
+                "Torrent has no magnet link." if not magnet_link else "Torrent has no info hash."
+            )
+
+        if last_error is not None:
+            raise last_error
+        raise MissingTorrentMetadata("Missing torrent metadata.")
+
+    def _search_results_from_response(self, result: object) -> list[Personal1337xSearchResult]:
         now = datetime.now(UTC)
         results: list[Personal1337xSearchResult] = []
         for item in getattr(result, "items", []):
@@ -176,44 +277,10 @@ class Personal1337xProvider:
                     discovered_at=now,
                 )
             )
-
-        if not results and not getattr(result, "items", []):
-            await asyncio.to_thread(self._raise_if_search_is_blocked, query)
-
-        if redis is not None and results:
-            try:
-                await redis.setex(cache_key, self._search_cache_ttl, _serialize_results(results))
-                logger.debug("Search cache set: %s (TTL=%ds)", cache_key, self._search_cache_ttl)
-            except Exception as exc:
-                logger.warning("Redis set failed (ignored): %s", exc)
-
         return results
 
-    async def resolve_for_import(self, torrent_id: str) -> Personal1337xImportCandidate:
-        torrent_id = torrent_id.strip()
-        if not torrent_id:
-            raise MissingTorrentMetadata("Missing torrent id.")
-
-        info = await asyncio.to_thread(self.client.info, torrent_id=torrent_id)
-        magnet_link = _get_attr(info, "magnet_link")
-        info_hash = _get_attr(info, "info_hash")
-        if not magnet_link:
-            raise MissingTorrentMetadata("Torrent has no magnet link.")
-        if not info_hash:
-            raise MissingTorrentMetadata("Torrent has no info hash.")
-
-        return Personal1337xImportCandidate(
-            torrent_id=torrent_id,
-            info_hash=info_hash,
-            magnet_link=magnet_link,
-            uploader=_get_attr(info, "uploader"),
-            source_url=self._source_url(info, torrent_id),
-            name=_get_attr(info, "name") or None,
-            fetched_at=datetime.now(UTC),
-        )
-
-    def _raise_if_search_is_blocked(self, query: str) -> None:
-        url = f"{self.base_url}/search/{quote(query)}/1/"
+    def _raise_if_search_is_blocked(self, base_url: str, query: str) -> None:
+        url = f"{base_url}/search/{quote(query)}/1/"
         request = Request(
             url,
             headers={
@@ -230,7 +297,7 @@ class Personal1337xProvider:
             body = exc.read(4096).decode("utf-8", errors="replace")
             if exc.code in {403, 429} and _looks_like_cloudflare_challenge(body):
                 raise SourceBlockedError(
-                    f"{self.base_url} is returning a Cloudflare challenge to the backend."
+                    f"{base_url} is returning a Cloudflare challenge to the backend."
                 ) from exc
             return
         except URLError:
@@ -238,15 +305,15 @@ class Personal1337xProvider:
 
         if _looks_like_cloudflare_challenge(body):
             raise SourceBlockedError(
-                f"{self.base_url} is returning a Cloudflare challenge to the backend."
+                f"{base_url} is returning a Cloudflare challenge to the backend."
             )
 
-    def _source_url(self, info: object, torrent_id: str) -> str:
+    def _source_url(self, info: object, torrent_id: str, base_url: str) -> str:
         for attr in ("url", "link", "source_url"):
             value = _get_attr(info, attr)
             if value:
                 return value
-        return f"{self.base_url}/torrent/{torrent_id}/"
+        return f"{base_url}/torrent/{torrent_id}/"
 
 
 def _serialize_results(results: list[Personal1337xSearchResult]) -> str:

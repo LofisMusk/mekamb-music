@@ -80,6 +80,21 @@ class SourcePirateBaySearchResponse(BaseModel):
     items: list[SourcePirateBayItem]
 
 
+class SourceSearchItem(BaseModel):
+    source: str
+    name: str
+    torrent_id: str
+    seeders: str
+    leechers: str
+    size: str | None = None
+    size_bytes: int | None = None
+    uploader: str
+
+
+class SourceSearchResponse(BaseModel):
+    items: list[SourceSearchItem]
+
+
 class ImportRecordResponse(BaseModel):
     id: UUID
     source: str

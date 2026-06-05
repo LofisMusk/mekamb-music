@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import ImageIO
 import MediaPlayer
 import SwiftUI
 import UIKit
@@ -50,26 +51,99 @@ struct TrackListResponse: Codable { let items: [ApiTrack] }
 struct LikedTrackItem: Codable { let track: ApiTrack }
 struct LikedTracksResponse: Codable { let items: [LikedTrackItem] }
 
+enum TorrentSource: String, Codable, CaseIterable, Identifiable {
+    case pirateBay = "piratebay"
+    case thirteenThirtySevenX = "1337x"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .pirateBay:
+            return "Pirate Bay"
+        case .thirteenThirtySevenX:
+            return "1337x"
+        }
+    }
+
+    var searchPath: String {
+        switch self {
+        case .pirateBay:
+            return "/sources/piratebay/search"
+        case .thirteenThirtySevenX:
+            return "/sources/1337x/search"
+        }
+    }
+
+    var importPath: String {
+        switch self {
+        case .pirateBay:
+            return "/imports/piratebay"
+        case .thirteenThirtySevenX:
+            return "/imports/1337x"
+        }
+    }
+}
+
 struct TorrentResult: Identifiable, Codable, Hashable {
     let name: String
     let torrentId: String
+    let source: TorrentSource
     let seeders: String?
     let leechers: String?
     let sizeBytes: Int?
+    let sizeLabel: String?
     let uploader: String?
 
     enum CodingKeys: String, CodingKey {
         case name
         case torrentId = "torrent_id"
+        case source
         case seeders
         case leechers
         case sizeBytes = "size_bytes"
+        case sizeLabel = "size"
         case uploader
     }
 
-    var id: String { torrentId }
+    init(
+        name: String,
+        torrentId: String,
+        source: TorrentSource,
+        seeders: String?,
+        leechers: String?,
+        sizeBytes: Int?,
+        sizeLabel: String?,
+        uploader: String?
+    ) {
+        self.name = name
+        self.torrentId = torrentId
+        self.source = source
+        self.seeders = seeders
+        self.leechers = leechers
+        self.sizeBytes = sizeBytes
+        self.sizeLabel = sizeLabel
+        self.uploader = uploader
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        torrentId = try container.decode(String.self, forKey: .torrentId)
+        source = (try? container.decode(TorrentSource.self, forKey: .source)) ?? .pirateBay
+        seeders = try container.decodeIfPresent(String.self, forKey: .seeders)
+        leechers = try container.decodeIfPresent(String.self, forKey: .leechers)
+        sizeBytes = try container.decodeIfPresent(Int.self, forKey: .sizeBytes)
+        sizeLabel = try container.decodeIfPresent(String.self, forKey: .sizeLabel)
+        uploader = try container.decodeIfPresent(String.self, forKey: .uploader)
+    }
+
+    var id: String { "\(source.rawValue):\(torrentId)" }
     var sizeText: String {
-        guard let sizeBytes, sizeBytes > 0 else { return "0 B" }
+        guard let sizeBytes, sizeBytes > 0 else {
+            if let sizeLabel, !sizeLabel.isEmpty { return sizeLabel }
+            return "0 B"
+        }
         let units = ["B", "KB", "MB", "GB", "TB"]
         var value = Double(sizeBytes)
         var index = 0
@@ -78,6 +152,19 @@ struct TorrentResult: Identifiable, Codable, Hashable {
             index += 1
         }
         return index == 0 ? "\(Int(value)) \(units[index])" : String(format: "%.1f %@", value, units[index])
+    }
+
+    func withSource(_ source: TorrentSource) -> TorrentResult {
+        TorrentResult(
+            name: name,
+            torrentId: torrentId,
+            source: source,
+            seeders: seeders,
+            leechers: leechers,
+            sizeBytes: sizeBytes,
+            sizeLabel: sizeLabel,
+            uploader: uploader
+        )
     }
 }
 
@@ -131,6 +218,9 @@ enum RepeatMode: String, CaseIterable, Identifiable {
 final class AppState: ObservableObject {
     @AppStorage("mekambMusicApiEndpoint") var apiEndpoint: String = ""
     @AppStorage("mekambMusicApiToken") var apiToken: String = ""
+    @AppStorage("mekambMusicAutoplaySimilarEnabled") var autoplaySimilarEnabled: Bool = true
+    @AppStorage("mekambMusicLastTrackId") private var savedPlaybackTrackId: String = ""
+    @AppStorage("mekambMusicLastElapsedTime") private var savedPlaybackElapsedTime: Double = 0
 
     @Published var searchMode: SearchMode = .library
     @Published var selectedTab: MusicTab = .library
@@ -156,6 +246,9 @@ final class AppState: ObservableObject {
     private var timeObserver: Any?
     private weak var timeObserverPlayer: AVPlayer?
     private var playerItemEndObserver: NSObjectProtocol?
+    private var isLoadingAlbumCovers = false
+    private var failedAlbumCoverIds: Set<String> = []
+    private var didRestorePlaybackState = false
 
     init() {
         configureAudioSession()
@@ -163,8 +256,12 @@ final class AppState: ObservableObject {
     }
 
     deinit {
-        removeTimeObserver()
-        removePlayerItemEndObserver()
+        if let timeObserver, let timeObserverPlayer {
+            timeObserverPlayer.removeTimeObserver(timeObserver)
+        }
+        if let playerItemEndObserver {
+            NotificationCenter.default.removeObserver(playerItemEndObserver)
+        }
         player?.pause()
     }
 
@@ -236,6 +333,10 @@ final class AppState: ObservableObject {
         return Array(queueTracks[nextIndex...])
     }
 
+    func coverImage(for track: ApiTrack) -> UIImage? {
+        albumCovers[stableAlbumKey(for: track)]
+    }
+
     func testConnection() async {
         isTestingConnection = true
         errorMessage = nil
@@ -269,7 +370,7 @@ final class AppState: ObservableObject {
             likedTrackIds = newLikedIds
             tracks = mergeTracks(existing: tracks, incoming: newTracks).sorted(by: stableLibraryTrackOrder)
             syncQueueWithLibrary()
-            if currentTrack == nil { currentTrack = tracks.first }
+            restorePlaybackStateIfNeeded()
             selectedAlbumId = selectedAlbumId.flatMap { id in albums.contains(where: { $0.id == id }) ? id : nil }
             Task { await loadMissingAlbumCovers() }
         } catch {
@@ -279,14 +380,21 @@ final class AppState: ObservableObject {
     }
 
     func loadMissingAlbumCovers() async {
+        guard !isLoadingAlbumCovers else { return }
+        isLoadingAlbumCovers = true
+        defer { isLoadingAlbumCovers = false }
+
         let targets = albums.compactMap { album -> (String, String)? in
-            guard albumCovers[album.id] == nil, let trackId = album.coverTrackId else { return nil }
+            guard albumCovers[album.id] == nil, !failedAlbumCoverIds.contains(album.id), let trackId = album.coverTrackId else { return nil }
             return (album.id, trackId)
         }
         for (albumId, trackId) in targets {
             if let image = try? await loadArtwork(trackId: trackId) {
                 albumCovers[albumId] = image
+            } else {
+                failedAlbumCoverIds.insert(albumId)
             }
+            await Task.yield()
         }
     }
 
@@ -300,8 +408,17 @@ final class AppState: ObservableObject {
         errorMessage = nil
         do {
             let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-            let response: TorrentSearchResponse = try await request("/sources/piratebay/search?q=\(encoded)")
-            torrents = response.items.sorted { Int($0.seeders ?? "0") ?? 0 > Int($1.seeders ?? "0") ?? 0 }
+            let items: [TorrentResult]
+            do {
+                let response: TorrentSearchResponse = try await request("/sources/search?q=\(encoded)")
+                items = response.items
+            } catch {
+                guard isNotFound(error) else { throw error }
+                items = try await searchLegacyTorrentSources(encodedQuery: encoded)
+            }
+            torrents = items.sorted { left, right in
+                Int(left.seeders ?? "0") ?? 0 > Int(right.seeders ?? "0") ?? 0
+            }
         } catch {
             if !isCancellation(error) {
                 errorMessage = clean(error)
@@ -315,7 +432,7 @@ final class AppState: ObservableObject {
         errorMessage = nil
         do {
             let encodedId = encodePathComponent(torrent.torrentId)
-            let _: EmptyResponse = try await request("/imports/piratebay/\(encodedId)", method: "POST")
+            let _: EmptyResponse = try await request("\(torrent.source.importPath)/\(encodedId)", method: "POST")
         } catch {
             if !isCancellation(error) { errorMessage = clean(error) }
         }
@@ -333,7 +450,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    func play(_ track: ApiTrack, queue: [ApiTrack]? = nil, updateQueue: Bool = true) {
+    func play(_ track: ApiTrack, queue: [ApiTrack]? = nil, updateQueue: Bool = true, startAt startTime: TimeInterval? = nil) {
         if updateQueue {
             preparePlaybackQueue(for: track, from: queue ?? playbackContextTracks())
         }
@@ -361,20 +478,30 @@ final class AppState: ObservableObject {
 
         player = nextPlayer
         currentTrack = track
-        playbackProgress = 0
+        savedPlaybackTrackId = track.id
+        let elapsed = normalizedPlaybackStartTime(startTime, for: track)
+        savedPlaybackElapsedTime = elapsed
+        playbackProgress = playbackProgress(for: elapsed, in: track)
         addTimeObserver(to: nextPlayer)
+        if elapsed > 0 {
+            nextPlayer.seek(to: CMTime(seconds: elapsed, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        }
         nextPlayer.play()
         isPlaying = true
-        updateNowPlayingInfo(for: track, elapsed: 0)
+        updateNowPlayingInfo(for: track, elapsed: elapsed)
         Task { try? await postPlay(track) }
     }
 
     func togglePlayback() {
         guard let player else {
-            if let currentTrack { play(currentTrack, updateQueue: false) }
+            if let currentTrack {
+                let startTime = savedStartTime(for: currentTrack)
+                play(currentTrack, updateQueue: false, startAt: startTime)
+            }
             return
         }
         if isPlaying {
+            saveCurrentPlaybackPosition()
             player.pause()
             isPlaying = false
         } else {
@@ -409,6 +536,12 @@ final class AppState: ObservableObject {
         } else if repeatMode == .all, let first = list.first {
             play(first, queue: list, updateQueue: false)
         } else {
+            let recommendations = autoplaySimilarEnabled ? autoplayRecommendations(after: currentTrack, excluding: list) : []
+            if let first = recommendations.first {
+                play(first, queue: list + recommendations, updateQueue: false)
+                return
+            }
+
             player?.pause()
             isPlaying = false
             playbackProgress = 1
@@ -502,6 +635,38 @@ final class AppState: ObservableObject {
         return ids
     }
 
+    private func searchLegacyTorrentSources(encodedQuery: String) async throws -> [TorrentResult] {
+        async let pirateBaySearch = torrentSearchResult(source: .pirateBay, encodedQuery: encodedQuery)
+        async let thirteenThirtySevenSearch = torrentSearchResult(source: .thirteenThirtySevenX, encodedQuery: encodedQuery)
+        let searchResults = await [pirateBaySearch, thirteenThirtySevenSearch]
+        let items = searchResults.flatMap { result -> [TorrentResult] in
+            guard case let .success(items) = result else { return [] }
+            return items
+        }
+
+        if items.isEmpty, let failure = searchResults.first(where: { result in
+            if case .failure = result { return true }
+            return false
+        }) {
+            if case let .failure(error) = failure { throw error }
+        }
+
+        return items
+    }
+
+    private func torrentSearchResult(source: TorrentSource, encodedQuery: String) async -> Result<[TorrentResult], Error> {
+        do {
+            var path = "\(source.searchPath)?q=\(encodedQuery)"
+            if source == .thirteenThirtySevenX {
+                path += "&sort_by=seeders"
+            }
+            let response: TorrentSearchResponse = try await request(path)
+            return .success(response.items.map { $0.withSource(source) })
+        } catch {
+            return .failure(error)
+        }
+    }
+
     private func mergeTracks(existing: [ApiTrack], incoming: [ApiTrack]) -> [ApiTrack] {
         var merged = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
         for track in incoming { merged[track.id] = track }
@@ -533,10 +698,106 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func autoplayRecommendations(after track: ApiTrack, excluding queue: [ApiTrack]) -> [ApiTrack] {
+        let excludedIds = Set(queue.map(\.id))
+        let candidates = tracks.filter { candidate in
+            candidate.id != track.id && !excludedIds.contains(candidate.id)
+        }
+        guard !candidates.isEmpty else { return [] }
+
+        let scored = candidates.map { candidate in
+            (track: candidate, score: similarityScore(candidate, to: track))
+        }
+        let similar = scored
+            .filter { $0.score > 0 }
+            .sorted { left, right in
+                if left.score != right.score { return left.score > right.score }
+                return stableLibraryTrackOrder(left.track, right.track)
+            }
+            .map(\.track)
+
+        if !similar.isEmpty {
+            return Array(similar.prefix(25))
+        }
+
+        return Array(candidates.sorted(by: stableLibraryTrackOrder).prefix(25))
+    }
+
+    private func similarityScore(_ candidate: ApiTrack, to track: ApiTrack) -> Int {
+        var score = 0
+        if let candidateArtist = normalizedGroupingValue(candidate.artist),
+           let trackArtist = normalizedGroupingValue(track.artist),
+           candidateArtist == trackArtist {
+            score += 6
+        }
+        if let candidateAlbum = normalizedGroupingValue(candidate.album),
+           let trackAlbum = normalizedGroupingValue(track.album),
+           candidateAlbum == trackAlbum {
+            score += 4
+        }
+        if likedTrackIds.contains(candidate.id) {
+            score += 1
+        }
+
+        let sharedTitleTokens = titleTokens(candidate.title).intersection(titleTokens(track.title)).count
+        return score + min(sharedTitleTokens, 2)
+    }
+
+    private func titleTokens(_ title: String) -> Set<String> {
+        let separators = CharacterSet.alphanumerics.inverted
+        return Set(title
+            .lowercased()
+            .components(separatedBy: separators)
+            .filter { $0.count > 3 })
+    }
+
     private func syncQueueWithLibrary() {
         guard !playbackQueue.isEmpty else { return }
         let byId = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
         playbackQueue = playbackQueue.compactMap { byId[$0.id] ?? $0 }
+    }
+
+    private func restorePlaybackStateIfNeeded() {
+        guard !didRestorePlaybackState else {
+            if currentTrack == nil { currentTrack = tracks.first }
+            return
+        }
+
+        didRestorePlaybackState = true
+        guard let restoredTrack = tracks.first(where: { $0.id == savedPlaybackTrackId }) else {
+            if currentTrack == nil { currentTrack = tracks.first }
+            return
+        }
+
+        currentTrack = restoredTrack
+        playbackQueue = tracks
+        let elapsed = normalizedPlaybackStartTime(savedPlaybackElapsedTime, for: restoredTrack)
+        savedPlaybackElapsedTime = elapsed
+        playbackProgress = playbackProgress(for: elapsed, in: restoredTrack)
+        updateNowPlayingInfo(for: restoredTrack, elapsed: elapsed)
+    }
+
+    private func savedStartTime(for track: ApiTrack) -> TimeInterval {
+        guard track.id == savedPlaybackTrackId else { return 0 }
+        return normalizedPlaybackStartTime(savedPlaybackElapsedTime, for: track)
+    }
+
+    private func saveCurrentPlaybackPosition(elapsed: TimeInterval? = nil) {
+        guard let currentTrack else { return }
+        let currentElapsed = elapsed ?? currentElapsedTime()
+        savedPlaybackTrackId = currentTrack.id
+        savedPlaybackElapsedTime = normalizedPlaybackStartTime(currentElapsed, for: currentTrack)
+    }
+
+    private func normalizedPlaybackStartTime(_ seconds: TimeInterval?, for track: ApiTrack) -> TimeInterval {
+        guard let seconds, seconds.isFinite, seconds > 0 else { return 0 }
+        guard let duration = track.durationSeconds, duration.isFinite, duration > 0 else { return seconds }
+        return seconds >= max(duration - 3, 0) ? 0 : min(seconds, duration)
+    }
+
+    private func playbackProgress(for elapsed: TimeInterval, in track: ApiTrack) -> Double {
+        guard let duration = track.durationSeconds, duration.isFinite, duration > 0 else { return 0 }
+        return min(max(elapsed / duration, 0), 1)
     }
 
     private func postPlay(_ track: ApiTrack) async throws {
@@ -552,7 +813,20 @@ final class AppState: ObservableObject {
         request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
-        return UIImage(data: data)
+        return downsampleArtwork(data: data, maxPixelSize: 420)
+    }
+
+    private func downsampleArtwork(data: Data, maxPixelSize: CGFloat) -> UIImage? {
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, options) else { return nil }
+        let downsampleOptions = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ] as CFDictionary
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, downsampleOptions) else { return nil }
+        return UIImage(cgImage: image)
     }
 
     private func request<T: Decodable>(_ path: String, method: String = "GET", requiresAuth: Bool = true) async throws -> T {
@@ -569,9 +843,9 @@ final class AppState: ObservableObject {
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         guard (200..<300).contains(http.statusCode) else {
             if let payload = try? JSONDecoder().decode(ApiError.self, from: data) {
-                throw BackendError.message("\(http.statusCode): \(payload.detail)")
+                throw BackendError.api(status: http.statusCode, message: payload.detail)
             }
-            throw BackendError.message("API error \(http.statusCode)")
+            throw BackendError.api(status: http.statusCode, message: "API error \(http.statusCode)")
         }
         if T.self == EmptyResponse.self { return EmptyResponse() as! T }
         return try JSONDecoder().decode(T.self, from: data)
@@ -599,6 +873,12 @@ final class AppState: ObservableObject {
         if let urlError = error as? URLError, urlError.code == .cancelled { return true }
         let text = error.localizedDescription.lowercased()
         return text == "cancelled" || text == "canceled"
+    }
+
+    private func isNotFound(_ error: Error) -> Bool {
+        guard let backend = error as? BackendError else { return false }
+        if case .api(let status, _) = backend { return status == 404 }
+        return false
     }
 
     private func stableAlbumKey(for track: ApiTrack) -> String {
@@ -773,6 +1053,7 @@ final class AppState: ObservableObject {
     private func seek(to seconds: TimeInterval) {
         let time = CMTime(seconds: seconds, preferredTimescale: 600)
         player?.seek(to: time)
+        saveCurrentPlaybackPosition(elapsed: seconds)
         updateNowPlayingPlaybackRate(elapsed: seconds)
     }
 
@@ -809,14 +1090,17 @@ final class AppState: ObservableObject {
 
     private func addTimeObserver(to observedPlayer: AVPlayer) {
         removeTimeObserver()
-        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
+        let interval = CMTime(seconds: 1, preferredTimescale: 600)
         timeObserver = observedPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self, weak observedPlayer] time in
-            guard let self else { return }
-            let duration = observedPlayer?.currentItem?.duration.seconds ?? 0
-            if duration.isFinite, duration > 0 {
-                self.playbackProgress = min(max(time.seconds / duration, 0), 1)
+            Task { @MainActor [weak self, weak observedPlayer] in
+                guard let self else { return }
+                let duration = observedPlayer?.currentItem?.duration.seconds ?? 0
+                if duration.isFinite, duration > 0 {
+                    self.playbackProgress = min(max(time.seconds / duration, 0), 1)
+                }
+                self.saveCurrentPlaybackPosition(elapsed: time.seconds)
+                self.updateNowPlayingPlaybackRate(elapsed: time.seconds)
             }
-            self.updateNowPlayingPlaybackRate(elapsed: time.seconds)
         }
         timeObserverPlayer = observedPlayer
     }
@@ -855,9 +1139,13 @@ struct EmptyResponse: Decodable {}
 struct ApiError: Decodable { let detail: String }
 
 enum BackendError: LocalizedError {
+    case api(status: Int, message: String)
     case message(String)
+
     var errorDescription: String? {
         switch self {
+        case .api(let status, let message):
+            return "\(status): \(message)"
         case .message(let value):
             return value
         }

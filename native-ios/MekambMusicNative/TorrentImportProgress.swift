@@ -86,7 +86,7 @@ final class TorrentImportController: ObservableObject {
         do {
             let encodedId = encodePathComponent(torrent.torrentId)
             let record: NativeImportRecord = try await request(
-                path: "/imports/piratebay/\(encodedId)",
+                path: "\(torrent.source.importPath)/\(encodedId)",
                 method: "POST",
                 app: app
             )
