@@ -51,6 +51,11 @@ struct TrackListResponse: Codable { let items: [ApiTrack] }
 struct LikedTrackItem: Codable { let track: ApiTrack }
 struct LikedTracksResponse: Codable { let items: [LikedTrackItem] }
 
+struct DownloadedTrackFile: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
 enum TorrentSource: String, Codable, CaseIterable, Identifiable {
     case pirateBay = "piratebay"
     case thirteenThirtySevenX = "1337x"
@@ -290,6 +295,8 @@ final class AppState: ObservableObject {
     @Published var playbackQueue: [ApiTrack] = []
     @Published var shuffleEnabled = false
     @Published var repeatMode: RepeatMode = .off
+    @Published var downloadingTrackId: String?
+    @Published var downloadedTrackFile: DownloadedTrackFile?
 
     private var player: AVPlayer?
     private var timeObserver: Any?
@@ -510,6 +517,39 @@ final class AppState: ObservableObject {
             if willLike { likedTrackIds.remove(track.id) } else { likedTrackIds.insert(track.id) }
             if !isCancellation(error) { errorMessage = clean(error) }
         }
+    }
+
+    func downloadTrack(_ track: ApiTrack) async {
+        guard canUseApi else {
+            errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
+            return
+        }
+        let encodedId = encodePathComponent(track.id)
+        guard let url = endpointURL(path: "/tracks/\(encodedId)/stream") else {
+            errorMessage = "Bad API endpoint."
+            return
+        }
+
+        downloadingTrackId = track.id
+        errorMessage = nil
+        do {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 120
+            request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+            let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                throw BackendError.message("Could not download track.")
+            }
+
+            let targetURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent(downloadFilename(for: track))
+            try? FileManager.default.removeItem(at: targetURL)
+            try FileManager.default.moveItem(at: temporaryURL, to: targetURL)
+            downloadedTrackFile = DownloadedTrackFile(url: targetURL)
+        } catch {
+            if !isCancellation(error) { errorMessage = clean(error) }
+        }
+        downloadingTrackId = nil
     }
 
     func play(_ track: ApiTrack, queue: [ApiTrack]? = nil, updateQueue: Bool = true, startAt startTime: TimeInterval? = nil) {
@@ -963,6 +1003,34 @@ final class AppState: ObservableObject {
 
     private func encodePathComponent(_ value: String) -> String {
         value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
+    }
+
+    private func downloadFilename(for track: ApiTrack) -> String {
+        let source = track.originalFilename?.isEmpty == false
+            ? track.originalFilename!
+            : "\(track.displayArtist) - \(track.title)"
+        var cleaned = source.replacingOccurrences(
+            of: #"[\\/:*?"<>|]+"#,
+            with: "_",
+            options: .regularExpression
+        )
+        cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.isEmpty { cleaned = "track" }
+        if cleaned.range(of: #"\.[A-Za-z0-9]{2,5}$"#, options: .regularExpression) != nil {
+            return cleaned
+        }
+        let extensionName: String
+        switch track.mediaType ?? "" {
+        case let mediaType where mediaType.contains("flac"):
+            extensionName = "flac"
+        case let mediaType where mediaType.contains("mpeg"):
+            extensionName = "mp3"
+        case let mediaType where mediaType.contains("mp4"):
+            extensionName = "m4a"
+        default:
+            extensionName = "audio"
+        }
+        return "\(cleaned).\(extensionName)"
     }
 
     private func isCancellation(_ error: Error) -> Bool {

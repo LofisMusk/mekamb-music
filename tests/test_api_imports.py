@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
-from app.api.deps import import_service, personal_1337x_provider, require_token
+from app.api.deps import db_session, import_service, personal_1337x_provider, require_token
 from app.imports.domain import ImportRecord
 from app.main import app
 from app.sources.personal_1337x import (
@@ -102,10 +102,22 @@ class FakeImportService:
         )
 
 
+class FakeSession:
+    def add(self, item):
+        self.item = item
+
+    async def commit(self):
+        return None
+
+    async def refresh(self, item):
+        return None
+
+
 def _client(provider):
     app.dependency_overrides[require_token] = lambda: None
     app.dependency_overrides[personal_1337x_provider] = lambda: provider
     app.dependency_overrides[import_service] = lambda: FakeImportService()
+    app.dependency_overrides[db_session] = lambda: FakeSession()
     return TestClient(app)
 
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct RootView: View {
     @EnvironmentObject private var app: AppState
@@ -40,6 +41,7 @@ struct RootView: View {
 
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .layoutPriority(1)
                     .contentShape(Rectangle())
                     .simultaneousGesture(TapGesture().onEnded { dismissSearch() })
 
@@ -52,23 +54,28 @@ struct RootView: View {
                     .contentShape(Rectangle())
                     .simultaneousGesture(TapGesture().onEnded { dismissSearch() })
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task { await app.refreshLibrary() }
-        .onChange(of: app.searchText) { _ in
+        .sheet(item: $app.downloadedTrackFile) { file in
+            ShareSheet(items: [file.url])
+        }
+        .onChange(of: app.searchText) { _, _ in
             guard app.searchMode.searchesRemoteSources else { return }
             Task {
                 try? await Task.sleep(nanoseconds: 350_000_000)
                 await app.searchTorrents()
             }
         }
-        .onChange(of: app.searchMode) { mode in
+        .onChange(of: app.searchMode) { _, mode in
             if mode.searchesRemoteSources {
                 app.selectedAlbumId = nil
                 app.torrents = []
                 Task { await app.searchTorrents() }
             }
         }
-        .onChange(of: app.selectedTab) { tab in
+        .onChange(of: app.selectedTab) { _, tab in
             if tab != .albums { app.selectedAlbumId = nil }
         }
     }
@@ -447,15 +454,26 @@ struct TrackRowNative: View {
                         Label("Add to Queue", systemImage: "text.badge.plus")
                     }
                     Button {
+                        Task { await app.downloadTrack(track) }
+                    } label: {
+                        Label("Download to Files", systemImage: "square.and.arrow.down")
+                    }
+                    Button {
                         Task { await app.toggleLike(track) }
                     } label: {
                         Label(app.likedTrackIds.contains(track.id) ? "Unlike" : "Like", systemImage: app.likedTrackIds.contains(track.id) ? "heart.slash" : "heart")
                     }
                 } label: {
-                    Image(systemName: "ellipsis")
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28, height: 28)
+                    if app.downloadingTrackId == track.id {
+                        ProgressView()
+                            .frame(width: 28, height: 28)
+                    } else {
+                        Image(systemName: "ellipsis")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 28, height: 28)
+                    }
                 }
+                .disabled(app.downloadingTrackId == track.id)
             }
             .padding(12)
             .background(app.currentTrack?.id == track.id ? Color.blue.opacity(0.18) : Color.white.opacity(0.06))
@@ -490,6 +508,16 @@ struct TrackRowNative: View {
             app.addToQueue(track)
         }
     }
+}
+
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
 struct TorrentSearchView: View {

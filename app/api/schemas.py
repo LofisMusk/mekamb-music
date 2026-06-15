@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime
 from uuid import UUID
 
@@ -96,6 +98,44 @@ class SourceSearchItem(BaseModel):
 
 class SourceSearchResponse(BaseModel):
     items: list[SourceSearchItem]
+
+
+class RecommendationTrackItemResponse(BaseModel):
+    track: TrackResponse
+    score: float
+    reasons: list[str]
+
+
+class RecommendationSourceCandidateResponse(BaseModel):
+    item: SourceSearchItem
+    score: float
+    query: str
+    reasons: list[str]
+    already_in_library: bool
+
+
+class RecommendationResponse(BaseModel):
+    seed_track: TrackResponse | None
+    local_tracks: list[RecommendationTrackItemResponse]
+    external_candidates: list[RecommendationSourceCandidateResponse]
+
+
+class RecommendationImportRequest(BaseModel):
+    limit: int = Field(default=3, ge=1, le=20)
+    sources: list[str] | None = None
+    min_seeders: int = Field(default=1, ge=0)
+
+
+class RecommendationImportItemResponse(BaseModel):
+    candidate: RecommendationSourceCandidateResponse
+    import_record: ImportRecordResponse | None = None
+    error: str | None = None
+
+
+class RecommendationImportResponse(BaseModel):
+    imported: list[RecommendationImportItemResponse]
+    skipped: list[RecommendationImportItemResponse]
+    failed: list[RecommendationImportItemResponse]
 
 
 class IndexerImportRequest(BaseModel):

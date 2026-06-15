@@ -120,6 +120,10 @@ python -m app.api.openapi_export openapi.json
 - `POST /sync/actions/{id}/apply`
 - `GET /sync/imports/{info_hash}/tracks`
 - `GET /sync/tracks/{track_id}/file`
+- `GET /recommendations/tracks/{track_id}`
+- `POST /recommendations/tracks/{track_id}/import-missing`
+- `GET /recommendations/library`
+- `POST /recommendations/library/import-missing`
 - `GET /tracks?q=...&artist=...&album=...&source_import_id=...&limit=50&offset=0`
 - `GET /tracks/liked?limit=50&offset=0`
 - `GET /tracks/recent?limit=50&offset=0`
@@ -148,6 +152,20 @@ python -m app.api.openapi_export openapi.json
 - `DELETE /playlists/{id}/tracks/{track_id}`
 
 Pass `Authorization: Bearer <API_TOKEN>` to every non-health endpoint.
+
+## Recommendations
+
+`/recommendations/tracks/{track_id}` returns Spotify-like recommendations in two
+layers: local similar tracks already in the library and external candidates from
+configured music sources. The local score uses artist, album, title token overlap,
+duration proximity, likes, and recent playback seeds. `/recommendations/library`
+builds a broader seed set from liked tracks, recent plays, and latest imports.
+
+`POST /recommendations/.../import-missing` imports top-ranked missing external
+candidates through the same import pipeline as manual searches: qBittorrent,
+quarantine, audio validation, and library storage. Defaults are controlled by
+`RECOMMENDATION_SOURCES`, `RECOMMENDATION_AUTO_IMPORT_LIMIT`, and
+`RECOMMENDATION_MIN_SEEDERS`.
 
 ## Instance Sync
 
@@ -216,6 +234,12 @@ storage.
 - `MUSIC_INDEXER_API_KEY` is used as Prowlarr's `X-Api-Key` header and as
   `apikey` for raw Torznab URLs.
 - `MUSIC_INDEXER_CATEGORIES` defaults to `3000` for audio/music Torznab searches.
+- `RECOMMENDATION_SOURCES` is a comma-separated list used by recommendation
+  search/import, defaulting to `indexer`. Set `indexer,1337x,piratebay` only if
+  those sources are intentionally allowed for automatic recommendation imports.
+- `RECOMMENDATION_AUTO_IMPORT_LIMIT` and `RECOMMENDATION_MIN_SEEDERS` control how
+  many missing recommendations can be queued by one request and the minimum
+  seeders needed before an external candidate is imported.
 - In Docker Compose both paths point to the same named volume, mounted at different
   container paths, so qBittorrent can write downloads while the worker scans them.
 - `LIBRARY_ROOT` must never point inside quarantine, and quarantine must never

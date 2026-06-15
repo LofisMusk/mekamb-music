@@ -69,6 +69,7 @@ const iconPaths = {
   loop: '<path d="M17 2l4 4-4 4M3 11V9a4 4 0 0 1 4-4h14M7 22l-4-4 4-4M21 13v2a4 4 0 0 1-4 4H3"/>',
   volume: '<path d="M4 9v6h4l5 4V5L8 9zM17 9.5a4 4 0 0 1 0 5M19.5 7a7.5 7.5 0 0 1 0 10"/>',
   muted: '<path d="M4 9v6h4l5 4V5L8 9zM18 9l4 4M22 9l-4 4"/>',
+  download: '<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   heart: '<path d="M20.8 5.6a5.2 5.2 0 0 0-7.4 0L12 7l-1.4-1.4a5.2 5.2 0 0 0-7.4 7.4L12 21l8.8-8a5.2 5.2 0 0 0 0-7.4z"/>',
   back: '<path d="M19 12H5M12 19l-7-7 7-7"/>',
@@ -96,9 +97,27 @@ function hydrateStaticIcons() {
 }
 
 function applySidebarState() {
+  const mobile = isMobileLayout();
   document.body.classList.toggle("sidebar-collapsed", state.sidebarCollapsed);
+  document.body.classList.toggle("mobile-sidebar-open", mobile && !state.sidebarCollapsed);
   localStorage.setItem("mekambSidebarCollapsed", String(state.sidebarCollapsed));
   setButtonIcon(els.sidebarToggle, "menu", state.sidebarCollapsed ? "Pokaż sidebar" : "Schowaj sidebar");
+}
+
+function isMobileLayout() {
+  return window.matchMedia("(max-width: 640px)").matches;
+}
+
+function applyMobileSidebarDefault() {
+  if (isMobileLayout() && localStorage.getItem("mekambSidebarCollapsed") === null) {
+    state.sidebarCollapsed = true;
+  }
+}
+
+function closeMobileSidebar() {
+  if (!isMobileLayout() || state.sidebarCollapsed) return;
+  state.sidebarCollapsed = true;
+  applySidebarState();
 }
 
 function restoreSidebarWidth() {
@@ -109,8 +128,10 @@ function restoreSidebarWidth() {
 }
 
 function setupSidebarResize() {
+  applyMobileSidebarDefault();
   restoreSidebarWidth();
   applySidebarState();
+  window.addEventListener("resize", applySidebarState);
   els.sidebarResizer.addEventListener("pointerdown", (event) => {
     if (state.sidebarCollapsed) return;
     event.preventDefault();
@@ -627,7 +648,13 @@ function renderTrack(track) {
   setButtonIcon(like, "heart", "Polub");
   like.addEventListener("click", () => runAction(() => likeTrack(track.id)));
 
-  actions.append(play, add, like);
+  const download = document.createElement("button");
+  download.className = "icon quiet";
+  download.type = "button";
+  setButtonIcon(download, "download", "Pobierz na telefon");
+  download.addEventListener("click", () => runAction(() => downloadTrack(track)));
+
+  actions.append(play, download, add, like);
   return item;
 }
 
@@ -698,14 +725,15 @@ function renderSourceResult(result) {
 }
 
 function sourceLabel(source) {
+  if (source === "indexer") return "Indexer";
   return source === "1337x" ? "1337x" : "Pirate Bay";
 }
 
-function normalizeSourceResult(result, source) {
+function normalizeSourceResult(result, source = result.source || "piratebay") {
   return {
     ...result,
     source,
-    size_label: source === "piratebay" ? formatBytes(result.size_bytes) : result.size || "nieznany rozmiar",
+    size_label: result.size_bytes ? formatBytes(result.size_bytes) : result.size || "nieznany rozmiar",
     seeders_number: Number.parseInt(result.seeders || "0", 10) || 0,
   };
 }
@@ -894,8 +922,8 @@ async function loadImports() {
 
 async function searchTorrentSources(query) {
   const searches = await Promise.allSettled([
-    searchPirateBay(query),
-    search1337x(query),
+    searchUnifiedSources(query),
+    searchIndexers(query),
   ]);
   const results = searches
     .filter((search) => search.status === "fulfilled")
@@ -906,6 +934,31 @@ async function searchTorrentSources(query) {
   }
 
   return topSeededResults(results);
+}
+
+async function searchUnifiedSources(query) {
+  const params = new URLSearchParams({ q: query });
+  try {
+    const payload = await api(`/sources/search?${params}`);
+    return payload.items.map((item) => normalizeSourceResult(item));
+  } catch (error) {
+    if (!String(error.message || "").startsWith("404:")) throw error;
+    return searchLegacyTorrentSources(query);
+  }
+}
+
+async function searchLegacyTorrentSources(query) {
+  const searches = await Promise.allSettled([
+    searchPirateBay(query),
+    search1337x(query),
+  ]);
+  const results = searches
+    .filter((search) => search.status === "fulfilled")
+    .flatMap((search) => search.value);
+  if (!results.length && searches.every((search) => search.status === "rejected")) {
+    throw searches[0].reason;
+  }
+  return results;
 }
 
 async function searchPirateBay(query) {
@@ -920,15 +973,45 @@ async function search1337x(query) {
   return payload.items.map((item) => normalizeSourceResult(item, "1337x"));
 }
 
+async function searchIndexers(query) {
+  const params = new URLSearchParams({ q: query });
+  const payload = await api(`/sources/indexers/search?${params}`);
+  return payload.items.map((item) => normalizeSourceResult(item, "indexer"));
+}
+
 async function startImport(resultOrTorrentId, source = "piratebay") {
   const result = typeof resultOrTorrentId === "object" ? resultOrTorrentId : null;
   const torrentId = result ? result.torrent_id : resultOrTorrentId;
   const importSource = result ? result.source : source;
+  if (importSource === "indexer") {
+    const record = await api("/imports/indexer", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(indexerImportPayload(result)),
+    });
+    setMessage("Import dodany do kolejki.");
+    await loadImports();
+    return record;
+  }
   const endpoint = importSource === "1337x" ? "1337x" : "piratebay";
   const record = await api(`/imports/${endpoint}/${encodeURIComponent(torrentId)}`, { method: "POST" });
   setMessage("Import dodany do kolejki.");
   await loadImports();
   return record;
+}
+
+function indexerImportPayload(result) {
+  if (!result?.info_hash || !result?.magnet_link) {
+    throw new Error("Wynik indexera nie ma linku pobierania albo info hash.");
+  }
+  return {
+    name: result.name,
+    torrent_id: result.torrent_id || result.info_hash,
+    info_hash: result.info_hash,
+    magnet_link: result.magnet_link,
+    uploader: result.uploader || "indexer",
+    source_url: result.source_url || result.url || "indexer",
+  };
 }
 
 async function libraryHasQuery(query) {
@@ -985,6 +1068,60 @@ async function retryImport(importId) {
 async function likeTrack(trackId) {
   await api(`/tracks/${trackId}/like`, { method: "PUT" });
   setMessage("Utwór polubiony.");
+}
+
+async function downloadTrack(track) {
+  setMessage("Przygotowuję pobieranie...");
+  const response = await apiResponse(`/tracks/${track.id}/stream`);
+  const contentType = response.headers.get("Content-Type") || track.media_type || "application/octet-stream";
+  const filename = downloadFilename(track, contentType);
+  const blob = new Blob([await response.arrayBuffer()], { type: contentType });
+
+  if (typeof File !== "undefined" && navigator.canShare) {
+    const file = new File([blob], filename, { type: contentType });
+    if (navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: track.title });
+      } catch (error) {
+        if (error?.name === "AbortError") {
+          setMessage("");
+          return;
+        }
+        throw error;
+      }
+      setMessage("Plik gotowy do zapisania.");
+      return;
+    }
+  }
+
+  triggerBrowserDownload(blob, filename);
+  setMessage("Pobieranie rozpoczęte.");
+}
+
+function triggerBrowserDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.rel = "noopener";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+}
+
+function downloadFilename(track, contentType) {
+  const source = track.original_filename || `${track.displayArtist || track.artist || "Unknown Artist"} - ${track.title}`;
+  const cleaned = source.replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, " ").trim() || "track";
+  if (/\.[a-z0-9]{2,5}$/i.test(cleaned)) return cleaned;
+  const extension = contentType.includes("flac")
+    ? "flac"
+    : contentType.includes("mpeg")
+      ? "mp3"
+      : contentType.includes("mp4")
+        ? "m4a"
+        : "audio";
+  return `${cleaned}.${extension}`;
 }
 
 async function playTrack(track, options = {}) {
@@ -1261,6 +1398,7 @@ els.tokenForm.addEventListener("submit", async (event) => {
   state.token = els.tokenInput.value.trim();
   localStorage.setItem("mekambMusicToken", state.token);
   await refreshAll();
+  closeMobileSidebar();
 });
 
 els.trackSearchForm.addEventListener("submit", async (event) => {
@@ -1354,6 +1492,7 @@ els.pageTabs.forEach((tab) => {
   tab.addEventListener("click", async () => {
     try {
       await setPage(tab.dataset.page);
+      closeMobileSidebar();
     } catch (error) {
       setMessage(error.message, true);
     }
