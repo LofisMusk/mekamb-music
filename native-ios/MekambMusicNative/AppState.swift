@@ -37,6 +37,18 @@ struct ApiTrack: Identifiable, Codable, Hashable {
     }
 }
 
+func formatFileSize(_ bytes: Int) -> String {
+    guard bytes > 0 else { return "0 B" }
+    let units = ["B", "KB", "MB", "GB", "TB"]
+    var value = Double(bytes)
+    var index = 0
+    while value >= 1024, index < units.count - 1 {
+        value /= 1024
+        index += 1
+    }
+    return index == 0 ? "\(Int(value)) \(units[index])" : String(format: "%.1f %@", value, units[index])
+}
+
 struct Album: Identifiable, Hashable {
     let id: String
     let title: String
@@ -51,9 +63,11 @@ struct TrackListResponse: Codable { let items: [ApiTrack] }
 struct LikedTrackItem: Codable { let track: ApiTrack }
 struct LikedTracksResponse: Codable { let items: [LikedTrackItem] }
 
-struct DownloadedTrackFile: Identifiable {
-    let id = UUID()
-    let url: URL
+struct OfflineTrackRecord: Codable, Hashable {
+    let track: ApiTrack
+    let relativePath: String
+    let downloadedAt: Date
+    let sizeBytes: Int?
 }
 
 enum TorrentSource: String, Codable, CaseIterable, Identifiable {
@@ -295,8 +309,11 @@ final class AppState: ObservableObject {
     @Published var playbackQueue: [ApiTrack] = []
     @Published var shuffleEnabled = false
     @Published var repeatMode: RepeatMode = .off
-    @Published var downloadingTrackId: String?
-    @Published var downloadedTrackFile: DownloadedTrackFile?
+    @Published var downloadingTrackIds: Set<String> = []
+    @Published var downloadingAlbumIds: Set<String> = []
+    @Published var offlineTrackIds: Set<String> = []
+    @Published var offlineStorageBytes: Int = 0
+    @Published var offlineStatusMessage: String?
 
     private var player: AVPlayer?
     private var timeObserver: Any?
@@ -305,8 +322,15 @@ final class AppState: ObservableObject {
     private var isLoadingAlbumCovers = false
     private var failedAlbumCoverIds: Set<String> = []
     private var didRestorePlaybackState = false
+    private var offlineRecords: [String: OfflineTrackRecord] = [:]
+
+    private struct PlaybackSource {
+        let url: URL
+        let headers: [String: String]?
+    }
 
     init() {
+        loadOfflineLibrary()
         configureAudioSession()
         configureRemoteCommandCenter()
     }
@@ -335,6 +359,10 @@ final class AppState: ObservableObject {
     var canUseApi: Bool {
         !normalizedEndpoint.isEmpty && !apiToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
+
+    var offlineTrackCount: Int { offlineTrackIds.count }
+
+    var offlineStorageText: String { formatFileSize(offlineStorageBytes) }
 
     var albums: [Album] {
         let grouped = Dictionary(grouping: tracks) { track in stableAlbumKey(for: track) }
@@ -414,7 +442,12 @@ final class AppState: ObservableObject {
 
     func refreshLibrary() async {
         guard canUseApi else {
-            errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
+            if offlineTrackIds.isEmpty {
+                errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
+            } else {
+                errorMessage = nil
+                offlineStatusMessage = "Offline library ready: \(offlineTrackCount) downloaded songs."
+            }
             return
         }
         isLoading = true
@@ -430,7 +463,10 @@ final class AppState: ObservableObject {
             selectedAlbumId = selectedAlbumId.flatMap { id in albums.contains(where: { $0.id == id }) ? id : nil }
             Task { await loadMissingAlbumCovers() }
         } catch {
-            if !isCancellation(error) { errorMessage = clean(error) }
+            if !isCancellation(error) {
+                let message = clean(error)
+                errorMessage = offlineTrackIds.isEmpty ? message : "\(message) Showing downloaded songs."
+            }
         }
         isLoading = false
     }
@@ -519,18 +555,117 @@ final class AppState: ObservableObject {
         }
     }
 
+    func isTrackAvailableOffline(_ track: ApiTrack) -> Bool {
+        localOfflineFileURL(for: track) != nil
+    }
+
+    func isAlbumAvailableOffline(_ album: Album) -> Bool {
+        !album.tracks.isEmpty && album.tracks.allSatisfy { isTrackAvailableOffline($0) }
+    }
+
+    func downloadedTrackCount(in album: Album) -> Int {
+        album.tracks.filter { isTrackAvailableOffline($0) }.count
+    }
+
     func downloadTrack(_ track: ApiTrack) async {
+        _ = await downloadTrackForOffline(track, announce: true)
+    }
+
+    func downloadAlbum(_ album: Album) async {
+        guard !album.tracks.isEmpty else { return }
+        if isAlbumAvailableOffline(album) {
+            offlineStatusMessage = "\(album.title) is already available offline."
+            return
+        }
+
+        downloadingAlbumIds.insert(album.id)
+        defer { downloadingAlbumIds.remove(album.id) }
+
+        var completed = 0
+        for track in album.tracks {
+            if await downloadTrackForOffline(track, announce: false) {
+                completed += 1
+                offlineStatusMessage = "Downloaded \(completed)/\(album.tracks.count) from \(album.title)."
+            }
+        }
+
+        if completed == album.tracks.count {
+            offlineStatusMessage = "\(album.title) is ready offline."
+        } else if completed > 0 {
+            offlineStatusMessage = "\(album.title): downloaded \(completed)/\(album.tracks.count)."
+        }
+    }
+
+    func removeDownloadedTrack(_ track: ApiTrack) {
+        do {
+            guard try removeOfflineRecord(trackId: track.id) else {
+                offlineStatusMessage = "\(track.title) is not downloaded."
+                return
+            }
+            try writeOfflineRecords()
+            stopPlaybackIfNeededAfterRemoving(trackIds: [track.id])
+            refreshOfflineState()
+            offlineStatusMessage = "Removed download for \(track.title)."
+        } catch {
+            errorMessage = "Could not remove download: \(clean(error))"
+        }
+    }
+
+    func removeDownloadedAlbum(_ album: Album) {
+        do {
+            let removedIds = try album.tracks.reduce(into: Set<String>()) { ids, track in
+                if try removeOfflineRecord(trackId: track.id) {
+                    ids.insert(track.id)
+                }
+            }
+            guard !removedIds.isEmpty else {
+                offlineStatusMessage = "\(album.title) has no downloaded songs."
+                return
+            }
+            try writeOfflineRecords()
+            stopPlaybackIfNeededAfterRemoving(trackIds: removedIds)
+            refreshOfflineState()
+            offlineStatusMessage = "Removed \(removedIds.count) downloads from \(album.title)."
+        } catch {
+            errorMessage = "Could not remove album downloads: \(clean(error))"
+        }
+    }
+
+    func removeAllDownloads() {
+        do {
+            let removedIds = Set(offlineRecords.keys)
+            for trackId in removedIds {
+                _ = try removeOfflineRecord(trackId: trackId)
+            }
+            try writeOfflineRecords()
+            stopPlaybackIfNeededAfterRemoving(trackIds: removedIds)
+            refreshOfflineState()
+            offlineStatusMessage = "Removed all downloads."
+        } catch {
+            errorMessage = "Could not remove downloads: \(clean(error))"
+        }
+    }
+
+    @discardableResult
+    private func downloadTrackForOffline(_ track: ApiTrack, announce: Bool) async -> Bool {
+        if isTrackAvailableOffline(track) {
+            if announce { offlineStatusMessage = "\(track.title) is already available offline." }
+            return true
+        }
+
         guard canUseApi else {
             errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
-            return
+            return false
         }
         let encodedId = encodePathComponent(track.id)
         guard let url = endpointURL(path: "/tracks/\(encodedId)/stream") else {
             errorMessage = "Bad API endpoint."
-            return
+            return false
         }
 
-        downloadingTrackId = track.id
+        downloadingTrackIds.insert(track.id)
+        defer { downloadingTrackIds.remove(track.id) }
+
         errorMessage = nil
         do {
             var request = URLRequest(url: url)
@@ -541,15 +676,16 @@ final class AppState: ObservableObject {
                 throw BackendError.message("Could not download track.")
             }
 
-            let targetURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent(downloadFilename(for: track))
+            let targetURL = try offlineTrackFileURL(for: track)
             try? FileManager.default.removeItem(at: targetURL)
             try FileManager.default.moveItem(at: temporaryURL, to: targetURL)
-            downloadedTrackFile = DownloadedTrackFile(url: targetURL)
+            try saveOfflineTrack(track, at: targetURL)
+            if announce { offlineStatusMessage = "\(track.title) is ready offline." }
+            return true
         } catch {
             if !isCancellation(error) { errorMessage = clean(error) }
+            return false
         }
-        downloadingTrackId = nil
     }
 
     func play(_ track: ApiTrack, queue: [ApiTrack]? = nil, updateQueue: Bool = true, startAt startTime: TimeInterval? = nil) {
@@ -557,16 +693,24 @@ final class AppState: ObservableObject {
             preparePlaybackQueue(for: track, from: queue ?? playbackContextTracks())
         }
 
-        let encodedId = encodePathComponent(track.id)
-        guard let url = endpointURL(path: "/tracks/\(encodedId)/stream") else { return }
+        guard let source = playbackSource(for: track) else {
+            errorMessage = isTrackAvailableOffline(track)
+                ? "Downloaded file is missing from this device."
+                : "Track is not downloaded and the backend is not reachable/configured."
+            return
+        }
 
         configureAudioSession()
         removePlayerItemEndObserver()
         removeTimeObserver()
         player?.pause()
 
-        let headers = ["Authorization": "Bearer \(apiToken)"]
-        let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+        let asset: AVURLAsset
+        if let headers = source.headers {
+            asset = AVURLAsset(url: source.url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+        } else {
+            asset = AVURLAsset(url: source.url)
+        }
         let item = AVPlayerItem(asset: asset)
         let nextPlayer = AVPlayer(playerItem: item)
 
@@ -775,6 +919,157 @@ final class AppState: ObservableObject {
         return Array(merged.values)
     }
 
+    private func loadOfflineLibrary() {
+        do {
+            let records = try readOfflineRecords().filter { record in
+                offlineFileURL(relativePath: record.relativePath).map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+            }
+            offlineRecords = Dictionary(uniqueKeysWithValues: records.map { ($0.track.id, $0) })
+            tracks = mergeTracks(existing: tracks, incoming: records.map(\.track)).sorted(by: stableLibraryTrackOrder)
+            refreshOfflineState()
+            if records.count > 0 {
+                offlineStatusMessage = "Offline library ready: \(records.count) downloaded songs."
+            }
+        } catch {
+            offlineStatusMessage = "Could not load offline library: \(clean(error))"
+        }
+    }
+
+    private func saveOfflineTrack(_ track: ApiTrack, at fileURL: URL) throws {
+        let relativePath = fileURL.lastPathComponent
+        let attributes = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let size = attributes?[.size] as? Int ?? track.sizeBytes
+        offlineRecords[track.id] = OfflineTrackRecord(
+            track: track,
+            relativePath: relativePath,
+            downloadedAt: Date(),
+            sizeBytes: size
+        )
+        try writeOfflineRecords()
+        tracks = mergeTracks(existing: tracks, incoming: [track]).sorted(by: stableLibraryTrackOrder)
+        syncQueueWithLibrary()
+        refreshOfflineState()
+    }
+
+    private func removeOfflineRecord(trackId: String) throws -> Bool {
+        guard let record = offlineRecords.removeValue(forKey: trackId) else { return false }
+        if let url = offlineFileURL(relativePath: record.relativePath),
+           FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+        return true
+    }
+
+    private func stopPlaybackIfNeededAfterRemoving(trackIds: Set<String>) {
+        guard let currentTrack, trackIds.contains(currentTrack.id) else { return }
+        player?.pause()
+        isPlaying = false
+        updateNowPlayingPlaybackRate()
+    }
+
+    private func refreshOfflineState() {
+        let existingRecords = offlineRecords.values.filter { record in
+            offlineFileURL(relativePath: record.relativePath).map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        }
+        if existingRecords.count != offlineRecords.count {
+            offlineRecords = Dictionary(uniqueKeysWithValues: existingRecords.map { ($0.track.id, $0) })
+            try? writeOfflineRecords()
+        }
+        offlineTrackIds = Set(existingRecords.map(\.track.id))
+        offlineStorageBytes = existingRecords.reduce(0) { total, record in
+            guard let url = offlineFileURL(relativePath: record.relativePath),
+                  let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+                  let size = attributes[.size] as? Int else {
+                return total + (record.sizeBytes ?? 0)
+            }
+            return total + size
+        }
+    }
+
+    private func readOfflineRecords() throws -> [OfflineTrackRecord] {
+        let url = try offlineMetadataURL()
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        let data = try Data(contentsOf: url)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode([OfflineTrackRecord].self, from: data)
+    }
+
+    private func writeOfflineRecords() throws {
+        let url = try offlineMetadataURL()
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let records = offlineRecords.values.sorted {
+            stableLibraryTrackOrder($0.track, $1.track)
+        }
+        let data = try encoder.encode(records)
+        try data.write(to: url, options: .atomic)
+    }
+
+    private func playbackSource(for track: ApiTrack) -> PlaybackSource? {
+        if let localURL = localOfflineFileURL(for: track) {
+            return PlaybackSource(url: localURL, headers: nil)
+        }
+
+        guard canUseApi else { return nil }
+        let encodedId = encodePathComponent(track.id)
+        guard let url = endpointURL(path: "/tracks/\(encodedId)/stream") else { return nil }
+        return PlaybackSource(url: url, headers: ["Authorization": "Bearer \(apiToken)"])
+    }
+
+    private func localOfflineFileURL(for track: ApiTrack) -> URL? {
+        guard let record = offlineRecords[track.id] else { return nil }
+        guard let url = offlineFileURL(relativePath: record.relativePath),
+              FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url
+    }
+
+    private func offlineTrackFileURL(for track: ApiTrack) throws -> URL {
+        try offlineTracksDirectory().appendingPathComponent(offlineFileName(for: track), isDirectory: false)
+    }
+
+    private func offlineFileURL(relativePath: String) -> URL? {
+        try? offlineTracksDirectory().appendingPathComponent(relativePath, isDirectory: false)
+    }
+
+    private func offlineMetadataURL() throws -> URL {
+        try offlineRootDirectory().appendingPathComponent("offline-library.json", isDirectory: false)
+    }
+
+    private func offlineTracksDirectory() throws -> URL {
+        let url = try offlineRootDirectory().appendingPathComponent("tracks", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func offlineRootDirectory() throws -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MekambMusic", isDirectory: true)
+            .appendingPathComponent("Offline", isDirectory: true)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableBase = base
+        try? mutableBase.setResourceValues(values)
+        return base
+    }
+
+    private func offlineFileName(for track: ApiTrack) -> String {
+        let sourceExtension = URL(fileURLWithPath: downloadFilename(for: track)).pathExtension
+        let extensionName = sourceExtension.isEmpty ? "audio" : sourceExtension
+        return "\(safeFileComponent(track.id)).\(extensionName)"
+    }
+
+    private func safeFileComponent(_ value: String) -> String {
+        let cleaned = value.replacingOccurrences(
+            of: #"[^A-Za-z0-9._-]+"#,
+            with: "_",
+            options: .regularExpression
+        )
+        return cleaned.trimmingCharacters(in: CharacterSet(charactersIn: "._-")).isEmpty ? UUID().uuidString : cleaned
+    }
+
     private func playbackContextTracks() -> [ApiTrack] {
         if selectedTab == .albums, let selectedAlbum { return selectedAlbum.tracks }
         let context = filteredTracks
@@ -903,6 +1198,7 @@ final class AppState: ObservableObject {
     }
 
     private func postPlay(_ track: ApiTrack) async throws {
+        guard canUseApi else { return }
         let encodedId = encodePathComponent(track.id)
         let _: EmptyResponse = try await request("/tracks/\(encodedId)/plays", method: "POST")
     }

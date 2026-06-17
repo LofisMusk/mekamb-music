@@ -58,9 +58,6 @@ struct RootView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task { await app.refreshLibrary() }
-        .sheet(item: $app.downloadedTrackFile) { file in
-            ShareSheet(items: [file.url])
-        }
         .onChange(of: app.searchText) { _, _ in
             guard app.searchMode.searchesRemoteSources else { return }
             Task {
@@ -326,6 +323,30 @@ struct AlbumDetailView: View {
                             Image(systemName: "shuffle")
                         }
                         .buttonStyle(.bordered)
+
+                        Button {
+                            Task { await app.downloadAlbum(album) }
+                        } label: {
+                            if app.downloadingAlbumIds.contains(album.id) {
+                                ProgressView()
+                            } else {
+                                Label(
+                                    app.isAlbumAvailableOffline(album) ? "Offline" : "Download",
+                                    systemImage: app.isAlbumAvailableOffline(album) ? "arrow.down.circle.fill" : "arrow.down.circle"
+                                )
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(app.downloadingAlbumIds.contains(album.id) || app.isAlbumAvailableOffline(album))
+
+                        if app.downloadedTrackCount(in: album) > 0 {
+                            Button(role: .destructive) {
+                                app.removeDownloadedAlbum(album)
+                            } label: {
+                                Label("Remove", systemImage: "trash")
+                            }
+                            .buttonStyle(.bordered)
+                        }
                     }
                     .padding(.top, 6)
                 }
@@ -350,9 +371,21 @@ struct AlbumCardNative: View {
     var body: some View {
         Button { app.selectedAlbumId = album.id } label: {
             VStack(alignment: .leading, spacing: 9) {
-                AlbumArtworkView(album: album, size: nil)
-                    .environmentObject(app)
-                    .aspectRatio(1, contentMode: .fit)
+                ZStack(alignment: .topTrailing) {
+                    AlbumArtworkView(album: album, size: nil)
+                        .environmentObject(app)
+                        .aspectRatio(1, contentMode: .fit)
+
+                    if app.isAlbumAvailableOffline(album) {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.white)
+                            .padding(6)
+                            .background(Color.blue.opacity(0.9))
+                            .clipShape(Circle())
+                            .padding(7)
+                    }
+                }
                 Text(album.title)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
@@ -418,13 +451,13 @@ struct TrackRowNative: View {
     let track: ApiTrack
 
     var body: some View {
-        ZStack(alignment: .trailing) {
+        ZStack(alignment: .leading) {
             Label("Queue", systemImage: "text.badge.plus")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)
                 .frame(maxHeight: .infinity)
-                .opacity(dragOffset < -8 ? 1 : 0)
+                .opacity(dragOffset > 8 ? 1 : 0)
 
             HStack(spacing: 12) {
                 TrackArtworkView(track: track, size: 52)
@@ -443,6 +476,12 @@ struct TrackRowNative: View {
 
                 Spacer()
 
+                if app.isTrackAvailableOffline(track) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.blue)
+                }
+
                 Text(track.durationText)
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
@@ -453,10 +492,19 @@ struct TrackRowNative: View {
                     } label: {
                         Label("Add to Queue", systemImage: "text.badge.plus")
                     }
-                    Button {
-                        Task { await app.downloadTrack(track) }
-                    } label: {
-                        Label("Download to Files", systemImage: "square.and.arrow.down")
+                    if app.isTrackAvailableOffline(track) {
+                        Label("Available Offline", systemImage: "arrow.down.circle.fill")
+                        Button(role: .destructive) {
+                            app.removeDownloadedTrack(track)
+                        } label: {
+                            Label("Remove Download", systemImage: "trash")
+                        }
+                    } else {
+                        Button {
+                            Task { await app.downloadTrack(track) }
+                        } label: {
+                            Label("Download Offline", systemImage: "arrow.down.circle")
+                        }
                     }
                     Button {
                         Task { await app.toggleLike(track) }
@@ -464,7 +512,7 @@ struct TrackRowNative: View {
                         Label(app.likedTrackIds.contains(track.id) ? "Unlike" : "Like", systemImage: app.likedTrackIds.contains(track.id) ? "heart.slash" : "heart")
                     }
                 } label: {
-                    if app.downloadingTrackId == track.id {
+                    if app.downloadingTrackIds.contains(track.id) {
                         ProgressView()
                             .frame(width: 28, height: 28)
                     } else {
@@ -473,7 +521,7 @@ struct TrackRowNative: View {
                             .frame(width: 28, height: 28)
                     }
                 }
-                .disabled(app.downloadingTrackId == track.id)
+                .disabled(app.downloadingTrackIds.contains(track.id))
             }
             .padding(12)
             .background(app.currentTrack?.id == track.id ? Color.blue.opacity(0.18) : Color.white.opacity(0.06))
@@ -487,14 +535,14 @@ struct TrackRowNative: View {
             app.play(track)
         }
         .simultaneousGesture(
-            DragGesture(minimumDistance: 24)
-                .onChanged { value in
-                    guard value.translation.width < 0,
+                DragGesture(minimumDistance: 24)
+                    .onChanged { value in
+                    guard value.translation.width > 0,
                           abs(value.translation.width) > abs(value.translation.height) * 1.2 else { return }
-                    dragOffset = max(value.translation.width, -96)
+                    dragOffset = min(value.translation.width, 96)
                 }
                 .onEnded { value in
-                    let shouldAddToQueue = value.translation.width < -70
+                    let shouldAddToQueue = value.translation.width > 70
                         && abs(value.translation.width) > abs(value.translation.height) * 1.2
                     if shouldAddToQueue {
                         app.addToQueue(track)
@@ -508,16 +556,6 @@ struct TrackRowNative: View {
             app.addToQueue(track)
         }
     }
-}
-
-struct ShareSheet: UIViewControllerRepresentable {
-    let items: [Any]
-
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
-    }
-
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
 struct TorrentSearchView: View {
@@ -644,6 +682,7 @@ struct TorrentImportProgressView: View {
 struct PlayerBar: View {
     @EnvironmentObject private var app: AppState
     @State private var showingQueue = false
+    @State private var showingNowPlaying = false
 
     var body: some View {
         VStack(spacing: 10) {
@@ -674,27 +713,34 @@ struct PlayerBar: View {
             .padding(.horizontal, 4)
 
             HStack(spacing: 12) {
-                if let track = app.currentTrack {
-                    TrackArtworkView(track: track, size: 46)
-                        .environmentObject(app)
-                } else {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(LinearGradient(colors: [.blue.opacity(0.7), .purple.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                        .frame(width: 46, height: 46)
-                        .overlay(Image(systemName: "music.note").foregroundStyle(.white))
-                }
+                Button {
+                    showingNowPlaying = true
+                } label: {
+                    HStack(spacing: 12) {
+                        if let track = app.currentTrack {
+                            TrackArtworkView(track: track, size: 46)
+                                .environmentObject(app)
+                        } else {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(LinearGradient(colors: [.blue.opacity(0.7), .purple.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                .frame(width: 46, height: 46)
+                                .overlay(Image(systemName: "music.note").foregroundStyle(.white))
+                        }
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(app.currentTrack?.title ?? "Nothing playing")
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                    Text(app.currentTrack?.displayArtist ?? "Choose a song")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(app.currentTrack?.title ?? "Nothing playing")
+                                .font(.subheadline.weight(.semibold))
+                                .lineLimit(1)
+                            Text(app.currentTrack?.displayArtist ?? "Choose a song")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
-
-                Spacer()
+                .buttonStyle(.plain)
 
                 Button { app.previousTrack() } label: { Image(systemName: "backward.fill") }
                 Button { app.togglePlayback() } label: {
@@ -722,6 +768,210 @@ struct PlayerBar: View {
                 .environmentObject(app)
                 .presentationDetents([.medium, .large])
         }
+        .sheet(isPresented: $showingNowPlaying) {
+            NowPlayingSheetView()
+                .environmentObject(app)
+                .presentationDetents([.large])
+        }
+    }
+}
+
+struct NowPlayingSheetView: View {
+    @EnvironmentObject private var app: AppState
+    @Environment(\.dismiss) private var dismiss
+    @State private var showingQueue = false
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                LinearGradient(
+                    colors: [Color(red: 0.06, green: 0.08, blue: 0.13), Color(red: 0.01, green: 0.02, blue: 0.04)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea()
+
+                if let track = app.currentTrack {
+                    ScrollView {
+                        VStack(spacing: 24) {
+                            GeometryReader { proxy in
+                                let size = min(proxy.size.width - 48, 340)
+                                TrackArtworkView(track: track, size: size)
+                                    .environmentObject(app)
+                                    .shadow(color: .black.opacity(0.45), radius: 24, y: 16)
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .frame(height: 350)
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(alignment: .top, spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Text(track.title)
+                                            .font(.title2.bold())
+                                            .foregroundStyle(.white)
+                                            .lineLimit(2)
+                                        Text(track.displayArtist)
+                                            .font(.headline)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                        Text(track.displayAlbum)
+                                            .font(.subheadline)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+
+                                    Spacer()
+
+                                    Button {
+                                        Task { await app.toggleLike(track) }
+                                    } label: {
+                                        Image(systemName: app.likedTrackIds.contains(track.id) ? "heart.fill" : "heart")
+                                            .font(.title3.weight(.semibold))
+                                            .foregroundStyle(app.likedTrackIds.contains(track.id) ? .pink : .white)
+                                    }
+                                    .accessibilityLabel(app.likedTrackIds.contains(track.id) ? "Unlike" : "Like")
+                                }
+
+                                ProgressView(value: app.playbackProgress)
+                                    .tint(.white)
+                                    .padding(.top, 12)
+
+                                HStack {
+                                    Text(progressText(for: track))
+                                    Spacer()
+                                    Text(track.durationText)
+                                }
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                            }
+
+                            HStack(spacing: 26) {
+                                Button { app.toggleShuffle() } label: {
+                                    Image(systemName: "shuffle")
+                                        .foregroundStyle(app.shuffleEnabled ? .blue : .white)
+                                }
+
+                                Button { app.previousTrack() } label: {
+                                    Image(systemName: "backward.fill")
+                                }
+
+                                Button { app.togglePlayback() } label: {
+                                    Image(systemName: app.isPlaying ? "pause.fill" : "play.fill")
+                                        .font(.title.weight(.bold))
+                                        .frame(width: 68, height: 68)
+                                        .background(Color.white)
+                                        .foregroundStyle(Color.black)
+                                        .clipShape(Circle())
+                                }
+
+                                Button { app.nextTrack() } label: {
+                                    Image(systemName: "forward.fill")
+                                }
+
+                                Button { app.cycleRepeatMode() } label: {
+                                    Image(systemName: app.repeatMode.iconName)
+                                        .foregroundStyle(app.repeatMode.isActive ? .blue : .white)
+                                }
+                            }
+                            .font(.title2.weight(.semibold))
+                            .foregroundStyle(.white)
+
+                            HStack(spacing: 12) {
+                                if app.isTrackAvailableOffline(track) {
+                                    Button(role: .destructive) {
+                                        app.removeDownloadedTrack(track)
+                                    } label: {
+                                        Label("Remove", systemImage: "trash")
+                                    }
+                                } else {
+                                    Button {
+                                        Task { await app.downloadTrack(track) }
+                                    } label: {
+                                        if app.downloadingTrackIds.contains(track.id) {
+                                            ProgressView()
+                                        } else {
+                                            Label("Download", systemImage: "arrow.down.circle")
+                                        }
+                                    }
+                                    .disabled(app.downloadingTrackIds.contains(track.id))
+                                }
+
+                                Button {
+                                    app.addToQueue(track)
+                                } label: {
+                                    Label("Queue", systemImage: "text.badge.plus")
+                                }
+
+                                Button {
+                                    showingQueue = true
+                                } label: {
+                                    Label("Up Next", systemImage: "list.bullet")
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.large)
+
+                            VStack(alignment: .leading, spacing: 12) {
+                                HStack {
+                                    Text("Up Next")
+                                        .font(.headline)
+                                        .foregroundStyle(.white)
+                                    Spacer()
+                                    Button("Open") { showingQueue = true }
+                                        .font(.subheadline.weight(.semibold))
+                                }
+
+                                if app.upcomingQueueTracks.isEmpty {
+                                    Text("No upcoming tracks")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(14)
+                                        .background(Color.white.opacity(0.06))
+                                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                } else {
+                                    ForEach(app.upcomingQueueTracks.prefix(5)) { queuedTrack in
+                                        QueueTrackRow(track: queuedTrack, isCurrent: false)
+                                            .environmentObject(app)
+                                            .padding(12)
+                                            .background(Color.white.opacity(0.06))
+                                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 22)
+                        .padding(.top, 20)
+                        .padding(.bottom, 32)
+                    }
+                } else {
+                    ContentUnavailableView("Nothing playing", systemImage: "music.note", description: Text("Choose a song from your library."))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Now Playing")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { dismiss() } label: {
+                        Image(systemName: "chevron.down")
+                    }
+                    .foregroundStyle(.white)
+                }
+            }
+            .sheet(isPresented: $showingQueue) {
+                QueueSheetView()
+                    .environmentObject(app)
+                    .presentationDetents([.medium, .large])
+            }
+        }
+    }
+
+    private func progressText(for track: ApiTrack) -> String {
+        guard let duration = track.durationSeconds, duration.isFinite, duration > 0 else { return "0:00" }
+        let elapsed = max(0, min(duration, duration * app.playbackProgress))
+        let total = Int(elapsed.rounded())
+        return "\(total / 60):\(String(format: "%02d", total % 60))"
     }
 }
 
@@ -882,6 +1132,24 @@ struct SettingsView: View {
                 Toggle(isOn: $app.autoplaySimilarEnabled) {
                     Label("Autoplay Similar Songs", systemImage: "infinity")
                 }
+            }
+
+            Section("Offline Downloads") {
+                Label("\(app.offlineTrackCount) downloaded songs", systemImage: "arrow.down.circle.fill")
+                Text(app.offlineStorageText)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                if let message = app.offlineStatusMessage {
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Button(role: .destructive) {
+                    app.removeAllDownloads()
+                } label: {
+                    Label("Remove All Downloads", systemImage: "trash")
+                }
+                .disabled(app.offlineTrackCount == 0)
             }
 
             Section("Tip") {

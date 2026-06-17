@@ -52,6 +52,10 @@ permission on current iOS versions.
 - torrent import through `POST /imports/piratebay/{torrent_id}` with a native progress bar
 - stable library refresh after imports without showing false `cancelled` errors
 - direct playback from `GET /tracks/{id}/stream`
+- offline downloads for individual songs and whole albums, stored on the iPhone
+- removing offline downloads per song, per album, or all at once from Settings
+- playback automatically uses downloaded files when the backend is offline or not configured
+- expanded Spotify-like Now Playing sheet from the bottom mini-player
 - background playback through iOS `audio` background mode
 - lock screen, Control Center, headphones, and Dynamic Island media controls through `MPNowPlayingInfoCenter` and `MPRemoteCommandCenter`
 - settings screen for endpoint and token

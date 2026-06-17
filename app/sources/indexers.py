@@ -135,7 +135,12 @@ class MusicIndexerProvider:
                 results.extend(prowlarr_results)
             except Exception as exc:
                 logger.warning("Prowlarr music indexer search failed for %r: %s", query, exc)
-                last_error = exc
+                if _is_selected_indexers_unavailable(exc):
+                    logger.warning(
+                        "Prowlarr has no currently available selected indexers; returning no results."
+                    )
+                else:
+                    last_error = exc
 
         for url in self.torznab_urls:
             try:
@@ -210,7 +215,8 @@ class MusicIndexerProvider:
             with urlopen(request, timeout=20) as response:
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
-            raise MusicIndexerSourceError(f"Prowlarr returned HTTP {exc.code}.") from exc
+            detail = _http_error_detail(exc)
+            raise MusicIndexerSourceError(f"Prowlarr returned HTTP {exc.code}: {detail}") from exc
         except (URLError, TimeoutError) as exc:
             raise MusicIndexerSourceError(f"Could not reach Prowlarr: {exc}") from exc
         except json.JSONDecodeError as exc:
@@ -231,7 +237,8 @@ class MusicIndexerProvider:
             with urlopen(request, timeout=20) as response:
                 return response.read().decode("utf-8", errors="replace")
         except HTTPError as exc:
-            raise MusicIndexerSourceError(f"Indexer returned HTTP {exc.code}.") from exc
+            detail = _http_error_detail(exc)
+            raise MusicIndexerSourceError(f"Indexer returned HTTP {exc.code}: {detail}") from exc
         except (URLError, TimeoutError) as exc:
             raise MusicIndexerSourceError(f"Could not reach indexer: {exc}") from exc
 
@@ -387,6 +394,19 @@ def _split(raw: str) -> list[str]:
 def _redact_query(url: str) -> str:
     parsed = urlparse(url)
     return parsed._replace(query="...").geturl() if parsed.query else url
+
+
+def _http_error_detail(exc: HTTPError) -> str:
+    try:
+        body = exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        return "<empty>"
+    return " ".join(body.split())[:500] or "<empty>"
+
+
+def _is_selected_indexers_unavailable(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "all selected indexers being unavailable" in message
 
 
 def _local_name(tag: str) -> str:
