@@ -16,6 +16,7 @@ from app.api.schemas import (
     SyncApplyResponse,
     SyncImportManifestResponse,
 )
+from app.core.auth import ApiKeyIdentity
 from app.core.config import settings
 from app.db.models import ImportJob, Track, UserAction
 from app.imports.service import ImportService
@@ -31,10 +32,12 @@ async def get_sync_actions(
     since: datetime | None = Query(default=None),
     include_applied: bool = Query(default=True),
     limit: int = Query(default=200, ge=1, le=1000),
+    api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
 ) -> SyncActionListResponse:
     actions = await list_actions(
         session,
+        api_key_id=api_key.id,
         since=since,
         include_applied=include_applied,
         limit=limit,
@@ -51,6 +54,7 @@ async def get_sync_actions(
 @router.post("/actions", response_model=SyncActionPushResponse)
 async def push_sync_actions(
     payload: SyncActionPushRequest,
+    api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
 ) -> SyncActionPushResponse:
     accepted = 0
@@ -68,6 +72,7 @@ async def push_sync_actions(
             entity_id=item.entity_id,
             payload=item.payload,
             origin_instance_id=item.origin_instance_id,
+            api_key_id=api_key.id,
             created_at=item.created_at,
         )
         accepted += 1
@@ -77,10 +82,17 @@ async def push_sync_actions(
 @router.post("/apply", response_model=SyncApplyResponse)
 async def apply_pending_sync_actions(
     limit: int = Query(default=50, ge=1, le=200),
+    api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
     service: ImportService = Depends(import_service),
 ) -> SyncApplyResponse:
-    actions = await list_actions(session, since=None, include_applied=False, limit=limit)
+    actions = await list_actions(
+        session,
+        api_key_id=api_key.id,
+        since=None,
+        include_applied=False,
+        limit=limit,
+    )
     applied_items: list[UserAction] = []
     for action in actions:
         applied_items.append(await apply_action(session, action, import_service=service))
@@ -96,11 +108,12 @@ async def apply_pending_sync_actions(
 @router.post("/actions/{action_id}/apply", response_model=SyncActionResponse)
 async def apply_single_sync_action(
     action_id: UUID,
+    api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
     service: ImportService = Depends(import_service),
 ) -> SyncActionResponse:
     action = await session.get(UserAction, action_id)
-    if action is None:
+    if action is None or action.api_key_id != api_key.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sync action not found.")
     action = await apply_action(session, action, import_service=service)
     return SyncActionResponse(**action.to_dict())

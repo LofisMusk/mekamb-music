@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 from fastapi.testclient import TestClient
 
 from app.api.deps import db_session, import_service, personal_1337x_provider, require_token
+from app.core.auth import ApiKeyIdentity
 from app.imports.domain import ImportRecord
 from app.main import app
 from app.sources.personal_1337x import (
@@ -114,7 +115,7 @@ class FakeSession:
 
 
 def _client(provider):
-    app.dependency_overrides[require_token] = lambda: None
+    app.dependency_overrides[require_token] = lambda: ApiKeyIdentity(id="test", token="secret")
     app.dependency_overrides[personal_1337x_provider] = lambda: provider
     app.dependency_overrides[import_service] = lambda: FakeImportService()
     app.dependency_overrides[db_session] = lambda: FakeSession()

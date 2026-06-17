@@ -12,6 +12,7 @@ from app.api.deps import (
     piratebay_provider,
     require_token,
 )
+from app.core.auth import ApiKeyIdentity
 from app.api.schemas import (
     ImportListResponse,
     ImportRecordResponse,
@@ -68,6 +69,7 @@ async def list_imports(
 )
 async def import_personal_1337x(
     torrent_id: str,
+    api_key: ApiKeyIdentity = Depends(require_token),
     provider: Personal1337xProvider = Depends(personal_1337x_provider),
     service: ImportService = Depends(import_service),
     session: AsyncSession = Depends(db_session),
@@ -75,7 +77,7 @@ async def import_personal_1337x(
     try:
         candidate = await provider.resolve_for_import(torrent_id)
         record = await service.create_1337x_import(candidate)
-        await _record_import_action(session, record)
+        await _record_import_action(session, record, api_key_id=api_key.id)
     except (MissingTorrentMetadata, InvalidImportCandidate, SandboxViolation) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (HTTPError, QBittorrentError) as exc:
@@ -94,6 +96,7 @@ async def import_personal_1337x(
 )
 async def import_piratebay(
     torrent_id: str,
+    api_key: ApiKeyIdentity = Depends(require_token),
     provider: PirateBayProvider = Depends(piratebay_provider),
     service: ImportService = Depends(import_service),
     session: AsyncSession = Depends(db_session),
@@ -101,7 +104,7 @@ async def import_piratebay(
     try:
         candidate = await provider.resolve_for_import(torrent_id)
         record = await service.create_piratebay_import(candidate)
-        await _record_import_action(session, record)
+        await _record_import_action(session, record, api_key_id=api_key.id)
     except (PirateBayMissingMetadata, InvalidImportCandidate, SandboxViolation) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PirateBaySourceError as exc:
@@ -122,6 +125,7 @@ async def import_piratebay(
 )
 async def import_indexer_result(
     request: IndexerImportRequest,
+    api_key: ApiKeyIdentity = Depends(require_token),
     provider: MusicIndexerProvider = Depends(music_indexer_provider),
     service: ImportService = Depends(import_service),
     session: AsyncSession = Depends(db_session),
@@ -129,7 +133,7 @@ async def import_indexer_result(
     try:
         candidate = provider.candidate_from_payload(request.model_dump())
         record = await service.create_indexer_import(candidate)
-        await _record_import_action(session, record)
+        await _record_import_action(session, record, api_key_id=api_key.id)
     except (MusicIndexerMissingMetadata, InvalidImportCandidate, SandboxViolation) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (HTTPError, QBittorrentError) as exc:
@@ -141,13 +145,14 @@ async def import_indexer_result(
     return ImportRecordResponse(**record.to_dict())
 
 
-async def _record_import_action(session: AsyncSession, record: object) -> None:
+async def _record_import_action(session: AsyncSession, record: object, *, api_key_id: str) -> None:
     await record_user_action(
         session,
         action_type=IMPORT_TORRENT,
         entity_type="import",
         entity_id=str(getattr(record, "id")),
         payload=import_action_payload(record),
+        api_key_id=api_key_id,
     )
 
 

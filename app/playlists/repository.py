@@ -5,6 +5,7 @@ from uuid import UUID
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import DEFAULT_API_KEY_ID
 from app.db.models import Playlist, PlaylistTrack, Track, utcnow
 from app.playlists.domain import (
     PlaylistDetail,
@@ -18,12 +19,18 @@ from app.playlists.domain import (
 
 
 class SqlAlchemyPlaylistRepository:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, api_key_id: str = DEFAULT_API_KEY_ID) -> None:
         self.session = session
+        self.api_key_id = api_key_id
 
     async def create(self, *, name: str) -> PlaylistDetail:
         now = utcnow()
-        playlist = Playlist(name=name, created_at=now, updated_at=now)
+        playlist = Playlist(
+            api_key_id=self.api_key_id,
+            name=name,
+            created_at=now,
+            updated_at=now,
+        )
         self.session.add(playlist)
         await self.session.commit()
         await self.session.refresh(playlist)
@@ -34,6 +41,7 @@ class SqlAlchemyPlaylistRepository:
         rows = await self.session.execute(
             select(Playlist, track_count)
             .outerjoin(PlaylistTrack, PlaylistTrack.playlist_id == Playlist.id)
+            .where(Playlist.api_key_id == self.api_key_id)
             .group_by(Playlist.id)
             .order_by(Playlist.updated_at.desc())
             .limit(limit)
@@ -51,7 +59,7 @@ class SqlAlchemyPlaylistRepository:
         ]
 
     async def get(self, playlist_id: UUID) -> PlaylistDetail:
-        playlist = await self.session.get(Playlist, playlist_id)
+        playlist = await self._get_owned_playlist(playlist_id)
         if playlist is None:
             raise PlaylistNotFound(f"Playlist {playlist_id} not found.")
 
@@ -77,7 +85,7 @@ class SqlAlchemyPlaylistRepository:
         )
 
     async def update(self, *, playlist_id: UUID, name: str) -> PlaylistDetail:
-        playlist = await self.session.get(Playlist, playlist_id)
+        playlist = await self._get_owned_playlist(playlist_id)
         if playlist is None:
             raise PlaylistNotFound(f"Playlist {playlist_id} not found.")
 
@@ -87,7 +95,7 @@ class SqlAlchemyPlaylistRepository:
         return await self.get(playlist_id)
 
     async def delete(self, playlist_id: UUID) -> None:
-        playlist = await self.session.get(Playlist, playlist_id)
+        playlist = await self._get_owned_playlist(playlist_id)
         if playlist is None:
             raise PlaylistNotFound(f"Playlist {playlist_id} not found.")
 
@@ -98,7 +106,7 @@ class SqlAlchemyPlaylistRepository:
         await self.session.commit()
 
     async def add_track(self, *, playlist_id: UUID, track_id: UUID) -> PlaylistDetail:
-        playlist = await self.session.get(Playlist, playlist_id)
+        playlist = await self._get_owned_playlist(playlist_id)
         if playlist is None:
             raise PlaylistNotFound(f"Playlist {playlist_id} not found.")
         track = await self.session.get(Track, track_id)
@@ -129,7 +137,7 @@ class SqlAlchemyPlaylistRepository:
         return await self.get(playlist_id)
 
     async def remove_track(self, *, playlist_id: UUID, track_id: UUID) -> PlaylistDetail:
-        playlist = await self.session.get(Playlist, playlist_id)
+        playlist = await self._get_owned_playlist(playlist_id)
         if playlist is None:
             raise PlaylistNotFound(f"Playlist {playlist_id} not found.")
         playlist_track = await self.session.scalar(
@@ -149,7 +157,7 @@ class SqlAlchemyPlaylistRepository:
         return await self.get(playlist_id)
 
     async def reorder_tracks(self, *, playlist_id: UUID, track_ids: list[UUID]) -> PlaylistDetail:
-        playlist = await self.session.get(Playlist, playlist_id)
+        playlist = await self._get_owned_playlist(playlist_id)
         if playlist is None:
             raise PlaylistNotFound(f"Playlist {playlist_id} not found.")
 
@@ -183,3 +191,11 @@ class SqlAlchemyPlaylistRepository:
         )
         for position, playlist_track in enumerate(rows, start=1):
             playlist_track.position = position
+
+    async def _get_owned_playlist(self, playlist_id: UUID) -> Playlist | None:
+        return await self.session.scalar(
+            select(Playlist).where(
+                Playlist.id == playlist_id,
+                Playlist.api_key_id == self.api_key_id,
+            )
+        )

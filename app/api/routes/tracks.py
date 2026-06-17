@@ -21,6 +21,7 @@ from app.api.schemas import (
     TrackStatsResponse,
     TrackUpdateRequest,
 )
+from app.core.auth import ApiKeyIdentity
 from app.core.config import settings
 from app.db.models import LikedTrack, PersonalizationSignal, PlaylistTrack, Track, TrackPlay, utcnow
 from app.db.session import AsyncSessionLocal
@@ -91,10 +92,11 @@ async def list_tracks(
 async def list_liked_tracks(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
 ) -> LikedTrackListResponse:
     result = await session.execute(
-        select_liked_tracks(limit=limit, offset=offset)
+        select_liked_tracks(api_key_id=api_key.id, limit=limit, offset=offset)
     )
     return LikedTrackListResponse(
         items=[_liked_track_to_dict(liked_track, track) for liked_track, track in result],
@@ -107,10 +109,11 @@ async def list_liked_tracks(
 async def list_recently_played_tracks(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
 ) -> PlaybackEventListResponse:
     result = await session.execute(
-        select_recent_playback_events(limit=limit, offset=offset)
+        select_recent_playback_events(api_key_id=api_key.id, limit=limit, offset=offset)
     )
     return PlaybackEventListResponse(
         items=[_playback_event_to_dict(playback_event, track) for playback_event, track in result],
@@ -181,15 +184,16 @@ async def get_track(track_id: UUID, session: AsyncSession = Depends(db_session))
 @router.get("/{track_id}/stats", response_model=TrackStatsResponse)
 async def get_track_stats(
     track_id: UUID,
+    api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
 ) -> TrackStatsResponse:
     track = await session.get(Track, track_id)
     if track is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Track not found.")
 
-    liked_track = await session.scalar(select_liked_track_for_track(track_id))
+    liked_track = await session.scalar(select_liked_track_for_track(track_id, api_key_id=api_key.id))
     play_count, last_played_at = (
-        await session.execute(select_track_play_stats(track_id))
+        await session.execute(select_track_play_stats(track_id, api_key_id=api_key.id))
     ).one()
     return TrackStatsResponse(
         track=TrackResponse(**track.to_dict()),
@@ -203,18 +207,20 @@ async def get_track_stats(
 @router.put("/{track_id}/like", response_model=LikedTrackResponse)
 async def like_track(
     track_id: UUID,
+    api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
 ) -> LikedTrackResponse:
     track = await session.get(Track, track_id)
     if track is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Track not found.")
 
-    liked_track = await session.scalar(select_liked_track_for_track(track_id))
+    liked_track = await session.scalar(select_liked_track_for_track(track_id, api_key_id=api_key.id))
     if liked_track is None:
-        liked_track = LikedTrack(track_id=track_id)
+        liked_track = LikedTrack(api_key_id=api_key.id, track_id=track_id)
         session.add(liked_track)
         session.add(
             PersonalizationSignal(
+                api_key_id=api_key.id,
                 track_id=track_id,
                 signal_type="like",
                 weight=4.0,
@@ -230,6 +236,7 @@ async def like_track(
             entity_type="track",
             entity_id=str(track_id),
             payload=track_action_payload(track),
+            api_key_id=api_key.id,
         )
 
     return LikedTrackResponse(**_liked_track_to_dict(liked_track, track))
@@ -242,16 +249,18 @@ async def like_track(
 )
 async def record_track_play(
     track_id: UUID,
+    api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
 ) -> PlaybackEventResponse:
     track = await session.get(Track, track_id)
     if track is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Track not found.")
 
-    playback_event = TrackPlay(track_id=track_id)
+    playback_event = TrackPlay(api_key_id=api_key.id, track_id=track_id)
     session.add(playback_event)
     session.add(
         PersonalizationSignal(
+            api_key_id=api_key.id,
             track_id=track_id,
             signal_type="play",
             weight=1.0,
@@ -267,17 +276,19 @@ async def record_track_play(
 @router.delete("/{track_id}/like", status_code=status.HTTP_204_NO_CONTENT)
 async def unlike_track(
     track_id: UUID,
+    api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
 ) -> None:
     track = await session.get(Track, track_id)
     if track is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Track not found.")
 
-    liked_track = await session.scalar(select_liked_track_for_track(track_id))
+    liked_track = await session.scalar(select_liked_track_for_track(track_id, api_key_id=api_key.id))
     if liked_track is not None:
         await session.delete(liked_track)
         session.add(
             PersonalizationSignal(
+                api_key_id=api_key.id,
                 track_id=track_id,
                 signal_type="unlike",
                 weight=-2.0,
@@ -292,6 +303,7 @@ async def unlike_track(
             entity_type="track",
             entity_id=str(track_id),
             payload=track_action_payload(track),
+            api_key_id=api_key.id,
         )
 
 
@@ -326,6 +338,7 @@ async def update_track(
 async def delete_track(
     track_id: UUID,
     delete_file: bool = Query(default=True),
+    api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
 ) -> None:
     track = await session.get(Track, track_id)
@@ -358,6 +371,7 @@ async def delete_track(
         entity_type="track",
         entity_id=str(track_id),
         payload=delete_payload,
+        api_key_id=api_key.id,
     )
 
 
@@ -482,31 +496,36 @@ def _metadata_row_to_dict(row: dict[str, object]) -> dict[str, object]:
     }
 
 
-def select_liked_tracks(*, limit: int, offset: int):
+def select_liked_tracks(*, api_key_id: str, limit: int, offset: int):
     return (
         select(LikedTrack, Track)
         .join(Track, Track.id == LikedTrack.track_id)
+        .where(LikedTrack.api_key_id == api_key_id)
         .order_by(LikedTrack.created_at.desc())
         .limit(limit)
         .offset(offset)
     )
 
 
-def select_liked_track_for_track(track_id: UUID):
-    return select(LikedTrack).where(LikedTrack.track_id == track_id)
+def select_liked_track_for_track(track_id: UUID, *, api_key_id: str):
+    return select(LikedTrack).where(
+        LikedTrack.track_id == track_id,
+        LikedTrack.api_key_id == api_key_id,
+    )
 
 
-def select_track_play_stats(track_id: UUID):
+def select_track_play_stats(track_id: UUID, *, api_key_id: str):
     return select(
         func.count(TrackPlay.id),
         func.max(TrackPlay.played_at),
-    ).where(TrackPlay.track_id == track_id)
+    ).where(TrackPlay.track_id == track_id, TrackPlay.api_key_id == api_key_id)
 
 
-def select_recent_playback_events(*, limit: int, offset: int):
+def select_recent_playback_events(*, api_key_id: str, limit: int, offset: int):
     return (
         select(TrackPlay, Track)
         .join(Track, Track.id == TrackPlay.track_id)
+        .where(TrackPlay.api_key_id == api_key_id)
         .order_by(TrackPlay.played_at.desc())
         .limit(limit)
         .offset(offset)

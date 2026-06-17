@@ -11,6 +11,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import DEFAULT_API_KEY_ID
 from app.db.models import ImportJob, LikedTrack, PersonalizationSignal, Track, TrackPlay
 from app.sources.indexers import MusicIndexerProvider
 from app.sources.personal_1337x import Personal1337xProvider
@@ -75,11 +76,13 @@ class RecommendationEngine:
         piratebay: PirateBayProvider,
         personal_1337x: Personal1337xProvider,
         indexer: MusicIndexerProvider,
+        api_key_id: str = DEFAULT_API_KEY_ID,
     ) -> None:
         self.session = session
         self.piratebay = piratebay
         self.personal_1337x = personal_1337x
         self.indexer = indexer
+        self.api_key_id = api_key_id
 
     async def recommend_for_track(
         self,
@@ -152,6 +155,7 @@ class RecommendationEngine:
         liked_rows = await self.session.scalars(
             select(Track)
             .join(LikedTrack, LikedTrack.track_id == Track.id)
+            .where(LikedTrack.api_key_id == self.api_key_id)
             .order_by(LikedTrack.created_at.desc())
             .limit(limit)
         )
@@ -162,6 +166,7 @@ class RecommendationEngine:
         recent_rows = await self.session.scalars(
             select(Track)
             .join(TrackPlay, TrackPlay.track_id == Track.id)
+            .where(TrackPlay.api_key_id == self.api_key_id)
             .group_by(Track.id)
             .order_by(func.max(TrackPlay.played_at).desc())
             .limit(limit)
@@ -185,6 +190,7 @@ class RecommendationEngine:
         signal_rows = await self.session.execute(
             select(PersonalizationSignal, Track)
             .join(Track, Track.id == PersonalizationSignal.track_id)
+            .where(PersonalizationSignal.api_key_id == self.api_key_id)
             .order_by(PersonalizationSignal.created_at.desc())
             .limit(800)
         )
@@ -203,6 +209,7 @@ class RecommendationEngine:
         liked_rows = await self.session.execute(
             select(LikedTrack, Track)
             .join(Track, Track.id == LikedTrack.track_id)
+            .where(LikedTrack.api_key_id == self.api_key_id)
             .order_by(LikedTrack.created_at.desc())
             .limit(200)
         )
@@ -220,6 +227,7 @@ class RecommendationEngine:
         play_rows = await self.session.execute(
             select(TrackPlay, Track)
             .join(Track, Track.id == TrackPlay.track_id)
+            .where(TrackPlay.api_key_id == self.api_key_id)
             .order_by(TrackPlay.played_at.desc())
             .limit(300)
         )

@@ -4,6 +4,13 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from app.api.deps import db_session, require_token
+from app.api.routes.tracks import (
+    select_liked_track_for_track,
+    select_liked_tracks,
+    select_recent_playback_events,
+    select_track_play_stats,
+)
+from app.core.auth import ApiKeyIdentity
 from app.main import app
 
 
@@ -75,7 +82,7 @@ class FakeAlbumSession(FakeSession):
 
 def test_tracks_endpoint_returns_searchable_page():
     fake_session = FakeSession()
-    app.dependency_overrides[require_token] = lambda: None
+    app.dependency_overrides[require_token] = lambda: ApiKeyIdentity(id="test", token="secret")
     app.dependency_overrides[db_session] = lambda: fake_session
     try:
         response = TestClient(app).get("/tracks?q=ambient&limit=25&offset=50")
@@ -96,7 +103,7 @@ def test_tracks_endpoint_returns_searchable_page():
 
 def test_artists_endpoint_returns_artist_page():
     fake_session = FakeSession()
-    app.dependency_overrides[require_token] = lambda: None
+    app.dependency_overrides[require_token] = lambda: ApiKeyIdentity(id="test", token="secret")
     app.dependency_overrides[db_session] = lambda: fake_session
     try:
         response = TestClient(app).get("/tracks/artists?q=mek&limit=20&offset=5")
@@ -115,7 +122,7 @@ def test_artists_endpoint_returns_artist_page():
 
 def test_albums_endpoint_returns_album_page():
     fake_session = FakeAlbumSession()
-    app.dependency_overrides[require_token] = lambda: None
+    app.dependency_overrides[require_token] = lambda: ApiKeyIdentity(id="test", token="secret")
     app.dependency_overrides[db_session] = lambda: fake_session
     try:
         response = TestClient(app).get("/tracks/albums?q=private&limit=15&offset=0")
@@ -128,3 +135,18 @@ def test_albums_endpoint_returns_album_page():
     assert payload["items"][0]["title"] == "Private"
     assert payload["items"][0]["artist"] == "Mekamb"
     assert payload["items"][0]["track_count"] == 2
+
+
+def test_personal_track_queries_are_scoped_to_api_key():
+    track_id = uuid4()
+    statements = [
+        select_liked_tracks(api_key_id="alice", limit=25, offset=0),
+        select_liked_track_for_track(track_id, api_key_id="alice"),
+        select_track_play_stats(track_id, api_key_id="alice"),
+        select_recent_playback_events(api_key_id="alice", limit=25, offset=0),
+    ]
+
+    for statement in statements:
+        compiled = str(statement.compile(compile_kwargs={"literal_binds": True}))
+        assert "api_key_id" in compiled
+        assert "alice" in compiled

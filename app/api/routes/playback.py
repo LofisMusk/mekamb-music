@@ -6,26 +6,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import db_session, require_token
 from app.api.schemas import PlaybackStateResponse, PlaybackStateUpdateRequest
+from app.core.auth import ApiKeyIdentity, DEFAULT_API_KEY_ID
 from app.core.config import settings
 from app.db.models import PlaybackQueueItem, PlaybackState, Track, utcnow
 from app.library.prefetch import prefetch_tracks
 
 router = APIRouter(dependencies=[Depends(require_token)])
 
-DEFAULT_STATE_ID = "default"
+DEFAULT_STATE_ID = DEFAULT_API_KEY_ID
 
 
 @router.get("/state", response_model=PlaybackStateResponse)
 async def get_playback_state(
+    api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
 ) -> PlaybackStateResponse:
-    return PlaybackStateResponse(**await _load_state_payload(session))
+    return PlaybackStateResponse(**await _load_state_payload(session, state_id=api_key.id))
 
 
 @router.put("/state", response_model=PlaybackStateResponse)
 async def update_playback_state(
     payload: PlaybackStateUpdateRequest,
     background_tasks: BackgroundTasks,
+    api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
 ) -> PlaybackStateResponse:
     await _ensure_tracks_exist(
@@ -33,10 +36,11 @@ async def update_playback_state(
         [track_id for track_id in [payload.current_track_id, *payload.queue_track_ids] if track_id],
     )
 
-    state = await session.get(PlaybackState, DEFAULT_STATE_ID)
+    state_id = api_key.id
+    state = await session.get(PlaybackState, state_id)
     now = utcnow()
     if state is None:
-        state = PlaybackState(id=DEFAULT_STATE_ID, updated_at=now)
+        state = PlaybackState(id=state_id, updated_at=now)
         session.add(state)
 
     state.current_track_id = payload.current_track_id
@@ -49,12 +53,12 @@ async def update_playback_state(
     state.updated_at = now
 
     await session.execute(
-        delete(PlaybackQueueItem).where(PlaybackQueueItem.state_id == DEFAULT_STATE_ID)
+        delete(PlaybackQueueItem).where(PlaybackQueueItem.state_id == state_id)
     )
     for position, track_id in enumerate(payload.queue_track_ids, start=1):
         session.add(
             PlaybackQueueItem(
-                state_id=DEFAULT_STATE_ID,
+                state_id=state_id,
                 track_id=track_id,
                 position=position,
                 added_at=now,
@@ -67,20 +71,21 @@ async def update_playback_state(
         payload.queue_track_ids,
         limit=settings.playback_prefetch_count,
     )
-    return PlaybackStateResponse(**await _load_state_payload(session))
+    return PlaybackStateResponse(**await _load_state_payload(session, state_id=state_id))
 
 
 @router.delete("/state", status_code=status.HTTP_204_NO_CONTENT)
 async def clear_playback_state(
+    api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
 ) -> None:
-    await session.execute(delete(PlaybackQueueItem).where(PlaybackQueueItem.state_id == DEFAULT_STATE_ID))
-    await session.execute(delete(PlaybackState).where(PlaybackState.id == DEFAULT_STATE_ID))
+    await session.execute(delete(PlaybackQueueItem).where(PlaybackQueueItem.state_id == api_key.id))
+    await session.execute(delete(PlaybackState).where(PlaybackState.id == api_key.id))
     await session.commit()
 
 
-async def _load_state_payload(session: AsyncSession) -> dict[str, object]:
-    state = await session.get(PlaybackState, DEFAULT_STATE_ID)
+async def _load_state_payload(session: AsyncSession, *, state_id: str) -> dict[str, object]:
+    state = await session.get(PlaybackState, state_id)
     if state is None:
         return {
             "current_track": None,
@@ -103,7 +108,7 @@ async def _load_state_payload(session: AsyncSession) -> dict[str, object]:
     queue_rows = await session.execute(
         select(PlaybackQueueItem, Track)
         .join(Track, Track.id == PlaybackQueueItem.track_id)
-        .where(PlaybackQueueItem.state_id == DEFAULT_STATE_ID)
+        .where(PlaybackQueueItem.state_id == state_id)
         .order_by(PlaybackQueueItem.position)
     )
 

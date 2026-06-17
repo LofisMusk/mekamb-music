@@ -32,9 +32,9 @@ async def collect_readiness(
 
 
 def _check_api_token(settings: object) -> dict[str, str]:
-    if getattr(settings, "api_token", ""):
+    if getattr(settings, "api_token", "") or getattr(settings, "api_tokens", ""):
         return _ok("api_token")
-    return _error("api_token", "API_TOKEN is not configured.")
+    return _error("api_token", "API_TOKEN or API_TOKENS is not configured.")
 
 
 def _check_storage_backend(settings: object) -> dict[str, str]:

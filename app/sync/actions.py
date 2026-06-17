@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import DEFAULT_API_KEY_ID
 from app.core.config import settings
 from app.db.models import (
     LikedTrack,
@@ -48,11 +49,13 @@ async def record_user_action(
     payload: dict[str, Any],
     action_id: UUID | None = None,
     origin_instance_id: str | None = None,
+    api_key_id: str = DEFAULT_API_KEY_ID,
     created_at: datetime | None = None,
     applied: bool = True,
 ) -> UserAction:
     action = UserAction(
         id=action_id or uuid4(),
+        api_key_id=api_key_id,
         action_type=action_type,
         entity_type=entity_type,
         entity_id=entity_id,
@@ -76,6 +79,7 @@ async def merge_remote_action(
     entity_id: str | None,
     payload: dict[str, Any],
     origin_instance_id: str,
+    api_key_id: str = DEFAULT_API_KEY_ID,
     created_at: datetime,
 ) -> UserAction:
     existing = await session.get(UserAction, action_id)
@@ -89,6 +93,7 @@ async def merge_remote_action(
         entity_id=entity_id,
         payload=payload,
         origin_instance_id=origin_instance_id,
+        api_key_id=api_key_id,
         created_at=created_at,
         applied=origin_instance_id == settings.instance_id,
     )
@@ -97,11 +102,17 @@ async def merge_remote_action(
 async def list_actions(
     session: AsyncSession,
     *,
+    api_key_id: str = DEFAULT_API_KEY_ID,
     since: datetime | None,
     limit: int,
     include_applied: bool,
 ) -> list[UserAction]:
-    statement = select(UserAction).order_by(UserAction.created_at.asc()).limit(limit)
+    statement = (
+        select(UserAction)
+        .where(UserAction.api_key_id == api_key_id)
+        .order_by(UserAction.created_at.asc())
+        .limit(limit)
+    )
     if since is not None:
         statement = statement.where(UserAction.created_at > since)
     if not include_applied:
@@ -172,11 +183,17 @@ async def _apply_like_track(session: AsyncSession, action: UserAction) -> None:
     track = await session.get(Track, track_id)
     if track is None:
         raise ValueError(f"Track {track_id} is not present on this instance yet.")
-    liked = await session.scalar(select(LikedTrack).where(LikedTrack.track_id == track_id))
+    liked = await session.scalar(
+        select(LikedTrack).where(
+            LikedTrack.api_key_id == action.api_key_id,
+            LikedTrack.track_id == track_id,
+        )
+    )
     if liked is None:
-        session.add(LikedTrack(track_id=track_id))
+        session.add(LikedTrack(api_key_id=action.api_key_id, track_id=track_id))
         session.add(
             PersonalizationSignal(
+                api_key_id=action.api_key_id,
                 track_id=track_id,
                 signal_type="like",
                 weight=4.0,
@@ -188,11 +205,17 @@ async def _apply_like_track(session: AsyncSession, action: UserAction) -> None:
 
 async def _apply_unlike_track(session: AsyncSession, action: UserAction) -> None:
     track_id = _track_id_from_action(action)
-    await session.execute(delete(LikedTrack).where(LikedTrack.track_id == track_id))
+    await session.execute(
+        delete(LikedTrack).where(
+            LikedTrack.api_key_id == action.api_key_id,
+            LikedTrack.track_id == track_id,
+        )
+    )
     track = await session.get(Track, track_id)
     if track is not None:
         session.add(
             PersonalizationSignal(
+                api_key_id=action.api_key_id,
                 track_id=track_id,
                 signal_type="unlike",
                 weight=-2.0,

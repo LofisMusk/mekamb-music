@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from app.core.auth import DEFAULT_API_KEY_ID
 from app.imports.domain import ImportStatus
 
 
@@ -104,9 +105,15 @@ class Track(Base):
 
 class LikedTrack(Base):
     __tablename__ = "liked_tracks"
-    __table_args__ = (UniqueConstraint("track_id", name="uq_liked_tracks_track"),)
+    __table_args__ = (UniqueConstraint("api_key_id", "track_id", name="uq_liked_tracks_api_key_track"),)
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    api_key_id: Mapped[str] = mapped_column(
+        String(64),
+        default=DEFAULT_API_KEY_ID,
+        nullable=False,
+        index=True,
+    )
     track_id: Mapped[UUID] = mapped_column(ForeignKey("tracks.id"), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -115,6 +122,12 @@ class TrackPlay(Base):
     __tablename__ = "track_plays"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    api_key_id: Mapped[str] = mapped_column(
+        String(64),
+        default=DEFAULT_API_KEY_ID,
+        nullable=False,
+        index=True,
+    )
     track_id: Mapped[UUID] = mapped_column(ForeignKey("tracks.id"), nullable=False, index=True)
     played_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
@@ -123,6 +136,12 @@ class PersonalizationSignal(Base):
     __tablename__ = "personalization_signals"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    api_key_id: Mapped[str] = mapped_column(
+        String(64),
+        default=DEFAULT_API_KEY_ID,
+        nullable=False,
+        index=True,
+    )
     track_id: Mapped[UUID] = mapped_column(ForeignKey("tracks.id"), nullable=False, index=True)
     signal_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     weight: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
@@ -165,6 +184,12 @@ class UserAction(Base):
     __tablename__ = "user_actions"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    api_key_id: Mapped[str] = mapped_column(
+        String(64),
+        default=DEFAULT_API_KEY_ID,
+        nullable=False,
+        index=True,
+    )
     action_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     entity_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     entity_id: Mapped[str | None] = mapped_column(String(255), index=True)
@@ -177,6 +202,7 @@ class UserAction(Base):
     def to_dict(self) -> dict[str, object]:
         return {
             "id": str(self.id),
+            "api_key_id": self.api_key_id,
             "action_type": self.action_type,
             "entity_type": self.entity_type,
             "entity_id": self.entity_id,
@@ -192,6 +218,12 @@ class Playlist(Base):
     __tablename__ = "playlists"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    api_key_id: Mapped[str] = mapped_column(
+        String(64),
+        default=DEFAULT_API_KEY_ID,
+        nullable=False,
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -19,6 +19,7 @@ from app.api.schemas import (
     RecommendationImportResponse,
     RecommendationResponse,
 )
+from app.core.auth import ApiKeyIdentity
 from app.core.config import settings
 from app.imports.service import ImportService
 from app.recommendations.engine import ExternalRecommendation, RecommendationEngine, RecommendationSet
@@ -32,6 +33,7 @@ router = APIRouter(dependencies=[Depends(require_token)])
 
 def _recommendation_engine(
     session: AsyncSession = Depends(db_session),
+    api_key: ApiKeyIdentity = Depends(require_token),
     indexer: MusicIndexerProvider = Depends(music_indexer_provider),
     piratebay: PirateBayProvider = Depends(piratebay_provider),
     personal_1337x: Personal1337xProvider = Depends(personal_1337x_provider),
@@ -41,6 +43,7 @@ def _recommendation_engine(
         indexer=indexer,
         piratebay=piratebay,
         personal_1337x=personal_1337x,
+        api_key_id=api_key.id,
     )
 
 
@@ -125,6 +128,7 @@ async def import_missing_for_track(
     track_id: UUID,
     request: RecommendationImportRequest | None = None,
     engine: RecommendationEngine = Depends(_recommendation_engine),
+    api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
     service: ImportService = Depends(import_service),
     indexer: MusicIndexerProvider = Depends(music_indexer_provider),
@@ -148,6 +152,7 @@ async def import_missing_for_track(
         recommendations.external_candidates,
         request=payload,
         session=session,
+        api_key_id=api_key.id,
         service=service,
         indexer=indexer,
         piratebay=piratebay,
@@ -159,6 +164,7 @@ async def import_missing_for_track(
 async def import_missing_for_library(
     request: RecommendationImportRequest | None = None,
     engine: RecommendationEngine = Depends(_recommendation_engine),
+    api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
     service: ImportService = Depends(import_service),
     indexer: MusicIndexerProvider = Depends(music_indexer_provider),
@@ -178,6 +184,7 @@ async def import_missing_for_library(
         recommendations.external_candidates,
         request=payload,
         session=session,
+        api_key_id=api_key.id,
         service=service,
         indexer=indexer,
         piratebay=piratebay,
@@ -188,6 +195,7 @@ async def _import_missing(
     *,
     request: RecommendationImportRequest,
     session: AsyncSession,
+    api_key_id: str,
     service: ImportService,
     indexer: MusicIndexerProvider,
     piratebay: PirateBayProvider,
@@ -227,6 +235,7 @@ async def _import_missing(
                 entity_type="import",
                 entity_id=str(record.id),
                 payload=import_action_payload(record),
+                api_key_id=api_key_id,
             )
             imported.append(
                 RecommendationImportItemResponse(

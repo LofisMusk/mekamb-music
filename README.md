@@ -7,7 +7,8 @@ then imports completed audio files into a persistent local library.
 ## Local Setup
 
 1. Copy `.env.example` to `.env`.
-2. Set `API_TOKEN` to a long random secret.
+2. Set `API_TOKEN` to a long random secret, or set `API_TOKENS` to multiple
+   named secrets such as `alice:secret-one,bob:secret-two`.
 3. Start the stack:
 
 ```bash
@@ -176,7 +177,10 @@ python -m app.api.openapi_export openapi.json
 - `PUT /playlists/{id}/tracks/order`
 - `DELETE /playlists/{id}/tracks/{track_id}`
 
-Pass `Authorization: Bearer <API_TOKEN>` to every non-health endpoint.
+Pass `Authorization: Bearer <API_TOKEN>` to every non-health endpoint. When
+`API_TOKENS` is configured, all keys share the same downloaded albums/library,
+imports, and storage, but each key has separate liked tracks, recent plays,
+personalized recommendations, playback state, playlists, and sync actions.
 
 ## Recommendations
 

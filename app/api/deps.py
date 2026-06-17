@@ -1,9 +1,8 @@
 from collections.abc import AsyncIterator
-from secrets import compare_digest
-
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import ApiKeyIdentity, match_bearer_token
 from app.core.config import settings
 from app.db.session import get_session
 from app.downloads.qbittorrent import QBittorrentDownloader
@@ -19,13 +18,14 @@ from app.sources.personal_1337x import Personal1337xProvider
 from app.sources.piratebay import PirateBayProvider
 
 
-async def require_token(authorization: str | None = Header(default=None)) -> None:
-    expected = f"Bearer {settings.api_token}"
-    if not settings.api_token or not authorization or not compare_digest(authorization, expected):
+async def require_token(authorization: str | None = Header(default=None)) -> ApiKeyIdentity:
+    api_key = match_bearer_token(settings, authorization)
+    if api_key is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing or invalid bearer token.",
         )
+    return api_key
 
 
 async def db_session() -> AsyncIterator[AsyncSession]:
@@ -81,5 +81,8 @@ def download_service(
     return DownloadService(repository=repository, torrent_client=downloader)
 
 
-def playlist_service(session: AsyncSession = Depends(db_session)) -> PlaylistService:
-    return PlaylistService(repository=SqlAlchemyPlaylistRepository(session))
+def playlist_service(
+    session: AsyncSession = Depends(db_session),
+    api_key: ApiKeyIdentity = Depends(require_token),
+) -> PlaylistService:
+    return PlaylistService(repository=SqlAlchemyPlaylistRepository(session, api_key_id=api_key.id))

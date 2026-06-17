@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import db_session, require_token
 from app.api.schemas import LibrarySummaryResponse
+from app.core.auth import ApiKeyIdentity
 from app.db.models import ImportJob, LikedTrack, Playlist, Track, TrackPlay
 from app.imports.domain import ImportStatus
 
@@ -12,6 +13,7 @@ router = APIRouter(dependencies=[Depends(require_token)])
 
 @router.get("/summary", response_model=LibrarySummaryResponse)
 async def get_library_summary(
+    api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
 ) -> LibrarySummaryResponse:
     artist_name = func.coalesce(Track.artist, "Unknown Artist")
@@ -39,9 +41,9 @@ async def get_library_summary(
             session,
             select(album_title, album_artist).group_by(album_title, album_artist),
         ),
-        playlist_count=await _count_rows(session, Playlist.id),
-        liked_track_count=await _count_rows(session, LikedTrack.id),
-        playback_event_count=await _count_rows(session, TrackPlay.id),
+        playlist_count=await _count_rows(session, Playlist.id, Playlist.api_key_id == api_key.id),
+        liked_track_count=await _count_rows(session, LikedTrack.id, LikedTrack.api_key_id == api_key.id),
+        playback_event_count=await _count_rows(session, TrackPlay.id, TrackPlay.api_key_id == api_key.id),
         import_count=await _count_rows(session, ImportJob.id),
         active_import_count=await _count_imports_by_status(session, ImportStatus.active()),
         failed_import_count=await _count_imports_by_status(session, (ImportStatus.FAILED.value,)),
@@ -52,8 +54,11 @@ async def get_library_summary(
     )
 
 
-async def _count_rows(session: AsyncSession, column) -> int:
-    count = await session.scalar(select(func.count(column)))
+async def _count_rows(session: AsyncSession, column, *conditions) -> int:
+    statement = select(func.count(column))
+    if conditions:
+        statement = statement.where(*conditions)
+    count = await session.scalar(statement)
     return int(count or 0)
 
 
