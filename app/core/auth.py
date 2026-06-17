@@ -46,12 +46,17 @@ def match_bearer_token(settings: AuthSettings, authorization: str | None) -> Api
     if not authorization:
         return None
 
-    scheme, _, token = authorization.partition(" ")
+    parts = authorization.strip().split(None, 1)
+    if len(parts) != 2:
+        return None
+
+    scheme, token = parts
+    token = token.strip()
     if scheme.lower() != "bearer" or not token:
         return None
 
     for api_key in configured_api_keys(settings):
-        if compare_digest(token, api_key.token):
+        if compare_digest(token, api_key.token.strip()):
             return api_key
     return None
 

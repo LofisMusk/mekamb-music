@@ -35,3 +35,23 @@ def test_match_bearer_token_returns_api_key_profile():
 
     assert api_key is not None
     assert api_key.id == "bob"
+
+
+def test_match_bearer_token_accepts_extra_header_whitespace():
+    api_key = match_bearer_token(
+        FakeSettings(api_tokens="leon:leon-1"),
+        "  Bearer   leon-1  ",
+    )
+
+    assert api_key is not None
+    assert api_key.id == "leon"
+
+
+def test_match_bearer_token_strips_configured_token_whitespace():
+    api_key = match_bearer_token(
+        FakeSettings(api_tokens="leon: leon-1 "),
+        "Bearer leon-1",
+    )
+
+    assert api_key is not None
+    assert api_key.id == "leon"
