@@ -22,7 +22,7 @@ from app.api.schemas import (
     TrackUpdateRequest,
 )
 from app.core.config import settings
-from app.db.models import LikedTrack, PlaylistTrack, Track, TrackPlay, utcnow
+from app.db.models import LikedTrack, PersonalizationSignal, PlaylistTrack, Track, TrackPlay, utcnow
 from app.db.session import AsyncSessionLocal
 from app.library.audio import extract_embedded_artwork, media_type_for_audio_file
 from app.library.queries import (
@@ -213,6 +213,15 @@ async def like_track(
     if liked_track is None:
         liked_track = LikedTrack(track_id=track_id)
         session.add(liked_track)
+        session.add(
+            PersonalizationSignal(
+                track_id=track_id,
+                signal_type="like",
+                weight=4.0,
+                source="api",
+                payload={"track_title": track.title, "artist": track.artist, "album": track.album},
+            )
+        )
         await session.commit()
         await session.refresh(liked_track)
         await record_user_action(
@@ -241,6 +250,15 @@ async def record_track_play(
 
     playback_event = TrackPlay(track_id=track_id)
     session.add(playback_event)
+    session.add(
+        PersonalizationSignal(
+            track_id=track_id,
+            signal_type="play",
+            weight=1.0,
+            source="api",
+            payload={"track_title": track.title, "artist": track.artist, "album": track.album},
+        )
+    )
     await session.commit()
     await session.refresh(playback_event)
     return PlaybackEventResponse(**_playback_event_to_dict(playback_event, track))
@@ -258,6 +276,15 @@ async def unlike_track(
     liked_track = await session.scalar(select_liked_track_for_track(track_id))
     if liked_track is not None:
         await session.delete(liked_track)
+        session.add(
+            PersonalizationSignal(
+                track_id=track_id,
+                signal_type="unlike",
+                weight=-2.0,
+                source="api",
+                payload={"track_title": track.title, "artist": track.artist, "album": track.album},
+            )
+        )
         await session.commit()
         await record_user_action(
             session,
@@ -321,6 +348,7 @@ async def delete_track(
     await session.execute(delete(PlaylistTrack).where(PlaylistTrack.track_id == track_id))
     await session.execute(delete(LikedTrack).where(LikedTrack.track_id == track_id))
     await session.execute(delete(TrackPlay).where(TrackPlay.track_id == track_id))
+    await session.execute(delete(PersonalizationSignal).where(PersonalizationSignal.track_id == track_id))
     await clear_deleted_track_from_playback(session, track_id)
     await session.delete(track)
     await session.commit()

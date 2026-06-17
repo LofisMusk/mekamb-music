@@ -119,6 +119,18 @@ class TrackPlay(Base):
     played_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class PersonalizationSignal(Base):
+    __tablename__ = "personalization_signals"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    track_id: Mapped[UUID] = mapped_column(ForeignKey("tracks.id"), nullable=False, index=True)
+    signal_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    weight: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    source: Mapped[str] = mapped_column(String(64), default="api", nullable=False, index=True)
+    payload: Mapped[dict[str, object]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class PlaybackState(Base):
     __tablename__ = "playback_states"
 

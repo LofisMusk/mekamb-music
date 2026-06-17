@@ -59,9 +59,49 @@ struct Album: Identifiable, Hashable {
     var trackCountText: String { tracks.count == 1 ? "1 song" : "\(tracks.count) songs" }
 }
 
+struct DailyMix: Identifiable, Hashable {
+    let id: String
+    let title: String
+    let description: String
+    let seedLabel: String?
+    let tracks: [ApiTrack]
+}
+
 struct TrackListResponse: Codable { let items: [ApiTrack] }
 struct LikedTrackItem: Codable { let track: ApiTrack }
 struct LikedTracksResponse: Codable { let items: [LikedTrackItem] }
+
+struct RecommendationTrackPayload: Codable {
+    let track: ApiTrack
+    let score: Double?
+    let reasons: [String]?
+}
+
+struct DailyMixPayload: Codable {
+    let id: String
+    let title: String
+    let description: String
+    let seedLabel: String?
+    let tracks: [RecommendationTrackPayload]
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case description
+        case seedLabel = "seed_label"
+        case tracks
+    }
+}
+
+struct PersonalizedHomeResponse: Codable {
+    let recommendedTracks: [RecommendationTrackPayload]
+    let dailyMixes: [DailyMixPayload]
+
+    enum CodingKeys: String, CodingKey {
+        case recommendedTracks = "recommended_tracks"
+        case dailyMixes = "daily_mixes"
+    }
+}
 
 struct OfflineTrackRecord: Codable, Hashable {
     let track: ApiTrack
@@ -314,6 +354,12 @@ final class AppState: ObservableObject {
     @Published var offlineTrackIds: Set<String> = []
     @Published var offlineStorageBytes: Int = 0
     @Published var offlineStatusMessage: String?
+    @Published private(set) var albums: [Album] = []
+    @Published private(set) var homeRecommendedTracks: [ApiTrack] = []
+    @Published private(set) var dailyMixes: [DailyMix] = []
+    @Published private(set) var recentlyAddedTracks: [ApiTrack] = []
+    @Published private(set) var downloadedTracks: [ApiTrack] = []
+    @Published private(set) var likedTracksPreview: [ApiTrack] = []
 
     private var player: AVPlayer?
     private var timeObserver: Any?
@@ -323,6 +369,9 @@ final class AppState: ObservableObject {
     private var failedAlbumCoverIds: Set<String> = []
     private var didRestorePlaybackState = false
     private var offlineRecords: [String: OfflineTrackRecord] = [:]
+    private var backendRecommendedTrackIds: [String] = []
+    private var backendDailyMixes: [DailyMix] = []
+    private var lastPersonalizationRefreshAt: Date?
 
     private struct PlaybackSource {
         let url: URL
@@ -364,9 +413,49 @@ final class AppState: ObservableObject {
 
     var offlineStorageText: String { formatFileSize(offlineStorageBytes) }
 
-    var albums: [Album] {
-        let grouped = Dictionary(grouping: tracks) { track in stableAlbumKey(for: track) }
-        return grouped
+    private func rebuildDerivedLibraryState() {
+        let rebuiltAlbums = buildAlbumGroups(from: tracks)
+        let tracksById = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        let localRecommendations = buildHomeRecommendedTracks()
+        let backendRecommendations = backendRecommendedTrackIds.compactMap { tracksById[$0] }
+        let remappedBackendMixes = backendDailyMixes.compactMap { mix -> DailyMix? in
+            let remappedTracks = mix.tracks.compactMap { tracksById[$0.id] }
+            guard !remappedTracks.isEmpty else { return nil }
+            return DailyMix(
+                id: mix.id,
+                title: mix.title,
+                description: mix.description,
+                seedLabel: mix.seedLabel,
+                tracks: remappedTracks
+            )
+        }
+        albums = rebuiltAlbums
+        homeRecommendedTracks = backendRecommendations.isEmpty ? localRecommendations : Array(backendRecommendations.prefix(18))
+        dailyMixes = remappedBackendMixes.isEmpty
+            ? buildLocalDailyMixes(recommendedTracks: homeRecommendedTracks)
+            : remappedBackendMixes
+        recentlyAddedTracks = Array(tracks.sorted { left, right in
+            let leftCreated = createdTimestamp(left)
+            let rightCreated = createdTimestamp(right)
+            if leftCreated != rightCreated { return leftCreated > rightCreated }
+            return stableLibraryTrackOrder(left, right)
+        }.prefix(18))
+        downloadedTracks = Array(tracks.filter { offlineTrackIds.contains($0.id) }.sorted(by: stableLibraryTrackOrder).prefix(18))
+        likedTracksPreview = Array(tracks.filter { likedTrackIds.contains($0.id) }.sorted(by: stableLibraryTrackOrder).prefix(18))
+    }
+
+    private func buildAlbumGroups(from tracks: [ApiTrack]) -> [Album] {
+        var groups: [(key: String, tracks: [ApiTrack])] = []
+        for track in tracks {
+            let key = albumGroupingKey(for: track)
+            if let index = groups.firstIndex(where: { albumKeysMatch($0.key, key) }) {
+                groups[index].tracks.append(track)
+            } else {
+                groups.append((key: key, tracks: [track]))
+            }
+        }
+
+        return groups
             .map { key, albumTracks in
                 let sortedTracks = albumTracks.sorted(by: originalAlbumTrackOrder)
                 return Album(
@@ -378,6 +467,95 @@ final class AppState: ObservableObject {
                 )
             }
             .sorted(by: stableAlbumOrder)
+    }
+
+    private func buildHomeRecommendedTracks() -> [ApiTrack] {
+        let seeds = tracks.filter { likedTrackIds.contains($0.id) || offlineTrackIds.contains($0.id) }
+        if seeds.isEmpty {
+            return Array(tracks.sorted(by: dailyStableTrackOrder(salt: "home-empty")).prefix(18))
+        }
+
+        let base = Array(seeds.sorted(by: dailyStableTrackOrder(salt: "home-seeds")).prefix(24))
+        let baseIds = Set(base.map(\.id))
+        let candidates = tracks.filter { !baseIds.contains($0.id) }
+        let scored = candidates.map { candidate in
+            let seedScore = base.map { similarityScore(candidate, to: $0) }.max() ?? 0
+            let likedBoost = likedTrackIds.contains(candidate.id) ? 3 : 0
+            let offlineBoost = offlineTrackIds.contains(candidate.id) ? 1 : 0
+            let randomBoost = Int(stableShuffleScore(for: candidate.id, salt: dailyRecommendationSalt + "|home") % 6)
+            return (track: candidate, score: seedScore + likedBoost + offlineBoost + randomBoost)
+        }
+        return Array(scored
+            .sorted { left, right in
+                if left.score != right.score { return left.score > right.score }
+                return dailyStableTrackOrder(salt: "home-tie")(left.track, right.track)
+            }
+            .map(\.track)
+            .prefix(18))
+    }
+
+    private func buildLocalDailyMixes(recommendedTracks: [ApiTrack]) -> [DailyMix] {
+        guard !tracks.isEmpty else { return [] }
+        let interestTracks = tracks.filter { likedTrackIds.contains($0.id) || offlineTrackIds.contains($0.id) }
+        let seedTracks = interestTracks.isEmpty ? tracks : interestTracks
+        let grouped = Dictionary(grouping: seedTracks) { normalizedGroupingValue($0.artist) ?? $0.displayArtist.lowercased() }
+        let artistSeeds = grouped
+            .map { key, group in (key: key, tracks: group, score: group.count + group.filter { likedTrackIds.contains($0.id) }.count * 2) }
+            .sorted { left, right in
+                if left.score != right.score { return left.score > right.score }
+                return left.key < right.key
+            }
+
+        var mixes: [DailyMix] = []
+        var usedTrackIds = Set<String>()
+        for (index, seed) in artistSeeds.prefix(4).enumerated() {
+            let label = seed.tracks.first?.displayArtist ?? "Your Library"
+            let candidates = tracks
+                .map { track in
+                    (
+                        track: track,
+                        score: localDailyMixScore(track, seedTracks: seed.tracks, salt: "mix-\(index + 1)")
+                    )
+                }
+                .sorted { left, right in
+                    if left.score != right.score { return left.score > right.score }
+                    return dailyStableTrackOrder(salt: "mix-\(index + 1)-tie")(left.track, right.track)
+                }
+                .map(\.track)
+
+            var mixTracks: [ApiTrack] = []
+            for track in candidates {
+                if usedTrackIds.contains(track.id), tracks.count > 12 { continue }
+                mixTracks.append(track)
+                usedTrackIds.insert(track.id)
+                if mixTracks.count >= 12 { break }
+            }
+
+            if !mixTracks.isEmpty {
+                mixes.append(
+                    DailyMix(
+                        id: "local-daily-mix-\(dailyRecommendationSalt)-\(index + 1)",
+                        title: "Daily Mix \(index + 1)",
+                        description: "\(label) and similar picks",
+                        seedLabel: label,
+                        tracks: mixTracks
+                    )
+                )
+            }
+        }
+
+        if mixes.isEmpty, !recommendedTracks.isEmpty {
+            mixes.append(
+                DailyMix(
+                    id: "local-daily-mix-\(dailyRecommendationSalt)-1",
+                    title: "Daily Mix 1",
+                    description: "Fresh picks from your library",
+                    seedLabel: nil,
+                    tracks: Array(recommendedTracks.prefix(12))
+                )
+            )
+        }
+        return mixes
     }
 
     var filteredTracks: [ApiTrack] {
@@ -422,25 +600,24 @@ final class AppState: ObservableObject {
     }
 
     func testConnection() async {
+        guard !isTestingConnection else { return }
         isTestingConnection = true
+        defer { isTestingConnection = false }
         errorMessage = nil
         connectionStatus = nil
         do {
             let _: EmptyResponse = try await request("/health", requiresAuth: false)
             connectionStatus = "Connected to \(normalizedEndpoint)"
         } catch {
-            guard !isCancellation(error) else {
-                isTestingConnection = false
-                return
-            }
+            guard !isCancellation(error) else { return }
             let message = clean(error)
             connectionStatus = "Connection failed: \(message)"
             errorMessage = message
         }
-        isTestingConnection = false
     }
 
     func refreshLibrary() async {
+        guard !isLoading else { return }
         guard canUseApi else {
             if offlineTrackIds.isEmpty {
                 errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
@@ -451,6 +628,7 @@ final class AppState: ObservableObject {
             return
         }
         isLoading = true
+        defer { isLoading = false }
         errorMessage = nil
         do {
             async let likedIds = loadAllLikedTrackIds()
@@ -458,9 +636,11 @@ final class AppState: ObservableObject {
             let (newLikedIds, newTracks) = try await (likedIds, allTracks)
             likedTrackIds = newLikedIds
             tracks = mergeTracks(existing: tracks, incoming: newTracks).sorted(by: stableLibraryTrackOrder)
+            rebuildDerivedLibraryState()
             syncQueueWithLibrary()
             restorePlaybackStateIfNeeded()
             selectedAlbumId = selectedAlbumId.flatMap { id in albums.contains(where: { $0.id == id }) ? id : nil }
+            await loadPersonalizedHome()
             Task { await loadMissingAlbumCovers() }
         } catch {
             if !isCancellation(error) {
@@ -468,7 +648,6 @@ final class AppState: ObservableObject {
                 errorMessage = offlineTrackIds.isEmpty ? message : "\(message) Showing downloaded songs."
             }
         }
-        isLoading = false
     }
 
     func loadMissingAlbumCovers() async {
@@ -546,17 +725,19 @@ final class AppState: ObservableObject {
     func toggleLike(_ track: ApiTrack) async {
         let willLike = !likedTrackIds.contains(track.id)
         if willLike { likedTrackIds.insert(track.id) } else { likedTrackIds.remove(track.id) }
+        rebuildDerivedLibraryState()
         do {
             let encodedId = encodePathComponent(track.id)
             let _: EmptyResponse = try await request("/tracks/\(encodedId)/like", method: willLike ? "PUT" : "DELETE")
         } catch {
             if willLike { likedTrackIds.remove(track.id) } else { likedTrackIds.insert(track.id) }
+            rebuildDerivedLibraryState()
             if !isCancellation(error) { errorMessage = clean(error) }
         }
     }
 
     func isTrackAvailableOffline(_ track: ApiTrack) -> Bool {
-        localOfflineFileURL(for: track) != nil
+        offlineTrackIds.contains(track.id)
     }
 
     func isAlbumAvailableOffline(_ album: Album) -> Bool {
@@ -643,6 +824,43 @@ final class AppState: ObservableObject {
             offlineStatusMessage = "Removed all downloads."
         } catch {
             errorMessage = "Could not remove downloads: \(clean(error))"
+        }
+    }
+
+    func deleteAlbum(_ album: Album) async {
+        guard canUseApi else {
+            errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
+            return
+        }
+        isLoading = true
+        defer { isLoading = false }
+        errorMessage = nil
+
+        var deletedIds = Set<String>()
+        do {
+            for track in album.tracks {
+                let encodedId = encodePathComponent(track.id)
+                let _: EmptyResponse = try await request("/tracks/\(encodedId)?delete_file=true", method: "DELETE")
+                deletedIds.insert(track.id)
+                _ = try? removeOfflineRecord(trackId: track.id)
+            }
+            try? writeOfflineRecords()
+            tracks.removeAll { deletedIds.contains($0.id) }
+            likedTrackIds.subtract(deletedIds)
+            playbackQueue.removeAll { deletedIds.contains($0.id) }
+            stopPlaybackIfNeededAfterRemoving(trackIds: deletedIds)
+            refreshOfflineState()
+            selectedAlbumId = nil
+            offlineStatusMessage = "Deleted \(album.title)."
+        } catch {
+            if !deletedIds.isEmpty {
+                tracks.removeAll { deletedIds.contains($0.id) }
+                likedTrackIds.subtract(deletedIds)
+                playbackQueue.removeAll { deletedIds.contains($0.id) }
+                stopPlaybackIfNeededAfterRemoving(trackIds: deletedIds)
+                refreshOfflineState()
+            }
+            if !isCancellation(error) { errorMessage = "Could not delete album: \(clean(error))" }
         }
     }
 
@@ -881,6 +1099,43 @@ final class AppState: ObservableObject {
         return ids
     }
 
+    private func loadPersonalizedHome(silent: Bool = true) async {
+        guard canUseApi else {
+            backendRecommendedTrackIds = []
+            backendDailyMixes = []
+            rebuildDerivedLibraryState()
+            return
+        }
+
+        do {
+            let response: PersonalizedHomeResponse = try await request(
+                "/recommendations/personalized?local_limit=24&mix_count=4&mix_size=12"
+            )
+            let receivedTracks = response.recommendedTracks.map(\.track)
+                + response.dailyMixes.flatMap { $0.tracks.map(\.track) }
+            if !receivedTracks.isEmpty {
+                tracks = mergeTracks(existing: tracks, incoming: receivedTracks).sorted(by: stableLibraryTrackOrder)
+            }
+            backendRecommendedTrackIds = response.recommendedTracks.map { $0.track.id }
+            backendDailyMixes = response.dailyMixes.map { mix in
+                DailyMix(
+                    id: mix.id,
+                    title: mix.title,
+                    description: mix.description,
+                    seedLabel: mix.seedLabel,
+                    tracks: mix.tracks.map(\.track)
+                )
+            }
+            lastPersonalizationRefreshAt = Date()
+            rebuildDerivedLibraryState()
+        } catch {
+            backendRecommendedTrackIds = []
+            backendDailyMixes = []
+            rebuildDerivedLibraryState()
+            if !silent, !isCancellation(error) { errorMessage = clean(error) }
+        }
+    }
+
     private func searchLegacyTorrentSources(encodedQuery: String) async throws -> [TorrentResult] {
         async let pirateBaySearch = torrentSearchResult(source: .pirateBay, encodedQuery: encodedQuery)
         async let thirteenThirtySevenSearch = torrentSearchResult(source: .thirteenThirtySevenX, encodedQuery: encodedQuery)
@@ -984,6 +1239,7 @@ final class AppState: ObservableObject {
             }
             return total + size
         }
+        rebuildDerivedLibraryState()
     }
 
     private func readOfflineRecords() throws -> [OfflineTrackRecord] {
@@ -1140,6 +1396,40 @@ final class AppState: ObservableObject {
         return score + min(sharedTitleTokens, 2)
     }
 
+    private func localDailyMixScore(_ candidate: ApiTrack, seedTracks: [ApiTrack], salt: String) -> Int {
+        let seedScore = seedTracks.map { similarityScore(candidate, to: $0) }.max() ?? 0
+        let likedBoost = likedTrackIds.contains(candidate.id) ? 4 : 0
+        let offlineBoost = offlineTrackIds.contains(candidate.id) ? 1 : 0
+        let randomBoost = Int(stableShuffleScore(for: candidate.id, salt: dailyRecommendationSalt + "|\(salt)") % 8)
+        return seedScore + likedBoost + offlineBoost + randomBoost
+    }
+
+    private func dailyStableTrackOrder(salt: String) -> (ApiTrack, ApiTrack) -> Bool {
+        { [self] left, right in
+            let leftScore = self.stableShuffleScore(for: left.id, salt: self.dailyRecommendationSalt + "|\(salt)")
+            let rightScore = self.stableShuffleScore(for: right.id, salt: self.dailyRecommendationSalt + "|\(salt)")
+            if leftScore != rightScore { return leftScore > rightScore }
+            return self.stableLibraryTrackOrder(left, right)
+        }
+    }
+
+    private var dailyRecommendationSalt: String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+
+    private func stableShuffleScore(for value: String, salt: String) -> UInt64 {
+        var hash: UInt64 = 1_469_598_103_934_665_603
+        for byte in "\(salt)|\(value)".utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 1_099_511_628_211
+        }
+        return hash
+    }
+
     private func titleTokens(_ title: String) -> Set<String> {
         let separators = CharacterSet.alphanumerics.inverted
         return Set(title
@@ -1201,6 +1491,9 @@ final class AppState: ObservableObject {
         guard canUseApi else { return }
         let encodedId = encodePathComponent(track.id)
         let _: EmptyResponse = try await request("/tracks/\(encodedId)/plays", method: "POST")
+        if lastPersonalizationRefreshAt.map({ Date().timeIntervalSince($0) > 60 }) ?? true {
+            await loadPersonalizedHome()
+        }
     }
 
     private func loadArtwork(trackId: String) async throws -> UIImage? {
@@ -1343,8 +1636,65 @@ final class AppState: ObservableObject {
     }
 
     private func stableAlbumKey(for track: ApiTrack) -> String {
-        let normalizedAlbum = normalizedGroupingValue(track.album) ?? normalizedGroupingValue(track.originalFilename) ?? track.id
-        return "album|\(normalizedAlbum)"
+        albumGroupingKey(for: track)
+    }
+
+    private func albumGroupingKey(for track: ApiTrack) -> String {
+        let artist = normalizedAlbumArtist(track.artist)
+        let album = normalizedAlbumTitle(track.album)
+            ?? normalizedAlbumTitle(albumCandidateFromFilename(track.originalFilename))
+            ?? normalizedAlbumTitle(track.title)
+            ?? track.id.lowercased()
+        return "album|\(artist)|\(album)"
+    }
+
+    private func albumKeysMatch(_ left: String, _ right: String) -> Bool {
+        if left == right { return true }
+        let leftParts = left.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        let rightParts = right.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        guard leftParts.count >= 3, rightParts.count >= 3, leftParts[1] == rightParts[1] else { return false }
+        let leftAlbum = leftParts[2]
+        let rightAlbum = rightParts[2]
+        guard min(leftAlbum.count, rightAlbum.count) >= 8 else { return false }
+        return leftAlbum.hasPrefix(rightAlbum) || rightAlbum.hasPrefix(leftAlbum)
+    }
+
+    private func normalizedAlbumArtist(_ value: String?) -> String {
+        guard let value = cleanDisplayValue(value) else { return "unknown artist" }
+        return normalizedGroupingValue(primaryAlbumArtist(value)) ?? "unknown artist"
+    }
+
+    private func primaryAlbumArtist(_ artist: String) -> String {
+        artist
+            .replacingOccurrences(of: "\\s+(feat\\.?|ft\\.?|featuring)\\s+.*$", with: "", options: [.regularExpression, .caseInsensitive])
+            .components(separatedBy: CharacterSet(charactersIn: ",&/"))
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? artist
+    }
+
+    private func normalizedAlbumTitle(_ value: String?) -> String? {
+        guard var value = cleanDisplayValue(value) else { return nil }
+        value = value.replacingOccurrences(of: #"\.[A-Za-z0-9]{2,5}$"#, with: "", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"\([^)]*\)|\[[^]]*\]"#, with: " ", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"(?i)\b(deluxe|explicit|clean|remaster(?:ed)?|bonus|itunes|apple music|spotify|web|flac|mp3|m4a|320|lossless|album)\b"#, with: " ", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"(?i)\b(cd|disc)\s*\d+\b"#, with: " ", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"^[\d\s._-]+"#, with: "", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"[._-]+"#, with: " ", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        value = value.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".-_…")))
+        return normalizedGroupingValue(value)
+    }
+
+    private func albumCandidateFromFilename(_ filename: String?) -> String? {
+        guard var filename = cleanDisplayValue(filename) else { return nil }
+        filename = filename.replacingOccurrences(of: #"\.[A-Za-z0-9]{2,5}$"#, with: "", options: .regularExpression)
+        filename = filename.replacingOccurrences(of: #"^\s*\d{1,3}\s*[-._)]\s*"#, with: "", options: .regularExpression)
+        let separators = [" - ", " – ", " — "]
+        for separator in separators {
+            let parts = filename.components(separatedBy: separator)
+            if parts.count >= 3 { return parts[1] }
+        }
+        return filename
     }
 
     private func normalizedGroupingValue(_ value: String?) -> String? {

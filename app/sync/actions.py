@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.models import (
     LikedTrack,
+    PersonalizationSignal,
     PlaybackQueueItem,
     PlaybackState,
     PlaylistTrack,
@@ -174,11 +175,31 @@ async def _apply_like_track(session: AsyncSession, action: UserAction) -> None:
     liked = await session.scalar(select(LikedTrack).where(LikedTrack.track_id == track_id))
     if liked is None:
         session.add(LikedTrack(track_id=track_id))
+        session.add(
+            PersonalizationSignal(
+                track_id=track_id,
+                signal_type="like",
+                weight=4.0,
+                source="sync",
+                payload={"track_title": track.title, "artist": track.artist, "album": track.album},
+            )
+        )
 
 
 async def _apply_unlike_track(session: AsyncSession, action: UserAction) -> None:
     track_id = _track_id_from_action(action)
     await session.execute(delete(LikedTrack).where(LikedTrack.track_id == track_id))
+    track = await session.get(Track, track_id)
+    if track is not None:
+        session.add(
+            PersonalizationSignal(
+                track_id=track_id,
+                signal_type="unlike",
+                weight=-2.0,
+                source="sync",
+                payload={"track_title": track.title, "artist": track.artist, "album": track.album},
+            )
+        )
 
 
 async def _apply_delete_track(session: AsyncSession, action: UserAction) -> None:
@@ -189,6 +210,7 @@ async def _apply_delete_track(session: AsyncSession, action: UserAction) -> None
         await session.execute(delete(PlaylistTrack).where(PlaylistTrack.track_id == track_id))
         await session.execute(delete(LikedTrack).where(LikedTrack.track_id == track_id))
         await session.execute(delete(TrackPlay).where(TrackPlay.track_id == track_id))
+        await session.execute(delete(PersonalizationSignal).where(PersonalizationSignal.track_id == track_id))
         await session.execute(delete(PlaybackQueueItem).where(PlaybackQueueItem.track_id == track_id))
         await session.execute(
             update(PlaybackState)

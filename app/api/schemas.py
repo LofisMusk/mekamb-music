@@ -120,6 +120,19 @@ class RecommendationResponse(BaseModel):
     external_candidates: list[RecommendationSourceCandidateResponse]
 
 
+class DailyMixResponse(BaseModel):
+    id: str
+    title: str
+    description: str
+    seed_label: str
+    tracks: list[RecommendationTrackItemResponse]
+
+
+class PersonalizedHomeResponse(BaseModel):
+    recommended_tracks: list[RecommendationTrackItemResponse]
+    daily_mixes: list[DailyMixResponse]
+
+
 class RecommendationImportRequest(BaseModel):
     limit: int = Field(default=3, ge=1, le=20)
     sources: list[str] | None = None

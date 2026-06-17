@@ -71,6 +71,31 @@ In the app Settings screen, set the backend endpoint and API token. For a
 physical iPhone, do not use `localhost`; use your Mac/server LAN IP, for example
 `http://192.168.1.50:8000`.
 
+## Native Android App
+
+A native Android client lives in `native-android/`. It does not use Electron,
+React, Capacitor, or a WebView. It talks directly to the FastAPI backend and
+streams tracks with Android `MediaPlayer`.
+
+Open it in Android Studio:
+
+```bash
+open -a "Android Studio" native-android
+```
+
+Or build the debug APK from the terminal:
+
+```bash
+cd native-android
+ANDROID_HOME="$HOME/Library/Android/sdk" \
+JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
+./gradlew :app:assembleDebug
+```
+
+The APK is written to `native-android/app/build/outputs/apk/debug/app-debug.apk`.
+On a physical Android phone, use your Mac/server LAN IP for the API endpoint,
+not `localhost`.
+
 Compose waits for Postgres and Redis healthchecks before starting the app.
 MinIO readiness is handled by `minio-init`, which waits for MinIO and creates
 the configured bucket before API/worker containers continue.

@@ -43,7 +43,6 @@ struct RootView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .layoutPriority(1)
                     .contentShape(Rectangle())
-                    .simultaneousGesture(TapGesture().onEnded { dismissSearch() })
 
                 PlayerBar()
                     .environmentObject(app)
@@ -206,9 +205,9 @@ struct LibraryView: View {
 
     var body: some View {
         ScrollView {
-            LazyVStack(spacing: 10) {
+            LazyVStack(alignment: .leading, spacing: 22) {
                 HStack {
-                    Text(app.selectedTab == .liked ? "Liked Songs" : "Your Library")
+                    Text(app.selectedTab == .liked ? "Liked Songs" : "Made For You")
                         .font(.title2.bold())
                     Spacer()
                     if app.isLoading { ProgressView() }
@@ -216,21 +215,245 @@ struct LibraryView: View {
                 .padding(.horizontal)
                 .padding(.top, 12)
 
-                if app.filteredTracks.isEmpty {
+                if app.selectedTab == .liked {
+                    likedSongsContent
+                } else if app.tracks.isEmpty {
                     ContentUnavailableView(app.canUseApi ? "No tracks" : "Connect API", systemImage: app.canUseApi ? "music.note" : "wifi.exclamationmark", description: Text(app.canUseApi ? "Import music on the backend or try another search." : "Open Settings and set endpoint + token."))
                         .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
                         .padding(.top, 48)
+                } else if !app.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    TrackShelfView(title: "Search Results", tracks: Array(app.filteredTracks.prefix(24)))
+                        .environmentObject(app)
                 } else {
-                    ForEach(app.filteredTracks) { track in
-                        TrackRowNative(track: track)
-                            .environmentObject(app)
-                            .padding(.horizontal)
-                    }
+                    homeContent
                 }
             }
-            .padding(.bottom, 10)
+            .padding(.bottom, 24)
         }
         .refreshable { await app.refreshLibrary() }
+    }
+
+    @ViewBuilder
+    private var likedSongsContent: some View {
+        if app.filteredTracks.isEmpty {
+            ContentUnavailableView("No liked tracks", systemImage: "heart", description: Text("Heart songs from your library to build this collection."))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 48)
+        } else {
+            LazyVStack(spacing: 10) {
+                ForEach(app.filteredTracks) { track in
+                    TrackRowNative(track: track)
+                        .environmentObject(app)
+                        .padding(.horizontal)
+                }
+            }
+        }
+    }
+
+    private var homeContent: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            DailyMixShelfView(mixes: app.dailyMixes)
+                .environmentObject(app)
+
+            TrackShelfView(title: "Recommended For You", tracks: app.homeRecommendedTracks)
+                .environmentObject(app)
+
+            TrackShelfView(title: "Recently Added", tracks: app.recentlyAddedTracks)
+                .environmentObject(app)
+
+            if !app.downloadedTracks.isEmpty {
+                TrackShelfView(title: "Available Offline", tracks: app.downloadedTracks)
+                    .environmentObject(app)
+            }
+
+            if !app.likedTracksPreview.isEmpty {
+                TrackShelfView(title: "Your Liked Mix", tracks: app.likedTracksPreview)
+                    .environmentObject(app)
+            }
+        }
+    }
+}
+
+struct DailyMixShelfView: View {
+    @EnvironmentObject private var app: AppState
+    let mixes: [DailyMix]
+
+    var body: some View {
+        if !mixes.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Daily Mixes")
+                    .font(.headline)
+                    .padding(.horizontal)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 14) {
+                        ForEach(mixes) { mix in
+                            DailyMixCard(mix: mix)
+                                .environmentObject(app)
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+            }
+        }
+    }
+}
+
+struct DailyMixCard: View {
+    @EnvironmentObject private var app: AppState
+    let mix: DailyMix
+
+    var body: some View {
+        Button {
+            if let first = mix.tracks.first {
+                app.play(first, queue: mix.tracks)
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                ZStack(alignment: .bottomLeading) {
+                    if let firstTrack = mix.tracks.first {
+                        TrackArtworkView(track: firstTrack, size: 156)
+                            .environmentObject(app)
+                    } else {
+                        LinearGradient(colors: [.green.opacity(0.65), .blue.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                            .frame(width: 156, height: 156)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+
+                    Image(systemName: "play.fill")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.black)
+                        .padding(8)
+                        .background(Color.white)
+                        .clipShape(Circle())
+                        .padding(10)
+                }
+
+                Text(mix.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Text(mix.description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .frame(height: 34, alignment: .topLeading)
+            }
+            .frame(width: 156, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct TrackShelfView: View {
+    @EnvironmentObject private var app: AppState
+    let title: String
+    let tracks: [ApiTrack]
+
+    var body: some View {
+        if !tracks.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(title)
+                    .font(.headline)
+                    .padding(.horizontal)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 14) {
+                        ForEach(tracks) { track in
+                            TrackRecommendationCard(track: track)
+                                .environmentObject(app)
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+            }
+        }
+    }
+}
+
+struct AlbumShelfView: View {
+    @EnvironmentObject private var app: AppState
+    let title: String
+    let albums: [Album]
+
+    var body: some View {
+        if !albums.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(title)
+                    .font(.headline)
+                    .padding(.horizontal)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 14) {
+                        ForEach(albums) { album in
+                            AlbumRecommendationCard(album: album)
+                                .environmentObject(app)
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+            }
+        }
+    }
+}
+
+struct TrackRecommendationCard: View {
+    @EnvironmentObject private var app: AppState
+    let track: ApiTrack
+
+    var body: some View {
+        Button {
+            app.play(track)
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                TrackArtworkView(track: track, size: 132)
+                    .environmentObject(app)
+                Text(track.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .frame(height: 38, alignment: .topLeading)
+                Text(track.displayArtist)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(width: 132, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct AlbumRecommendationCard: View {
+    @EnvironmentObject private var app: AppState
+    let album: Album
+
+    var body: some View {
+        Button {
+            app.selectedTab = .albums
+            app.selectedAlbumId = album.id
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                AlbumArtworkView(album: album, size: 132)
+                    .environmentObject(app)
+                Text(album.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .frame(height: 38, alignment: .topLeading)
+                Text("\(album.artist) • \(album.trackCountText)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(width: 132, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -347,6 +570,14 @@ struct AlbumDetailView: View {
                             }
                             .buttonStyle(.bordered)
                         }
+
+                        Button(role: .destructive) {
+                            Task { await app.deleteAlbum(album) }
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(app.isLoading)
                     }
                     .padding(.top, 6)
                 }
@@ -1100,16 +1331,36 @@ struct SettingsView: View {
                 Button {
                     Task { await app.testConnection() }
                 } label: {
-                    if app.isTestingConnection {
-                        ProgressView()
-                    } else {
-                        Text("Test connection")
+                    Label {
+                        Text(app.isTestingConnection ? "Testing connection..." : "Test connection")
+                    } icon: {
+                        if app.isTestingConnection {
+                            ProgressView()
+                        } else {
+                            Image(systemName: "network")
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .center)
                 }
+                .buttonStyle(.borderedProminent)
+                .disabled(app.isTestingConnection)
 
-                Button("Refresh library") {
+                Button {
                     Task { await app.refreshLibrary() }
+                } label: {
+                    Label {
+                        Text(app.isLoading ? "Refreshing library..." : "Refresh library")
+                    } icon: {
+                        if app.isLoading {
+                            ProgressView()
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .center)
                 }
+                .buttonStyle(.bordered)
+                .disabled(app.isLoading)
             }
 
             Section("Detected endpoint") {

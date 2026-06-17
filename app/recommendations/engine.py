@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import logging
+import random
 import re
+from collections import defaultdict
 from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import ImportJob, LikedTrack, Track, TrackPlay
+from app.db.models import ImportJob, LikedTrack, PersonalizationSignal, Track, TrackPlay
 from app.sources.indexers import MusicIndexerProvider
 from app.sources.personal_1337x import Personal1337xProvider
 from app.sources.piratebay import PirateBayProvider
@@ -38,6 +41,30 @@ class RecommendationSet:
     seed_track: Track | None
     local_tracks: list[LocalTrackRecommendation]
     external_candidates: list[ExternalRecommendation]
+
+
+@dataclass(frozen=True)
+class DailyMix:
+    id: str
+    title: str
+    description: str
+    seed_label: str
+    tracks: list[LocalTrackRecommendation]
+
+
+@dataclass(frozen=True)
+class PersonalizedHome:
+    recommended_tracks: list[LocalTrackRecommendation]
+    daily_mixes: list[DailyMix]
+
+
+@dataclass
+class PersonalizationProfile:
+    track_weights: dict[UUID, float]
+    artist_weights: dict[str, float]
+    album_weights: dict[str, float]
+    token_weights: dict[str, float]
+    seed_labels: list[str]
 
 
 class RecommendationEngine:
@@ -97,6 +124,30 @@ class RecommendationEngine:
         )
         return RecommendationSet(seed_track=seed_tracks[0] if seed_tracks else None, local_tracks=local, external_candidates=external)
 
+    async def personalized_home(
+        self,
+        *,
+        local_limit: int,
+        mix_count: int,
+        mix_size: int,
+    ) -> PersonalizedHome:
+        tracks = list(await self.session.scalars(select(Track)))
+        if not tracks:
+            return PersonalizedHome(recommended_tracks=[], daily_mixes=[])
+
+        profile = await self._personalization_profile()
+        day = date.today().isoformat()
+        scored = _score_personalized_tracks(tracks, profile=profile, day=day, salt="home")
+        recommended = _diversify_recommendations(scored, limit=local_limit)
+        mixes = _build_daily_mixes(
+            tracks,
+            profile=profile,
+            day=day,
+            mix_count=mix_count,
+            mix_size=mix_size,
+        )
+        return PersonalizedHome(recommended_tracks=recommended, daily_mixes=mixes)
+
     async def _library_seed_tracks(self, *, limit: int) -> list[Track]:
         liked_rows = await self.session.scalars(
             select(Track)
@@ -123,6 +174,73 @@ class RecommendationEngine:
 
         fallback = await self.session.scalars(select(Track).order_by(Track.created_at.desc()).limit(limit))
         return list(fallback)
+
+    async def _personalization_profile(self) -> PersonalizationProfile:
+        track_weights: defaultdict[UUID, float] = defaultdict(float)
+        artist_weights: defaultdict[str, float] = defaultdict(float)
+        album_weights: defaultdict[str, float] = defaultdict(float)
+        token_weights: defaultdict[str, float] = defaultdict(float)
+        seed_labels: list[str] = []
+
+        signal_rows = await self.session.execute(
+            select(PersonalizationSignal, Track)
+            .join(Track, Track.id == PersonalizationSignal.track_id)
+            .order_by(PersonalizationSignal.created_at.desc())
+            .limit(800)
+        )
+        for signal, track in signal_rows:
+            weight = signal.weight * _recency_multiplier(signal.created_at)
+            _add_track_interest(
+                track,
+                weight=weight,
+                track_weights=track_weights,
+                artist_weights=artist_weights,
+                album_weights=album_weights,
+                token_weights=token_weights,
+                seed_labels=seed_labels,
+            )
+
+        liked_rows = await self.session.execute(
+            select(LikedTrack, Track)
+            .join(Track, Track.id == LikedTrack.track_id)
+            .order_by(LikedTrack.created_at.desc())
+            .limit(200)
+        )
+        for liked, track in liked_rows:
+            _add_track_interest(
+                track,
+                weight=3.5 * _recency_multiplier(liked.created_at, half_life_days=90),
+                track_weights=track_weights,
+                artist_weights=artist_weights,
+                album_weights=album_weights,
+                token_weights=token_weights,
+                seed_labels=seed_labels,
+            )
+
+        play_rows = await self.session.execute(
+            select(TrackPlay, Track)
+            .join(Track, Track.id == TrackPlay.track_id)
+            .order_by(TrackPlay.played_at.desc())
+            .limit(300)
+        )
+        for play, track in play_rows:
+            _add_track_interest(
+                track,
+                weight=1.0 * _recency_multiplier(play.played_at),
+                track_weights=track_weights,
+                artist_weights=artist_weights,
+                album_weights=album_weights,
+                token_weights=token_weights,
+                seed_labels=seed_labels,
+            )
+
+        return PersonalizationProfile(
+            track_weights=dict(track_weights),
+            artist_weights=dict(artist_weights),
+            album_weights=dict(album_weights),
+            token_weights=dict(token_weights),
+            seed_labels=_dedupe_text(seed_labels)[:12],
+        )
 
     async def _local_recommendations_for_seed(
         self,
@@ -281,6 +399,271 @@ def _score_track_against_seed(seed: Track, candidate: Track) -> LocalTrackRecomm
             reasons.append("near_duration")
 
     return LocalTrackRecommendation(track=candidate, score=round(score, 2), reasons=reasons)
+
+
+def _score_personalized_tracks(
+    tracks: list[Track],
+    *,
+    profile: PersonalizationProfile,
+    day: str,
+    salt: str,
+) -> list[LocalTrackRecommendation]:
+    if not profile.track_weights and not profile.artist_weights and not profile.album_weights:
+        return [
+            LocalTrackRecommendation(
+                track=track,
+                score=round(_daily_jitter(track.id, day=day, salt=salt) * 20.0, 2),
+                reasons=["daily_shuffle"],
+            )
+            for track in tracks
+        ]
+
+    scored: list[LocalTrackRecommendation] = []
+    for track in tracks:
+        score = 0.0
+        reasons: list[str] = []
+        artist_key = _profile_key(track.artist)
+        album_key = _profile_key(track.album)
+
+        direct_weight = profile.track_weights.get(track.id, 0.0)
+        if direct_weight:
+            score += min(18.0, max(-8.0, direct_weight * 2.0))
+            reasons.append("listening_history")
+        if artist_key and artist_key in profile.artist_weights:
+            score += min(55.0, profile.artist_weights[artist_key] * 4.0)
+            reasons.append("artist_interest")
+        if album_key and album_key in profile.album_weights:
+            score += min(22.0, profile.album_weights[album_key] * 2.2)
+            reasons.append("album_interest")
+
+        token_hits = 0
+        for token in _tokens(f"{track.title} {track.artist or ''} {track.album or ''}"):
+            weight = profile.token_weights.get(token, 0.0)
+            if weight > 0:
+                token_hits += 1
+                score += min(4.0, weight)
+        if token_hits:
+            reasons.append("metadata_interest")
+
+        score += _daily_jitter(track.id, day=day, salt=salt) * 16.0
+        if score > 0:
+            scored.append(
+                LocalTrackRecommendation(
+                    track=track,
+                    score=round(score, 2),
+                    reasons=reasons or ["daily_shuffle"],
+                )
+            )
+
+    return sorted(scored, key=lambda item: item.score, reverse=True)
+
+
+def _diversify_recommendations(
+    scored: list[LocalTrackRecommendation],
+    *,
+    limit: int,
+    max_per_artist: int = 4,
+) -> list[LocalTrackRecommendation]:
+    if limit <= 0:
+        return []
+    selected: list[LocalTrackRecommendation] = []
+    artist_counts: defaultdict[str, int] = defaultdict(int)
+    for item in scored:
+        artist_key = _profile_key(item.track.artist) or "unknown"
+        if artist_counts[artist_key] >= max_per_artist:
+            continue
+        selected.append(item)
+        artist_counts[artist_key] += 1
+        if len(selected) >= limit:
+            return selected
+
+    seen = {item.track.id for item in selected}
+    for item in scored:
+        if item.track.id in seen:
+            continue
+        selected.append(item)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _build_daily_mixes(
+    tracks: list[Track],
+    *,
+    profile: PersonalizationProfile,
+    day: str,
+    mix_count: int,
+    mix_size: int,
+) -> list[DailyMix]:
+    if mix_count <= 0 or mix_size <= 0:
+        return []
+
+    seeds = _daily_mix_seeds(profile, tracks, limit=max(mix_count, 1))
+    mixes: list[DailyMix] = []
+    used_mix_track_ids: set[UUID] = set()
+    for index, (kind, key, label) in enumerate(seeds[:mix_count], start=1):
+        candidates = _score_mix_candidates(
+            tracks,
+            profile=profile,
+            kind=kind,
+            key=key,
+            day=day,
+            salt=f"mix-{index}",
+        )
+        mix_tracks: list[LocalTrackRecommendation] = []
+        for item in candidates:
+            if item.track.id in used_mix_track_ids and len(tracks) > mix_size:
+                continue
+            mix_tracks.append(item)
+            used_mix_track_ids.add(item.track.id)
+            if len(mix_tracks) >= mix_size:
+                break
+        if not mix_tracks:
+            continue
+
+        featured = _mix_featured_artists(mix_tracks)
+        description = f"Based on {label}"
+        if featured:
+            description = f"{featured} and similar picks"
+        mixes.append(
+            DailyMix(
+                id=f"daily-mix-{day}-{index}",
+                title=f"Daily Mix {index}",
+                description=description,
+                seed_label=label,
+                tracks=mix_tracks,
+            )
+        )
+
+    return mixes
+
+
+def _daily_mix_seeds(
+    profile: PersonalizationProfile,
+    tracks: list[Track],
+    *,
+    limit: int,
+) -> list[tuple[str, str, str]]:
+    seeds: list[tuple[str, str, str]] = []
+    for key, _ in sorted(profile.artist_weights.items(), key=lambda item: item[1], reverse=True):
+        label = _display_label_for_key(key, [track.artist for track in tracks])
+        if label:
+            seeds.append(("artist", key, label))
+    for key, _ in sorted(profile.album_weights.items(), key=lambda item: item[1], reverse=True):
+        label = _display_label_for_key(key, [track.album for track in tracks])
+        if label:
+            seeds.append(("album", key, label))
+    for token, _ in sorted(profile.token_weights.items(), key=lambda item: item[1], reverse=True):
+        seeds.append(("token", token, token.title()))
+
+    if not seeds:
+        by_artist: defaultdict[str, list[Track]] = defaultdict(list)
+        for track in tracks:
+            by_artist[_profile_key(track.artist) or "unknown"].append(track)
+        for key, group in sorted(by_artist.items(), key=lambda item: len(item[1]), reverse=True):
+            label = group[0].artist or "your library"
+            seeds.append(("artist", key, label))
+
+    deduped: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for seed in seeds:
+        seed_key = (seed[0], seed[1])
+        if seed_key in seen:
+            continue
+        deduped.append(seed)
+        seen.add(seed_key)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
+def _score_mix_candidates(
+    tracks: list[Track],
+    *,
+    profile: PersonalizationProfile,
+    kind: str,
+    key: str,
+    day: str,
+    salt: str,
+) -> list[LocalTrackRecommendation]:
+    base = _score_personalized_tracks(tracks, profile=profile, day=day, salt=salt)
+    boosted: list[LocalTrackRecommendation] = []
+    for item in base:
+        track = item.track
+        boost = 0.0
+        reasons = list(item.reasons)
+        if kind == "artist" and _profile_key(track.artist) == key:
+            boost += 42.0
+            reasons.append("daily_mix_artist")
+        elif kind == "album" and _profile_key(track.album) == key:
+            boost += 34.0
+            reasons.append("daily_mix_album")
+        elif kind == "token" and key in _tokens(f"{track.title} {track.artist or ''} {track.album or ''}"):
+            boost += 28.0
+            reasons.append("daily_mix_theme")
+        boosted.append(
+            LocalTrackRecommendation(
+                track=track,
+                score=round(item.score + boost, 2),
+                reasons=_dedupe_text(reasons),
+            )
+        )
+    return sorted(boosted, key=lambda item: item.score, reverse=True)
+
+
+def _add_track_interest(
+    track: Track,
+    *,
+    weight: float,
+    track_weights: defaultdict[UUID, float],
+    artist_weights: defaultdict[str, float],
+    album_weights: defaultdict[str, float],
+    token_weights: defaultdict[str, float],
+    seed_labels: list[str],
+) -> None:
+    if weight == 0:
+        return
+    track_weights[track.id] += weight
+    artist_key = _profile_key(track.artist)
+    album_key = _profile_key(track.album)
+    if artist_key:
+        artist_weights[artist_key] += weight
+        if weight > 0 and track.artist:
+            seed_labels.append(track.artist)
+    if album_key:
+        album_weights[album_key] += weight * 0.65
+    for token in _tokens(f"{track.title} {track.artist or ''} {track.album or ''}"):
+        token_weights[token] += weight * 0.3
+
+
+def _recency_multiplier(value: datetime | None, *, half_life_days: int = 45) -> float:
+    if value is None:
+        return 1.0
+    current = datetime.now(UTC)
+    comparable = value if value.tzinfo else value.replace(tzinfo=UTC)
+    age_days = max((current - comparable).total_seconds() / 86_400, 0.0)
+    return max(0.15, 0.5 ** (age_days / half_life_days))
+
+
+def _daily_jitter(track_id: UUID, *, day: str, salt: str) -> float:
+    return random.Random(f"{day}:{salt}:{track_id}").random()
+
+
+def _profile_key(value: str | None) -> str | None:
+    cleaned = _clean_text(value).lower()
+    return cleaned or None
+
+
+def _display_label_for_key(key: str, values: list[str | None]) -> str | None:
+    for value in values:
+        if _profile_key(value) == key and value:
+            return value
+    return None
+
+
+def _mix_featured_artists(items: list[LocalTrackRecommendation]) -> str:
+    artists = _dedupe_text([item.track.artist or "" for item in items])[:3]
+    return ", ".join(artists)
 
 
 def _score_external_item(

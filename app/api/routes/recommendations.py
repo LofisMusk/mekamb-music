@@ -12,6 +12,8 @@ from app.api.deps import (
     require_token,
 )
 from app.api.schemas import (
+    DailyMixResponse,
+    PersonalizedHomeResponse,
     RecommendationImportItemResponse,
     RecommendationImportRequest,
     RecommendationImportResponse,
@@ -75,6 +77,47 @@ async def recommend_for_library(
         sources=_sources(sources),
     )
     return _recommendation_response(recommendations)
+
+
+@router.get("/personalized", response_model=PersonalizedHomeResponse)
+async def personalized_home(
+    local_limit: int = Query(default=24, ge=1, le=100),
+    mix_count: int = Query(default=4, ge=1, le=8),
+    mix_size: int = Query(default=12, ge=1, le=50),
+    engine: RecommendationEngine = Depends(_recommendation_engine),
+) -> PersonalizedHomeResponse:
+    home = await engine.personalized_home(
+        local_limit=local_limit,
+        mix_count=mix_count,
+        mix_size=mix_size,
+    )
+    return PersonalizedHomeResponse(
+        recommended_tracks=[
+            {
+                "track": item.track.to_dict(),
+                "score": item.score,
+                "reasons": item.reasons,
+            }
+            for item in home.recommended_tracks
+        ],
+        daily_mixes=[
+            DailyMixResponse(
+                id=mix.id,
+                title=mix.title,
+                description=mix.description,
+                seed_label=mix.seed_label,
+                tracks=[
+                    {
+                        "track": item.track.to_dict(),
+                        "score": item.score,
+                        "reasons": item.reasons,
+                    }
+                    for item in mix.tracks
+                ],
+            )
+            for mix in home.daily_mixes
+        ],
+    )
 
 
 @router.post("/tracks/{track_id}/import-missing", response_model=RecommendationImportResponse)
