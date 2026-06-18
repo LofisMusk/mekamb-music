@@ -1,0 +1,82 @@
+name: Android APK release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to create, for example android-0.1.0"
+        required: false
+        type: string
+  push:
+    tags:
+      - "android-*"
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        working-directory: native-android
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --no-daemon
+
+      - name: Prepare release metadata
+        id: release
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.release_tag }}"
+            if [ -z "$tag" ]; then
+              tag="android-${{ github.run_number }}"
+            fi
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+
+          apk_name="mekamb-music-${tag}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "../${apk_name}"
+
+          {
+            echo "tag=${tag}"
+            echo "apk_name=${apk_name}"
+            echo "apk_path=${GITHUB_WORKSPACE}/${apk_name}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.release.outputs.apk_name }}
+          path: ${{ steps.release.outputs.apk_path }}
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          name: Mekamb Music Android ${{ steps.release.outputs.tag }}
+          files: ${{ steps.release.outputs.apk_path }}
+          generate_release_notes: true
