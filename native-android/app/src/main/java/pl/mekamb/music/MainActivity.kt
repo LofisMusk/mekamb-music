@@ -3,6 +3,8 @@ package pl.mekamb.music
 import android.app.Activity
 import android.content.Context
 import android.content.res.ColorStateList
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -15,11 +17,14 @@ import android.os.Looper
 import android.os.PowerManager
 import android.text.InputType
 import android.text.TextUtils
+import android.util.LruCache
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -100,6 +105,7 @@ class MainActivity : Activity() {
     private class ApiException(message: String) : Exception(message)
 
     private val executor = Executors.newSingleThreadExecutor()
+    private val artworkExecutor = Executors.newFixedThreadPool(3)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val progressTick = object : Runnable {
         override fun run() {
@@ -141,6 +147,10 @@ class MainActivity : Activity() {
     private var albums: List<Album> = emptyList()
     private var likedTrackIds: Set<String> = emptySet()
     private var torrents: List<TorrentResult> = emptyList()
+    private val artworkCache = object : LruCache<String, Bitmap>(8 * 1024) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
+    }
+    private val missingArtworkIds = mutableSetOf<String>()
 
     private var mediaPlayer: MediaPlayer? = null
     private var currentTrack: ApiTrack? = null
@@ -172,6 +182,7 @@ class MainActivity : Activity() {
         mainHandler.removeCallbacks(progressTick)
         mediaPlayer?.release()
         mediaPlayer = null
+        artworkExecutor.shutdownNow()
         executor.shutdownNow()
         super.onDestroy()
     }
@@ -453,7 +464,7 @@ class MainActivity : Activity() {
                     render()
                 }
             }
-            row.addView(artTile(album.title, album.artist, dp(54)), LinearLayout.LayoutParams(dp(54), dp(54)).apply {
+            row.addView(artworkTile(album.tracks.firstOrNull(), album.title, album.artist, dp(54)), LinearLayout.LayoutParams(dp(54), dp(54)).apply {
                 rightMargin = dp(12)
             })
             val copy = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -507,9 +518,14 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
         }
         buttons.addView(button("Save") {
+            val previousEndpoint = apiEndpoint
+            val previousToken = apiToken
             apiEndpoint = endpointField.text.toString().trim()
             apiToken = tokenField.text.toString().trim()
             prowlarrApiKey = prowlarrField.text.toString().trim()
+            if (previousEndpoint != apiEndpoint || previousToken != apiToken) {
+                clearArtworkState()
+            }
             statusMessage = "Settings saved."
             render()
         }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { rightMargin = dp(4) })
@@ -531,7 +547,7 @@ class MainActivity : Activity() {
             background = rounded(surfaceColor, dp(18), strokeColor, 1)
             setOnClickListener { playTrack(track, queue) }
         }
-        row.addView(artTile(track.title, track.displayArtist, dp(52)), LinearLayout.LayoutParams(dp(52), dp(52)).apply {
+        row.addView(artworkTile(track, track.title, track.displayArtist, dp(52)), LinearLayout.LayoutParams(dp(52), dp(52)).apply {
             rightMargin = dp(12)
         })
         val meta = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -576,6 +592,7 @@ class MainActivity : Activity() {
                 tracks = loadedTracks.sortedWith(trackComparator())
                 likedTrackIds = loadedLikes
                 albums = buildAlbums(tracks)
+                missingArtworkIds.clear()
                 statusMessage = "Library refreshed: ${tracks.size} songs."
                 render()
             }
@@ -1092,6 +1109,95 @@ class MainActivity : Activity() {
         setSingleLine(true)
         ellipsize = TextUtils.TruncateAt.END
         return this
+    }
+
+    private fun artworkTile(track: ApiTrack?, title: String, subtitle: String, size: Int): View {
+        val holder = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(size, size)
+        }
+        holder.addView(artTile(title, subtitle, size), FrameLayout.LayoutParams(size, size))
+
+        val trackId = track?.id
+        if (trackId.isNullOrBlank() || !canUseApi() || missingArtworkIds.contains(trackId)) {
+            return holder
+        }
+
+        val imageView = ImageView(this).apply {
+            tag = trackId
+            visibility = View.GONE
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = rounded(surfaceColor, dp(16))
+            clipToOutline = true
+        }
+        holder.addView(imageView, FrameLayout.LayoutParams(size, size))
+        bindArtwork(imageView, trackId, size)
+        return holder
+    }
+
+    private fun bindArtwork(imageView: ImageView, trackId: String, size: Int) {
+        artworkCache.get(trackId)?.let { cached ->
+            imageView.setImageBitmap(cached)
+            imageView.visibility = View.VISIBLE
+            return
+        }
+        artworkExecutor.execute {
+            val bitmap = runCatching { fetchArtworkBitmap(trackId, size) }.getOrNull()
+            mainHandler.post {
+                if (imageView.tag != trackId) return@post
+                if (bitmap == null) {
+                    missingArtworkIds += trackId
+                } else {
+                    artworkCache.put(trackId, bitmap)
+                    imageView.setImageBitmap(bitmap)
+                    imageView.visibility = View.VISIBLE
+                }
+            }
+        }
+    }
+
+    private fun clearArtworkState() {
+        artworkCache.evictAll()
+        missingArtworkIds.clear()
+    }
+
+    private fun fetchArtworkBitmap(trackId: String, size: Int): Bitmap? {
+        val endpoint = endpointUrl("/tracks/${encodePath(trackId)}/artwork") ?: return null
+        val connection = URL(endpoint).openConnection() as HttpURLConnection
+        connection.requestMethod = "GET"
+        connection.connectTimeout = 12_000
+        connection.readTimeout = 12_000
+        connection.setRequestProperty("Accept", "image/*")
+        connection.setRequestProperty("Authorization", "Bearer $apiToken")
+        val status = connection.responseCode
+        if (status !in 200..299) {
+            connection.disconnect()
+            return null
+        }
+        val bytes = connection.inputStream.use { it.readBytes() }
+        connection.disconnect()
+        return decodeArtwork(bytes, size * 2)
+    }
+
+    private fun decodeArtwork(bytes: ByteArray, targetSize: Int): Bitmap? {
+        if (bytes.isEmpty()) return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = artworkSampleSize(bounds.outWidth, bounds.outHeight, targetSize)
+        }
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+    }
+
+    private fun artworkSampleSize(width: Int, height: Int, targetSize: Int): Int {
+        var sampleSize = 1
+        var halfWidth = width / 2
+        var halfHeight = height / 2
+        while (halfWidth / sampleSize >= targetSize && halfHeight / sampleSize >= targetSize) {
+            sampleSize *= 2
+        }
+        return sampleSize
     }
 
     private fun artTile(title: String, subtitle: String, size: Int): TextView {
