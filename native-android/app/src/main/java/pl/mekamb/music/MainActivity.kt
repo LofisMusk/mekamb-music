@@ -26,6 +26,7 @@ import android.view.Window
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -46,16 +47,28 @@ import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
     private enum class MusicTab(val label: String) {
-        Library("Home"),
+        Library("Library"),
         Albums("Albums"),
         Liked("Liked"),
-        Sources("Import"),
-        Settings("Setup")
+        Settings("Settings")
     }
 
-    private enum class SearchKind(val label: String) {
-        AllSources("All sources"),
-        Indexers("Indexers")
+    private enum class SearchMode(val label: String) {
+        Library("Library"),
+        Torrent("Torrent"),
+        Indexers("Indexers");
+
+        val searchesRemoteSources: Boolean
+            get() = this == Torrent || this == Indexers
+    }
+
+    private enum class RepeatMode(val label: String) {
+        Off("Repeat Off"),
+        All("Repeat All"),
+        One("Repeat One");
+
+        val isActive: Boolean
+            get() = this != Off
     }
 
     private enum class TorrentSource(val raw: String, val importPath: String) {
@@ -131,6 +144,8 @@ class MainActivity : Activity() {
     private val dangerColor = Color.rgb(244, 99, 99)
 
     private lateinit var root: LinearLayout
+    private lateinit var searchHeader: LinearLayout
+    private lateinit var searchModeBar: LinearLayout
     private lateinit var searchInput: EditText
     private lateinit var statusText: TextView
     private lateinit var tabBar: LinearLayout
@@ -142,7 +157,9 @@ class MainActivity : Activity() {
     private lateinit var playButton: TextView
 
     private var selectedTab = MusicTab.Library
-    private var searchKind = SearchKind.AllSources
+    private var searchMode = SearchMode.Library
+    private var shuffleEnabled = false
+    private var repeatMode = RepeatMode.Off
     private var selectedAlbumId: String? = null
     private var isLoading = false
     private var statusMessage: String? = null
@@ -201,14 +218,21 @@ class MainActivity : Activity() {
                 GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(bgTopColor, bgColor)
             )
-            setPadding(dp(12), dp(8), dp(12), dp(8))
+        }
+
+        searchHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            background = rounded(Color.rgb(18, 24, 36), 0)
         }
 
         val searchRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(8))
+            setPadding(dp(12), 0, dp(10), 0)
+            background = rounded(Color.argb(24, 255, 255, 255), dp(16))
         }
+        searchRow.addView(label("⌕", 20f, mutedColor, Typeface.BOLD), LinearLayout.LayoutParams(dp(24), dp(46)))
         searchInput = EditText(this).apply {
             setTextColor(textColor)
             setHintTextColor(mutedColor)
@@ -217,8 +241,13 @@ class MainActivity : Activity() {
             imeOptions = EditorInfo.IME_ACTION_SEARCH
             inputType = InputType.TYPE_CLASS_TEXT
             textSize = 15f
-            setPadding(dp(15), 0, dp(15), 0)
-            background = rounded(surfaceColor, dp(18), strokeColor, 1)
+            setPadding(dp(8), 0, dp(8), 0)
+            background = ColorDrawable(Color.TRANSPARENT)
+            setOnFocusChangeListener { _, hasFocus ->
+                if (hasFocus || searchMode.searchesRemoteSources || text.toString().isNotBlank()) {
+                    searchModeBar.visibility = View.VISIBLE
+                }
+            }
             setOnEditorActionListener { _, actionId, _ ->
                 if (actionId == EditorInfo.IME_ACTION_SEARCH) {
                     handleSearch()
@@ -228,17 +257,41 @@ class MainActivity : Activity() {
                 }
             }
         }
-        searchRow.addView(searchInput, LinearLayout.LayoutParams(0, dp(48), 1f))
-        searchRow.addView(space(dp(8), 1))
-        searchRow.addView(iconButton("⌕") { handleSearch() }, LinearLayout.LayoutParams(dp(54), dp(48)))
-        root.addView(searchRow, matchWrapParams())
+        searchRow.addView(searchInput, LinearLayout.LayoutParams(0, dp(46), 1f))
+        searchRow.addView(iconButton("×", primary = false) {
+            searchInput.setText("")
+            torrents = emptyList()
+            searchMode = SearchMode.Library
+            render()
+        }, LinearLayout.LayoutParams(dp(34), dp(34)))
+        searchHeader.addView(searchRow, matchWrapParams())
+
+        searchModeBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+        }
+        SearchMode.entries.forEach { mode ->
+            searchModeBar.addView(modeChip(mode), LinearLayout.LayoutParams(0, dp(34), 1f).apply {
+                leftMargin = dp(3)
+                rightMargin = dp(3)
+            })
+        }
+        searchHeader.addView(searchModeBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34)).apply {
+            topMargin = dp(10)
+        })
+        root.addView(searchHeader, matchWrapParams())
 
         statusText = label("", 13f, mutedColor, Typeface.NORMAL).apply {
             visibility = View.GONE
             setPadding(dp(13), dp(10), dp(13), dp(10))
             background = rounded(elevatedColor, dp(14), strokeColor, 1)
         }
-        root.addView(statusText, matchWrapParams())
+        root.addView(statusText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            leftMargin = dp(16)
+            rightMargin = dp(16)
+            topMargin = dp(8)
+        })
 
         val scroll = ScrollView(this).apply {
             isFillViewport = false
@@ -259,8 +312,11 @@ class MainActivity : Activity() {
             setPadding(dp(4), dp(4), dp(4), dp(4))
             background = rounded(surfaceColor, dp(18), strokeColor, 1)
         }
-        root.addView(tabBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(62)).apply {
+        root.addView(tabBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)).apply {
+            leftMargin = dp(10)
+            rightMargin = dp(10)
             topMargin = dp(8)
+            bottomMargin = dp(8)
         })
         setContentView(root)
     }
@@ -268,10 +324,40 @@ class MainActivity : Activity() {
     private fun playerBar(): View {
         val holder = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            background = rounded(elevatedColor, dp(22), strokeColor, 1)
+            setPadding(dp(16), dp(10), dp(16), dp(12))
+            background = rounded(Color.rgb(19, 25, 37), 0)
             setOnClickListener { showExpandedPlayer() }
         }
+        miniProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 1000
+            progress = 0
+            progressTintList = ColorStateList.valueOf(accentAltColor)
+            progressBackgroundTintList = ColorStateList.valueOf(Color.rgb(44, 53, 72))
+        }
+        holder.addView(miniProgress, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(4)))
+
+        val modeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(10), dp(4), dp(7))
+        }
+        modeRow.addView(iconText("⇄", if (shuffleEnabled) accentAltColor else mutedColor) {
+            shuffleEnabled = !shuffleEnabled
+            updateMiniPlayer()
+        }, LinearLayout.LayoutParams(dp(34), dp(28)))
+        modeRow.addView(space(1, 1), weightParams(1f))
+        modeRow.addView(label(repeatMode.label, 11f, mutedColor, Typeface.NORMAL), wrapParams())
+        modeRow.addView(space(1, 1), weightParams(1f))
+        modeRow.addView(iconText(repeatIcon(), if (repeatMode.isActive) accentAltColor else mutedColor) {
+            repeatMode = when (repeatMode) {
+                RepeatMode.Off -> RepeatMode.All
+                RepeatMode.All -> RepeatMode.One
+                RepeatMode.One -> RepeatMode.Off
+            }
+            updateMiniPlayer()
+        }, LinearLayout.LayoutParams(dp(34), dp(28)))
+        holder.addView(modeRow, matchWrapParams())
+
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -288,22 +374,15 @@ class MainActivity : Activity() {
         textColumn.addView(miniTitle, matchWrapParams())
         textColumn.addView(miniSubtitle, matchWrapParams())
         row.addView(textColumn, weightParams(1f))
-        row.addView(iconButton("⏮", primary = false) { playPrevious() }, LinearLayout.LayoutParams(dp(42), dp(38)))
-        row.addView(space(dp(6), 1))
-        playButton = iconButton("▶") { togglePlayback() }
-        row.addView(playButton, LinearLayout.LayoutParams(dp(48), dp(38)))
-        row.addView(space(dp(6), 1))
-        row.addView(iconButton("⏭", primary = false) { playNext() }, LinearLayout.LayoutParams(dp(42), dp(38)))
+        row.addView(iconText("⏮", textColor) { playPrevious() }, LinearLayout.LayoutParams(dp(34), dp(38)))
+        row.addView(space(dp(4), 1))
+        playButton = iconButton("▶", accent = accentAltColor) { togglePlayback() }
+        row.addView(playButton, LinearLayout.LayoutParams(dp(42), dp(42)))
+        row.addView(space(dp(4), 1))
+        row.addView(iconText("⏭", textColor) { playNext() }, LinearLayout.LayoutParams(dp(34), dp(38)))
+        row.addView(space(dp(4), 1))
+        row.addView(iconText("☰", textColor) { showExpandedPlayer() }, LinearLayout.LayoutParams(dp(30), dp(38)))
         holder.addView(row, matchWrapParams())
-        miniProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            max = 1000
-            progress = 0
-            progressTintList = ColorStateList.valueOf(accentColor)
-            progressBackgroundTintList = ColorStateList.valueOf(Color.rgb(44, 53, 72))
-        }
-        holder.addView(miniProgress, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(4)).apply {
-            topMargin = dp(10)
-        })
         return holder
     }
 
@@ -324,12 +403,12 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        topRow.addView(label("Now Playing", 14f, mutedColor, Typeface.BOLD), weightParams(1f))
+        topRow.addView(label("Now Playing", 14f, textColor, Typeface.BOLD), weightParams(1f))
         topRow.addView(iconButton("⌄", primary = false) { dialog.dismiss() }, LinearLayout.LayoutParams(dp(44), dp(40)))
         screen.addView(topRow, matchWrapParams())
 
         val track = currentTrack
-        val artworkSize = (resources.displayMetrics.widthPixels - dp(72)).coerceAtMost(dp(320))
+        val artworkSize = (resources.displayMetrics.widthPixels - dp(72)).coerceAtMost(dp(340))
         val artwork = if (track == null) {
             artTile("M", "Music", artworkSize)
         } else {
@@ -340,32 +419,57 @@ class MainActivity : Activity() {
             bottomMargin = dp(26)
         })
 
-        screen.addView(
+        val infoBlock = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        infoBlock.addView(
             label(track?.title ?: "Nothing playing", 24f, textColor, Typeface.BOLD).apply {
-                gravity = Gravity.CENTER
                 maxLines = 2
                 ellipsize = TextUtils.TruncateAt.END
             },
             matchWrapParams()
         )
-        screen.addView(
+        infoBlock.addView(
             label(
-                track?.let { "${it.displayArtist} · ${it.displayAlbum}" } ?: "Choose a track",
+                track?.displayArtist ?: "Choose a track",
+                16f,
+                mutedColor,
+                Typeface.BOLD
+            ).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            },
+            matchWrapParams()
+        )
+        infoBlock.addView(
+            label(
+                track?.displayAlbum ?: "",
                 14f,
                 mutedColor,
                 Typeface.NORMAL
             ).apply {
-                gravity = Gravity.CENTER
-                maxLines = 2
+                maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             },
             matchWrapParams()
         )
+        val infoRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        infoRow.addView(infoBlock, weightParams(1f))
+        if (track != null) {
+            infoRow.addView(iconText(if (likedTrackIds.contains(track.id)) "♥" else "♡", if (likedTrackIds.contains(track.id)) Color.rgb(255, 105, 180) else textColor) {
+                toggleLike(track)
+            }, LinearLayout.LayoutParams(dp(48), dp(48)))
+        }
+        screen.addView(infoRow, matchWrapParams())
 
         val expandedProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 1000
             progress = miniProgress.progress
-            progressTintList = ColorStateList.valueOf(accentColor)
+            progressTintList = ColorStateList.valueOf(Color.WHITE)
             progressBackgroundTintList = ColorStateList.valueOf(Color.rgb(44, 53, 72))
         }
         screen.addView(expandedProgress, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(5)).apply {
@@ -377,18 +481,22 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
+        controls.addView(iconText("⇄", if (shuffleEnabled) accentAltColor else textColor) {
+            shuffleEnabled = !shuffleEnabled
+            updateMiniPlayer()
+        }, LinearLayout.LayoutParams(dp(46), dp(52)).apply { rightMargin = dp(10) })
         controls.addView(iconButton("⏮", primary = false) {
             playPrevious()
             dialog.dismiss()
             mainHandler.postDelayed({ showExpandedPlayer() }, 250)
-        }, LinearLayout.LayoutParams(dp(58), dp(52)).apply { rightMargin = dp(12) })
+        }, LinearLayout.LayoutParams(dp(52), dp(52)).apply { rightMargin = dp(10) })
         lateinit var expandedPlay: TextView
-        expandedPlay = iconButton(if (isPlaying) "⏸" else "▶") {
+        expandedPlay = iconButton(if (isPlaying) "⏸" else "▶", accent = Color.WHITE, textColorOverride = Color.BLACK) {
             togglePlayback()
             expandedPlay.text = if (isPlaying) "⏸" else "▶"
             expandedProgress.progress = miniProgress.progress
         }
-        controls.addView(expandedPlay, LinearLayout.LayoutParams(dp(76), dp(56)).apply {
+        controls.addView(expandedPlay, LinearLayout.LayoutParams(dp(68), dp(68)).apply {
             leftMargin = dp(4)
             rightMargin = dp(4)
         })
@@ -396,8 +504,30 @@ class MainActivity : Activity() {
             playNext()
             dialog.dismiss()
             mainHandler.postDelayed({ showExpandedPlayer() }, 250)
-        }, LinearLayout.LayoutParams(dp(58), dp(52)).apply { leftMargin = dp(12) })
+        }, LinearLayout.LayoutParams(dp(52), dp(52)).apply { leftMargin = dp(10) })
+        controls.addView(iconText(repeatIcon(), if (repeatMode.isActive) accentAltColor else textColor) {
+            repeatMode = when (repeatMode) {
+                RepeatMode.Off -> RepeatMode.All
+                RepeatMode.All -> RepeatMode.One
+                RepeatMode.One -> RepeatMode.Off
+            }
+            updateMiniPlayer()
+        }, LinearLayout.LayoutParams(dp(46), dp(52)).apply { leftMargin = dp(10) })
         screen.addView(controls, matchWrapParams())
+
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        actions.addView(button("Queue", primary = false, compact = true) {}, LinearLayout.LayoutParams(0, dp(42), 1f).apply {
+            rightMargin = dp(6)
+        })
+        actions.addView(button("Up Next", primary = false, compact = true) {}, LinearLayout.LayoutParams(0, dp(42), 1f).apply {
+            leftMargin = dp(6)
+        })
+        screen.addView(actions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)).apply {
+            topMargin = dp(28)
+        })
 
         dialog.setContentView(screen)
         dialog.window?.apply {
@@ -409,7 +539,7 @@ class MainActivity : Activity() {
     }
 
     private fun handleSearch() {
-        if (selectedTab == MusicTab.Sources) {
+        if (searchMode.searchesRemoteSources) {
             searchSources()
         } else {
             render()
@@ -419,6 +549,7 @@ class MainActivity : Activity() {
     private fun render() {
         updateStatus()
         renderTabs()
+        renderSearchModes()
         updateSearchHint()
         content.removeAllViews()
         if (isLoading) {
@@ -426,12 +557,15 @@ class MainActivity : Activity() {
             content.addView(ProgressBar(this), centerParams())
             return
         }
-        when (selectedTab) {
-            MusicTab.Library -> renderLibrary()
-            MusicTab.Albums -> renderAlbums()
-            MusicTab.Liked -> renderLiked()
-            MusicTab.Sources -> renderSources()
-            MusicTab.Settings -> renderSettings()
+        if (searchMode.searchesRemoteSources) {
+            renderSources()
+        } else {
+            when (selectedTab) {
+                MusicTab.Library -> renderLibrary()
+                MusicTab.Albums -> renderAlbums()
+                MusicTab.Liked -> renderLiked()
+                MusicTab.Settings -> renderSettings()
+            }
         }
         updateMiniPlayer()
     }
@@ -449,6 +583,7 @@ class MainActivity : Activity() {
                 setLineSpacing(0f, 0.92f)
                 setOnClickListener {
                     selectedTab = tab
+                    searchMode = SearchMode.Library
                     selectedAlbumId = null
                     statusMessage = null
                     render()
@@ -466,16 +601,47 @@ class MainActivity : Activity() {
             MusicTab.Library -> "⌂"
             MusicTab.Albums -> "▦"
             MusicTab.Liked -> "♥"
-            MusicTab.Sources -> "+"
             MusicTab.Settings -> "⚙"
         }
     }
 
+    private fun renderSearchModes() {
+        searchModeBar.removeAllViews()
+        SearchMode.entries.forEach { mode ->
+            searchModeBar.addView(modeChip(mode), LinearLayout.LayoutParams(0, dp(34), 1f).apply {
+                leftMargin = dp(3)
+                rightMargin = dp(3)
+            })
+        }
+        searchModeBar.visibility = if (searchMode.searchesRemoteSources || searchInput.text.toString().isNotBlank() || searchInput.hasFocus()) {
+            View.VISIBLE
+        } else {
+            View.GONE
+        }
+    }
+
+    private fun modeChip(mode: SearchMode): TextView {
+        return TextView(this).apply {
+            text = mode.label
+            gravity = Gravity.CENTER
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(if (searchMode == mode) Color.BLACK else mutedColor)
+            background = rounded(if (searchMode == mode) accentAltColor else Color.argb(28, 255, 255, 255), dp(10))
+            setOnClickListener {
+                searchMode = mode
+                if (!mode.searchesRemoteSources) torrents = emptyList()
+                handleSearch()
+            }
+        }
+    }
+
     private fun updateSearchHint() {
-        searchInput.hint = when (selectedTab) {
-            MusicTab.Albums -> "Search albums..."
-            MusicTab.Sources -> "Search torrents or indexers..."
-            MusicTab.Settings -> "Search is disabled in settings"
+        searchInput.hint = when {
+            searchMode == SearchMode.Torrent -> "Search torrents..."
+            searchMode == SearchMode.Indexers -> "Search indexers..."
+            selectedTab == MusicTab.Albums -> "Search albums..."
+            selectedTab == MusicTab.Settings -> "Search is disabled in settings"
             else -> "Search library..."
         }
         searchInput.isEnabled = selectedTab != MusicTab.Settings
@@ -495,10 +661,7 @@ class MainActivity : Activity() {
 
     private fun renderLibrary() {
         val visible = filteredTracks(tracks)
-        content.addView(sectionTitle("Home"))
-        if (tracks.isNotEmpty()) {
-            content.addView(statsRow())
-        }
+        content.addView(sectionTitle("Made For You").withHorizontalPagePadding())
         if (!canUseApi()) {
             content.addView(messageCard("Set API endpoint and token in Settings. For a phone or emulator, use your Mac/server LAN IP, not localhost."))
         }
@@ -506,14 +669,25 @@ class MainActivity : Activity() {
             content.addView(messageCard("No tracks found. Refresh after importing music on the backend."))
             return
         }
-        visible.forEach { track ->
-            content.addView(trackRow(track, visible))
+        if (searchInput.text.toString().trim().isNotEmpty()) {
+            content.addView(sectionTitle("Search Results").withHorizontalPagePadding())
+            visible.take(40).forEach { track ->
+                content.addView(trackRow(track, visible))
+            }
+            return
+        }
+        content.addView(dailyMixShelf())
+        content.addView(trackShelf("Recommended For You", recommendedTracks()))
+        content.addView(trackShelf("Recently Added", recentlyAddedTracks()))
+        val likedPreview = tracks.filter { likedTrackIds.contains(it.id) }.take(16)
+        if (likedPreview.isNotEmpty()) {
+            content.addView(trackShelf("Your Liked Mix", likedPreview))
         }
     }
 
     private fun renderLiked() {
         val liked = filteredTracks(tracks.filter { likedTrackIds.contains(it.id) })
-        content.addView(sectionTitle("Liked Songs"))
+        content.addView(sectionTitle("Liked Songs").withHorizontalPagePadding())
         content.addView(summaryPill("${likedTrackIds.size} saved tracks"))
         if (liked.isEmpty()) {
             content.addView(messageCard("Liked songs will show up here."))
@@ -536,9 +710,42 @@ class MainActivity : Activity() {
             content.addView(button("Back to albums", primary = false) {
                 selectedAlbumId = null
                 render()
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply {
+                leftMargin = dp(16)
+                rightMargin = dp(16)
+                topMargin = dp(10)
+            })
+            val hero = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.BOTTOM
+                setPadding(dp(16), dp(16), dp(16), dp(12))
+            }
+            hero.addView(artworkTile(album.tracks.firstOrNull(), album.title, album.artist, dp(132)), LinearLayout.LayoutParams(dp(132), dp(132)).apply {
+                rightMargin = dp(16)
+            })
+            val copy = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            copy.addView(label(album.title, 22f, textColor, Typeface.BOLD).apply {
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
             }, matchWrapParams())
-            content.addView(sectionTitle(album.title))
-            content.addView(label("${album.artist} · ${album.tracks.size} songs", 13f, mutedColor, Typeface.NORMAL), matchWrapParams())
+            copy.addView(label(album.artist, 14f, mutedColor, Typeface.NORMAL).singleLineEnd(), matchWrapParams())
+            copy.addView(label("${album.tracks.size} songs", 12f, mutedColor, Typeface.NORMAL), matchWrapParams())
+            val albumActions = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            albumActions.addView(iconButton("▶", accent = accentAltColor) {
+                album.tracks.firstOrNull()?.let { playTrack(it, album.tracks) }
+            }, LinearLayout.LayoutParams(dp(46), dp(42)).apply { rightMargin = dp(10) })
+            albumActions.addView(iconText("⇄", textColor) {
+                shuffleEnabled = true
+                album.tracks.shuffled().firstOrNull()?.let { playTrack(it, album.tracks.shuffled()) }
+            }, LinearLayout.LayoutParams(dp(42), dp(42)))
+            copy.addView(albumActions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46)).apply {
+                topMargin = dp(8)
+            })
+            hero.addView(copy, weightParams(1f))
+            content.addView(hero, matchWrapParams())
             album.tracks.forEach { track ->
                 content.addView(trackRow(track, album.tracks))
             }
@@ -551,50 +758,35 @@ class MainActivity : Activity() {
                 it.title.lowercase(Locale.getDefault()).contains(query) ||
                 it.artist.lowercase(Locale.getDefault()).contains(query)
         }
-        content.addView(sectionTitle("Albums"))
+        content.addView(sectionTitle("Albums").withHorizontalPagePadding())
         if (visible.isEmpty()) {
             content.addView(messageCard("No albums found."))
             return
         }
-        visible.forEach { album ->
-            val row = LinearLayout(this).apply {
+        visible.chunked(2).forEach { rowAlbums ->
+            val gridRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(12), dp(12), dp(12), dp(12))
-                background = rounded(surfaceColor, dp(18), strokeColor, 1)
-                setOnClickListener {
-                    selectedAlbumId = album.id
-                    render()
-                }
+                gravity = Gravity.TOP
+                setPadding(dp(16), 0, dp(16), 0)
             }
-            row.addView(artworkTile(album.tracks.firstOrNull(), album.title, album.artist, dp(54)), LinearLayout.LayoutParams(dp(54), dp(54)).apply {
-                rightMargin = dp(12)
+            rowAlbums.forEachIndexed { index, album ->
+                gridRow.addView(albumGridCard(album), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    rightMargin = if (index == 0) dp(7) else 0
+                    leftMargin = if (index == 1) dp(7) else 0
+                })
+            }
+            if (rowAlbums.size == 1) {
+                gridRow.addView(space(1, 1), LinearLayout.LayoutParams(0, 1, 1f).apply { leftMargin = dp(7) })
+            }
+            content.addView(gridRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(7)
+                bottomMargin = dp(7)
             })
-            val copy = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            copy.addView(label(album.title, 16f, textColor, Typeface.BOLD).singleLineEnd(), matchWrapParams())
-            copy.addView(label("${album.artist} · ${album.tracks.size} songs", 13f, mutedColor, Typeface.NORMAL).singleLineEnd(), matchWrapParams())
-            row.addView(copy, weightParams(1f))
-            row.addView(label("Open", 12f, accentColor, Typeface.BOLD), wrapParams())
-            content.addView(row, cardParams())
         }
     }
 
     private fun renderSources() {
-        content.addView(sectionTitle("Sources"))
-        val switcher = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
-        SearchKind.entries.forEach { kind ->
-            switcher.addView(button(kind.label, primary = searchKind == kind) {
-                searchKind = kind
-                searchSources()
-            }, LinearLayout.LayoutParams(0, dp(42), 1f).apply {
-                leftMargin = dp(3)
-                rightMargin = dp(3)
-            })
-        }
-        content.addView(switcher, matchWrapParams())
+        content.addView(sectionTitle(if (searchMode == SearchMode.Indexers) "Indexer Search" else "Torrent Search").withHorizontalPagePadding())
 
         if (searchInput.text.toString().trim().isEmpty()) {
             content.addView(messageCard("Search for an artist, album, or track. Imports run on the FastAPI backend, just like the iOS app."))
@@ -662,10 +854,13 @@ class MainActivity : Activity() {
         val meta = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         meta.addView(label(track.title, 16f, textColor, Typeface.BOLD).singleLineEnd(), matchWrapParams())
         meta.addView(label("${track.displayArtist} · ${track.displayAlbum}", 13f, mutedColor, Typeface.NORMAL).singleLineEnd(), matchWrapParams())
-        meta.addView(label(track.durationText(), 12f, mutedColor, Typeface.NORMAL), matchWrapParams())
         row.addView(meta, weightParams(1f))
-        val likeText = if (likedTrackIds.contains(track.id)) "Liked" else "Like"
-        row.addView(button(likeText, compact = true, primary = likedTrackIds.contains(track.id)) { toggleLike(track) }, LinearLayout.LayoutParams(dp(70), dp(36)))
+        row.addView(label(track.durationText(), 12f, mutedColor, Typeface.NORMAL), LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            rightMargin = dp(8)
+        })
+        row.addView(iconText(if (likedTrackIds.contains(track.id)) "♥" else "♡", if (likedTrackIds.contains(track.id)) Color.rgb(255, 105, 180) else mutedColor) {
+            toggleLike(track)
+        }, LinearLayout.LayoutParams(dp(32), dp(36)))
         return row.withCardMargin()
     }
 
@@ -723,12 +918,12 @@ class MainActivity : Activity() {
         runIo(
             task = {
                 val encoded = encodeQuery(query)
-                val headers = if (searchKind == SearchKind.Indexers && prowlarrApiKey.isNotBlank()) {
+                val headers = if (searchMode == SearchMode.Indexers && prowlarrApiKey.isNotBlank()) {
                     mapOf("X-Prowlarr-Api-Key" to prowlarrApiKey)
                 } else {
                     emptyMap()
                 }
-                val path = if (searchKind == SearchKind.Indexers) {
+                val path = if (searchMode == SearchMode.Indexers) {
                     "/sources/indexers/search?q=$encoded"
                 } else {
                     "/sources/search?q=$encoded"
@@ -873,7 +1068,21 @@ class MainActivity : Activity() {
                 mainHandler.post(progressTick)
                 updateMiniPlayer()
             }
-            setOnCompletionListener { playNext() }
+            setOnCompletionListener {
+                when (repeatMode) {
+                    RepeatMode.One -> playTrack(track, playbackQueue.ifEmpty { tracks })
+                    RepeatMode.Off -> {
+                        val queue = playbackQueue.ifEmpty { tracks }
+                        if (currentIndex >= 0 && currentIndex < queue.lastIndex) {
+                            playNext()
+                        } else {
+                            this@MainActivity.isPlaying = false
+                            updateMiniPlayer()
+                        }
+                    }
+                    RepeatMode.All -> playNext()
+                }
+            }
             setOnErrorListener { _, what, extra ->
                 this@MainActivity.isPlaying = false
                 statusMessage = "Error: playback failed ($what/$extra)."
@@ -906,7 +1115,11 @@ class MainActivity : Activity() {
     private fun playNext() {
         val queue = playbackQueue.ifEmpty { tracks }
         if (queue.isEmpty()) return
-        val nextIndex = if (currentIndex < 0) 0 else (currentIndex + 1) % queue.size
+        val nextIndex = if (shuffleEnabled && queue.size > 1) {
+            queue.indices.filter { it != currentIndex }.random()
+        } else {
+            if (currentIndex < 0) 0 else (currentIndex + 1) % queue.size
+        }
         playTrack(queue[nextIndex], queue)
     }
 
@@ -1287,6 +1500,129 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun dailyMixShelf(): View {
+        val mixes = dailyMixes()
+        if (mixes.isEmpty()) return space(1, 1)
+        val section = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(8), 0, dp(8))
+        }
+        section.addView(sectionTitle("Daily Mixes").withHorizontalPagePadding())
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(16), 0, dp(16), 0)
+        }
+        mixes.forEach { mix ->
+            row.addView(dailyMixCard(mix.first, mix.second), LinearLayout.LayoutParams(dp(156), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                rightMargin = dp(14)
+            })
+        }
+        section.addView(horizontalScroll(row), matchWrapParams())
+        return section
+    }
+
+    private fun trackShelf(title: String, shelfTracks: List<ApiTrack>): View {
+        if (shelfTracks.isEmpty()) return space(1, 1)
+        val section = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(8), 0, dp(8))
+        }
+        section.addView(sectionTitle(title).withHorizontalPagePadding())
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(16), 0, dp(16), 0)
+        }
+        shelfTracks.take(24).forEach { track ->
+            row.addView(trackRecommendationCard(track, shelfTracks), LinearLayout.LayoutParams(dp(132), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                rightMargin = dp(14)
+            })
+        }
+        section.addView(horizontalScroll(row), matchWrapParams())
+        return section
+    }
+
+    private fun dailyMixCard(title: String, mixTracks: List<ApiTrack>): View {
+        val first = mixTracks.firstOrNull()
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setOnClickListener { first?.let { playTrack(it, mixTracks) } }
+            addView(artworkTile(first, title, first?.displayArtist ?: "Mix", dp(156)), LinearLayout.LayoutParams(dp(156), dp(156)))
+            addView(label(title, 14f, textColor, Typeface.BOLD).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(0, dp(8), 0, 0)
+            }, matchWrapParams())
+            addView(label(mixTracks.take(3).joinToString(", ") { it.displayArtist }, 12f, mutedColor, Typeface.NORMAL).apply {
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+            }, matchWrapParams())
+        }
+    }
+
+    private fun trackRecommendationCard(track: ApiTrack, queue: List<ApiTrack>): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setOnClickListener { playTrack(track, queue) }
+            addView(artworkTile(track, track.title, track.displayArtist, dp(132)), LinearLayout.LayoutParams(dp(132), dp(132)))
+            addView(label(track.title, 14f, textColor, Typeface.BOLD).apply {
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(0, dp(8), 0, 0)
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)))
+            addView(label(track.displayArtist, 12f, mutedColor, Typeface.NORMAL).singleLineEnd(), matchWrapParams())
+        }
+    }
+
+    private fun albumGridCard(album: Album): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            background = rounded(Color.argb(16, 255, 255, 255), dp(18))
+            setOnClickListener {
+                selectedAlbumId = album.id
+                render()
+            }
+            addView(artworkTile(album.tracks.firstOrNull(), album.title, album.artist, dp(142)), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(142)))
+            addView(label(album.title, 14f, textColor, Typeface.BOLD).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(0, dp(8), 0, 0)
+            }, matchWrapParams())
+            addView(label("${album.artist} · ${album.tracks.size} songs", 12f, mutedColor, Typeface.NORMAL).singleLineEnd(), matchWrapParams())
+        }
+    }
+
+    private fun horizontalScroll(row: View): HorizontalScrollView {
+        return HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+    }
+
+    private fun recommendedTracks(): List<ApiTrack> {
+        val likedArtists = tracks
+            .filter { likedTrackIds.contains(it.id) }
+            .map { it.displayArtist }
+            .toSet()
+        val personalized = tracks.filter { it.displayArtist in likedArtists && !likedTrackIds.contains(it.id) }
+        return (personalized + tracks).distinctBy { it.id }.take(24)
+    }
+
+    private fun recentlyAddedTracks(): List<ApiTrack> {
+        return tracks.sortedByDescending { it.createdAt ?: "" }.take(24)
+    }
+
+    private fun dailyMixes(): List<Pair<String, List<ApiTrack>>> {
+        return tracks
+            .groupBy { it.displayArtist }
+            .filter { it.value.size >= 2 }
+            .toList()
+            .sortedByDescending { it.second.size }
+            .take(6)
+            .mapIndexed { index, entry -> "Daily Mix ${index + 1}" to entry.second.take(12) }
+    }
+
     private fun summaryPill(value: String): View {
         return label(value, 13f, mutedColor, Typeface.BOLD).apply {
             setPadding(dp(12), dp(8), dp(12), dp(8))
@@ -1461,19 +1797,41 @@ class MainActivity : Activity() {
     }
 
     private fun iconButton(value: String, primary: Boolean = true, action: () -> Unit): TextView {
+        return iconButton(value, primary, if (primary) accentColor else chipColor, if (primary) Color.BLACK else textColor, action)
+    }
+
+    private fun iconButton(value: String, primary: Boolean = true, accent: Int, textColorOverride: Int = if (primary) Color.BLACK else textColor, action: () -> Unit): TextView {
         return TextView(this).apply {
             text = value
             gravity = Gravity.CENTER
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(if (primary) Color.BLACK else textColor)
+            setTextColor(textColorOverride)
             textSize = if (value.length > 1) 18f else 21f
             background = rounded(
-                if (primary) accentColor else chipColor,
+                if (primary) accent else chipColor,
                 dp(999),
                 if (primary) Color.TRANSPARENT else strokeColor,
                 if (primary) 0 else 1,
             )
             setOnClickListener { action() }
+        }
+    }
+
+    private fun iconText(value: String, color: Int, action: () -> Unit): TextView {
+        return TextView(this).apply {
+            text = value
+            gravity = Gravity.CENTER
+            typeface = Typeface.DEFAULT_BOLD
+            textSize = 21f
+            setTextColor(color)
+            setOnClickListener { action() }
+        }
+    }
+
+    private fun repeatIcon(): String {
+        return when (repeatMode) {
+            RepeatMode.One -> "↻1"
+            RepeatMode.Off, RepeatMode.All -> "↻"
         }
     }
 
@@ -1498,8 +1856,18 @@ class MainActivity : Activity() {
         return this
     }
 
+    private fun View.withHorizontalPagePadding(): View {
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            leftMargin = dp(16)
+            rightMargin = dp(16)
+        }
+        return this
+    }
+
     private fun cardParams(): LinearLayout.LayoutParams {
         return LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            leftMargin = dp(16)
+            rightMargin = dp(16)
             topMargin = dp(6)
             bottomMargin = dp(6)
         }
