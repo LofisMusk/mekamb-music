@@ -23,6 +23,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
+import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -40,6 +41,7 @@ import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
@@ -122,7 +124,7 @@ class MainActivity : Activity() {
     private class ApiException(message: String) : Exception(message)
 
     private val executor = Executors.newSingleThreadExecutor()
-    private val artworkExecutor = Executors.newFixedThreadPool(3)
+    private val artworkExecutor = Executors.newFixedThreadPool(6)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val progressTick = object : Runnable {
         override fun run() {
@@ -168,7 +170,7 @@ class MainActivity : Activity() {
     private var albums: List<Album> = emptyList()
     private var likedTrackIds: Set<String> = emptySet()
     private var torrents: List<TorrentResult> = emptyList()
-    private val artworkCache = object : LruCache<String, Bitmap>(8 * 1024) {
+    private val artworkCache = object : LruCache<String, Bitmap>(32 * 1024) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
     }
     private val missingArtworkIds = mutableSetOf<String>()
@@ -183,6 +185,7 @@ class MainActivity : Activity() {
     private var miniArtworkTrackId: String? = null
 
     private val prefs by lazy { getSharedPreferences("mekamb_music_android", Context.MODE_PRIVATE) }
+    private val artworkDiskDir by lazy { File(cacheDir, "artwork/v1").apply { mkdirs() } }
     private var apiEndpoint: String
         get() = prefs.getString("api_endpoint", "") ?: ""
         set(value) = prefs.edit().putString("api_endpoint", value).apply()
@@ -213,6 +216,10 @@ class MainActivity : Activity() {
 
     private fun buildLayout() {
         root = LinearLayout(this).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
             orientation = LinearLayout.VERTICAL
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
@@ -301,10 +308,13 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(2), 0, dp(12))
         }
-        scroll.addView(content, matchWrapParams())
+        scroll.addView(content, ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
         root.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        root.addView(playerBar(), matchWrapParams())
+        root.addView(playerBar(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(120)))
 
         tabBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -319,6 +329,27 @@ class MainActivity : Activity() {
             bottomMargin = dp(8)
         })
         setContentView(root)
+        applySystemBarInsets(root)
+    }
+
+    private fun applySystemBarInsets(view: View) {
+        view.setOnApplyWindowInsetsListener { target, insets ->
+            val topInset: Int
+            val bottomInset: Int
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                val systemBars = insets.getInsets(WindowInsets.Type.systemBars())
+                topInset = systemBars.top
+                bottomInset = systemBars.bottom
+            } else {
+                @Suppress("DEPRECATION")
+                topInset = insets.systemWindowInsetTop
+                @Suppress("DEPRECATION")
+                bottomInset = insets.systemWindowInsetBottom
+            }
+            target.setPadding(0, topInset, 0, bottomInset)
+            insets
+        }
+        view.requestApplyInsets()
     }
 
     private fun playerBar(): View {
@@ -326,7 +357,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(10), dp(16), dp(12))
             background = rounded(Color.rgb(19, 25, 37), 0)
-            setOnClickListener { showExpandedPlayer() }
+            minimumHeight = dp(120)
         }
         miniProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 1000
@@ -361,6 +392,7 @@ class MainActivity : Activity() {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            setOnClickListener { showExpandedPlayer() }
         }
         miniArtwork = FrameLayout(this).apply {
             addView(artTile("M", "Music", dp(46)), FrameLayout.LayoutParams(dp(46), dp(46)))
@@ -555,6 +587,7 @@ class MainActivity : Activity() {
         if (isLoading) {
             content.addView(sectionTitle("Loading..."))
             content.addView(ProgressBar(this), centerParams())
+            updateMiniPlayer()
             return
         }
         if (searchMode.searchesRemoteSources) {
@@ -573,14 +606,11 @@ class MainActivity : Activity() {
     private fun renderTabs() {
         tabBar.removeAllViews()
         MusicTab.entries.forEach { tab ->
-            val tabButton = TextView(this).apply {
-                text = "${tab.icon()}\n${tab.label}"
+            val selected = selectedTab == tab
+            val tabButton = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
-                textSize = 11f
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(if (selectedTab == tab) Color.BLACK else mutedColor)
-                background = rounded(if (selectedTab == tab) accentColor else Color.TRANSPARENT, dp(14))
-                setLineSpacing(0f, 0.92f)
+                background = rounded(if (selected) accentColor else Color.TRANSPARENT, dp(14))
                 setOnClickListener {
                     selectedTab = tab
                     searchMode = SearchMode.Library
@@ -589,6 +619,17 @@ class MainActivity : Activity() {
                     render()
                 }
             }
+            tabButton.addView(ImageView(this).apply {
+                setImageResource(tab.iconRes())
+                imageTintList = ColorStateList.valueOf(if (selected) Color.BLACK else mutedColor)
+                scaleType = ImageView.ScaleType.CENTER
+            }, LinearLayout.LayoutParams(dp(22), dp(22)))
+            tabButton.addView(label(tab.label, 11f, if (selected) Color.BLACK else mutedColor, Typeface.BOLD).apply {
+                gravity = Gravity.CENTER
+                includeFontPadding = false
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(16)).apply {
+                topMargin = dp(2)
+            })
             tabBar.addView(tabButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
                 leftMargin = dp(2)
                 rightMargin = dp(2)
@@ -596,12 +637,12 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun MusicTab.icon(): String {
+    private fun MusicTab.iconRes(): Int {
         return when (this) {
-            MusicTab.Library -> "⌂"
-            MusicTab.Albums -> "▦"
-            MusicTab.Liked -> "♥"
-            MusicTab.Settings -> "⚙"
+            MusicTab.Library -> R.drawable.ic_tab_library
+            MusicTab.Albums -> R.drawable.ic_tab_albums
+            MusicTab.Liked -> R.drawable.ic_tab_liked
+            MusicTab.Settings -> R.drawable.ic_tab_settings
         }
     }
 
@@ -899,6 +940,7 @@ class MainActivity : Activity() {
                 missingArtworkIds.clear()
                 statusMessage = "Library refreshed: ${tracks.size} songs."
                 render()
+                prefetchAlbumArtwork()
             }
         )
     }
@@ -1664,36 +1706,45 @@ class MainActivity : Activity() {
             return holder
         }
 
+        val cacheKey = artworkCacheKey(trackId)
         val imageView = ImageView(this).apply {
-            tag = trackId
+            tag = cacheKey
             visibility = View.GONE
             scaleType = ImageView.ScaleType.CENTER_CROP
             background = rounded(surfaceColor, dp(16))
             clipToOutline = true
         }
         holder.addView(imageView, FrameLayout.LayoutParams(size, size))
-        bindArtwork(imageView, trackId, size)
+        bindArtwork(imageView, trackId, cacheKey, size)
         return holder
     }
 
-    private fun bindArtwork(imageView: ImageView, trackId: String, size: Int) {
-        artworkCache.get(trackId)?.let { cached ->
+    private fun bindArtwork(imageView: ImageView, trackId: String, cacheKey: String, size: Int) {
+        artworkCache.get(cacheKey)?.let { cached ->
             imageView.setImageBitmap(cached)
             imageView.visibility = View.VISIBLE
             return
         }
-        if (!requestedArtworkIds.add(trackId)) {
+        readCachedArtwork(cacheKey, size)?.let { cached ->
+            artworkCache.put(cacheKey, cached)
+            imageView.setImageBitmap(cached)
+            imageView.visibility = View.VISIBLE
+            return
+        }
+        if (missingArtworkIds.contains(cacheKey) || !requestedArtworkIds.add(cacheKey)) {
             return
         }
         artworkExecutor.execute {
-            val bitmap = runCatching { fetchArtworkBitmap(trackId, size) }.getOrNull()
+            val bitmap = runCatching {
+                fetchArtworkBitmap(trackId, cacheKey, size)
+            }.getOrNull()
             mainHandler.post {
-                requestedArtworkIds -= trackId
-                if (imageView.tag != trackId) return@post
+                requestedArtworkIds -= cacheKey
+                if (imageView.tag != cacheKey) return@post
                 if (bitmap == null) {
-                    missingArtworkIds += trackId
+                    missingArtworkIds += cacheKey
                 } else {
-                    artworkCache.put(trackId, bitmap)
+                    artworkCache.put(cacheKey, bitmap)
                     imageView.setImageBitmap(bitmap)
                     imageView.visibility = View.VISIBLE
                 }
@@ -1707,7 +1758,29 @@ class MainActivity : Activity() {
         requestedArtworkIds.clear()
     }
 
-    private fun fetchArtworkBitmap(trackId: String, size: Int): Bitmap? {
+    private fun prefetchAlbumArtwork() {
+        if (!canUseApi()) return
+        val tracksToWarm = albums
+            .mapNotNull { it.tracks.firstOrNull() }
+            .distinctBy { it.id }
+            .take(120)
+        if (tracksToWarm.isEmpty()) return
+
+        artworkExecutor.execute {
+            tracksToWarm.forEach { track ->
+                val cacheKey = artworkCacheKey(track.id)
+                if (artworkCache.get(cacheKey) != null || artworkCacheFile(cacheKey).isFile) {
+                    return@forEach
+                }
+                val bitmap = runCatching { fetchArtworkBitmap(track.id, cacheKey, dp(160)) }.getOrNull()
+                if (bitmap != null) {
+                    artworkCache.put(cacheKey, bitmap)
+                }
+            }
+        }
+    }
+
+    private fun fetchArtworkBitmap(trackId: String, cacheKey: String, size: Int): Bitmap? {
         val endpoint = endpointUrl("/tracks/${encodePath(trackId)}/artwork") ?: return null
         val connection = URL(endpoint).openConnection() as HttpURLConnection
         connection.requestMethod = "GET"
@@ -1722,7 +1795,41 @@ class MainActivity : Activity() {
         }
         val bytes = connection.inputStream.use { it.readBytes() }
         connection.disconnect()
+        val bitmap = decodeArtwork(bytes, size * 2) ?: return null
+        writeCachedArtwork(cacheKey, bytes)
+        return bitmap
+    }
+
+    private fun readCachedArtwork(cacheKey: String, size: Int): Bitmap? {
+        val file = artworkCacheFile(cacheKey)
+        if (!file.isFile || file.length() <= 0L) return null
+        val bytes = runCatching { file.readBytes() }.getOrNull() ?: return null
         return decodeArtwork(bytes, size * 2)
+    }
+
+    private fun writeCachedArtwork(cacheKey: String, bytes: ByteArray) {
+        if (bytes.isEmpty()) return
+        val file = artworkCacheFile(cacheKey)
+        val temp = File(file.parentFile, "${file.name}.tmp")
+        runCatching {
+            temp.writeBytes(bytes)
+            if (!temp.renameTo(file)) {
+                file.delete()
+                temp.renameTo(file)
+            }
+        }.onFailure {
+            temp.delete()
+        }
+    }
+
+    private fun artworkCacheFile(cacheKey: String): File {
+        return File(artworkDiskDir, "$cacheKey.img")
+    }
+
+    private fun artworkCacheKey(trackId: String): String {
+        val identity = "${normalizedEndpoint()}|${apiToken.trim()}|$trackId"
+        val digest = MessageDigest.getInstance("SHA-256").digest(identity.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }
     }
 
     private fun decodeArtwork(bytes: ByteArray, targetSize: Int): Bitmap? {
