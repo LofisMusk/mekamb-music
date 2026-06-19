@@ -10,7 +10,6 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioAttributes
 import android.media.MediaPlayer
-import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -32,12 +31,14 @@ import android.widget.TextView
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.File
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
@@ -151,6 +152,8 @@ class MainActivity : Activity() {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
     }
     private val missingArtworkIds = mutableSetOf<String>()
+    private val requestedArtworkIds = mutableSetOf<String>()
+    private val playbackRequestId = AtomicInteger(0)
 
     private var mediaPlayer: MediaPlayer? = null
     private var currentTrack: ApiTrack? = null
@@ -703,15 +706,44 @@ class MainActivity : Activity() {
     private fun playTrack(track: ApiTrack, queue: List<ApiTrack>) {
         if (!canUseApi()) {
             statusMessage = "Set API endpoint and token before streaming."
-            render()
+            updateStatus()
             return
         }
-        val url = endpointUrl("/tracks/${encodePath(track.id)}/stream")
-        if (url == null) {
+        if (endpointUrl("/tracks/${encodePath(track.id)}/stream") == null) {
             statusMessage = "Error: bad API endpoint."
-            render()
+            updateStatus()
             return
         }
+
+        val requestId = playbackRequestId.incrementAndGet()
+        mediaPlayer?.release()
+        mediaPlayer = null
+        isPlaying = false
+        currentTrack = track
+        playbackQueue = queue.ifEmpty { tracks }
+        currentIndex = playbackQueue.indexOfFirst { it.id == track.id }
+        statusMessage = "Loading ${track.title}..."
+        updateStatus()
+        updateMiniPlayer()
+
+        executor.execute {
+            val audioFile = runCatching { downloadTrackForPlayback(track) }
+            mainHandler.post {
+                if (requestId != playbackRequestId.get()) return@post
+                audioFile.fold(
+                    onSuccess = { file -> startCachedTrack(track, file, requestId) },
+                    onFailure = { error ->
+                        isPlaying = false
+                        statusMessage = "Error: ${error.message ?: "playback download failed."}"
+                        updateStatus()
+                        updateMiniPlayer()
+                    }
+                )
+            }
+        }
+    }
+
+    private fun startCachedTrack(track: ApiTrack, audioFile: File, requestId: Int) {
         mediaPlayer?.release()
         mediaPlayer = MediaPlayer().apply {
             setWakeMode(this@MainActivity, PowerManager.PARTIAL_WAKE_LOCK)
@@ -721,27 +753,31 @@ class MainActivity : Activity() {
                     .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                     .build()
             )
-            setDataSource(this@MainActivity, Uri.parse(url), mapOf("Authorization" to "Bearer $apiToken"))
+            setDataSource(audioFile.absolutePath)
             setOnPreparedListener {
+                if (requestId != playbackRequestId.get()) {
+                    it.release()
+                    return@setOnPreparedListener
+                }
                 it.start()
                 this@MainActivity.isPlaying = true
                 statusMessage = null
+                updateStatus()
                 mainHandler.removeCallbacks(progressTick)
                 mainHandler.post(progressTick)
                 updateMiniPlayer()
             }
             setOnCompletionListener { playNext() }
-            setOnErrorListener { _, _, _ ->
+            setOnErrorListener { _, what, extra ->
                 this@MainActivity.isPlaying = false
-                statusMessage = "Error: playback failed."
-                render()
+                statusMessage = "Error: playback failed ($what/$extra)."
+                updateStatus()
+                updateMiniPlayer()
                 true
             }
             prepareAsync()
         }
         currentTrack = track
-        playbackQueue = queue.ifEmpty { tracks }
-        currentIndex = playbackQueue.indexOfFirst { it.id == track.id }
         updateMiniPlayer()
     }
 
@@ -859,6 +895,37 @@ class MainActivity : Activity() {
         return liked
     }
 
+    private fun downloadTrackForPlayback(track: ApiTrack): File {
+        val endpoint = endpointUrl("/tracks/${encodePath(track.id)}/stream")
+            ?: throw ApiException("Bad API endpoint. Use http://IP:8000.")
+        val connection = URL(endpoint).openConnection() as HttpURLConnection
+        connection.requestMethod = "GET"
+        connection.connectTimeout = 20_000
+        connection.readTimeout = 45_000
+        connection.setRequestProperty("Accept", track.mediaType ?: "audio/*")
+        connection.setRequestProperty("Authorization", "Bearer $apiToken")
+        val status = connection.responseCode
+        if (status !in 200..299) {
+            val detail = connection.errorStream?.bufferedReader()?.use { it.readText() }
+            connection.disconnect()
+            throw ApiException(detail?.takeIf { it.isNotBlank() } ?: "stream error $status")
+        }
+
+        val directory = File(cacheDir, "playback").apply { mkdirs() }
+        val output = File(directory, "${track.id}.${playbackExtension(track)}")
+        connection.inputStream.use { input ->
+            output.outputStream().use { fileOutput ->
+                input.copyTo(fileOutput)
+            }
+        }
+        connection.disconnect()
+        if (output.length() <= 0L) {
+            output.delete()
+            throw ApiException("empty audio file")
+        }
+        return output
+    }
+
     private fun request(
         path: String,
         method: String = "GET",
@@ -890,6 +957,23 @@ class MainActivity : Activity() {
             throw ApiException(detail?.takeIf { it.isNotBlank() } ?: "API error $status")
         }
         return payload
+    }
+
+    private fun playbackExtension(track: ApiTrack): String {
+        val filenameExtension = track.originalFilename
+            ?.substringAfterLast('.', "")
+            ?.lowercase(Locale.getDefault())
+            ?.filter { it.isLetterOrDigit() }
+            ?.takeIf { it.length in 2..5 }
+        if (filenameExtension != null) return filenameExtension
+        return when (track.mediaType?.lowercase(Locale.getDefault())) {
+            "audio/mpeg" -> "mp3"
+            "audio/mp4", "audio/aac", "audio/x-m4a" -> "m4a"
+            "audio/flac", "audio/x-flac" -> "flac"
+            "audio/ogg" -> "ogg"
+            "audio/wav", "audio/x-wav" -> "wav"
+            else -> "audio"
+        }
     }
 
     private fun parseTracks(items: JSONArray): List<ApiTrack> {
@@ -1140,9 +1224,13 @@ class MainActivity : Activity() {
             imageView.visibility = View.VISIBLE
             return
         }
+        if (!requestedArtworkIds.add(trackId)) {
+            return
+        }
         artworkExecutor.execute {
             val bitmap = runCatching { fetchArtworkBitmap(trackId, size) }.getOrNull()
             mainHandler.post {
+                requestedArtworkIds -= trackId
                 if (imageView.tag != trackId) return@post
                 if (bitmap == null) {
                     missingArtworkIds += trackId
@@ -1158,6 +1246,7 @@ class MainActivity : Activity() {
     private fun clearArtworkState() {
         artworkCache.evictAll()
         missingArtworkIds.clear()
+        requestedArtworkIds.clear()
     }
 
     private fun fetchArtworkBitmap(trackId: String, size: Int): Bitmap? {
