@@ -1,12 +1,14 @@
 package pl.mekamb.music
 
 import android.app.Activity
+import android.app.Dialog
 import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioAttributes
 import android.media.MediaPlayer
@@ -20,6 +22,7 @@ import android.util.LruCache
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.Window
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -128,11 +131,11 @@ class MainActivity : Activity() {
     private val dangerColor = Color.rgb(244, 99, 99)
 
     private lateinit var root: LinearLayout
-    private lateinit var headerSubtitle: TextView
     private lateinit var searchInput: EditText
     private lateinit var statusText: TextView
     private lateinit var tabBar: LinearLayout
     private lateinit var content: LinearLayout
+    private lateinit var miniArtwork: FrameLayout
     private lateinit var miniTitle: TextView
     private lateinit var miniSubtitle: TextView
     private lateinit var miniProgress: ProgressBar
@@ -160,6 +163,7 @@ class MainActivity : Activity() {
     private var playbackQueue: List<ApiTrack> = emptyList()
     private var currentIndex = -1
     private var isPlaying = false
+    private var miniArtworkTrackId: String? = null
 
     private val prefs by lazy { getSharedPreferences("mekamb_music_android", Context.MODE_PRIVATE) }
     private var apiEndpoint: String
@@ -197,31 +201,13 @@ class MainActivity : Activity() {
                 GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(bgTopColor, bgColor)
             )
-            setPadding(dp(14), dp(12), dp(14), dp(10))
+            setPadding(dp(12), dp(8), dp(12), dp(8))
         }
-
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(14))
-            background = rounded(elevatedColor, dp(22), strokeColor, 1)
-        }
-        val titleRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val brandColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        brandColumn.addView(label("Mekamb Music", 26f, textColor, Typeface.BOLD), matchWrapParams())
-        headerSubtitle = label("Private native player", 13f, mutedColor, Typeface.NORMAL)
-        brandColumn.addView(headerSubtitle, matchWrapParams())
-        titleRow.addView(brandColumn, weightParams(1f))
-        titleRow.addView(button("Refresh", compact = true) { refreshLibrary() }, LinearLayout.LayoutParams(dp(96), dp(40)))
-        header.addView(titleRow, matchWrapParams())
-        root.addView(header, matchWrapParams())
 
         val searchRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(12), 0, dp(8))
+            setPadding(0, 0, 0, dp(8))
         }
         searchInput = EditText(this).apply {
             setTextColor(textColor)
@@ -243,8 +229,8 @@ class MainActivity : Activity() {
             }
         }
         searchRow.addView(searchInput, LinearLayout.LayoutParams(0, dp(48), 1f))
-        searchRow.addView(space(dp(10), 1))
-        searchRow.addView(button("Go") { handleSearch() }, LinearLayout.LayoutParams(dp(68), dp(48)))
+        searchRow.addView(space(dp(8), 1))
+        searchRow.addView(iconButton("⌕") { handleSearch() }, LinearLayout.LayoutParams(dp(54), dp(48)))
         root.addView(searchRow, matchWrapParams())
 
         statusText = label("", 13f, mutedColor, Typeface.NORMAL).apply {
@@ -253,17 +239,6 @@ class MainActivity : Activity() {
             background = rounded(elevatedColor, dp(14), strokeColor, 1)
         }
         root.addView(statusText, matchWrapParams())
-
-        tabBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            setPadding(dp(4), dp(4), dp(4), dp(4))
-            background = rounded(surfaceColor, dp(18), strokeColor, 1)
-        }
-        root.addView(tabBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54)).apply {
-            topMargin = dp(10)
-            bottomMargin = dp(8)
-        })
 
         val scroll = ScrollView(this).apply {
             isFillViewport = false
@@ -277,6 +252,16 @@ class MainActivity : Activity() {
         root.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
         root.addView(playerBar(), matchWrapParams())
+
+        tabBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+            background = rounded(surfaceColor, dp(18), strokeColor, 1)
+        }
+        root.addView(tabBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(62)).apply {
+            topMargin = dp(8)
+        })
         setContentView(root)
     }
 
@@ -285,12 +270,16 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(12), dp(14), dp(12))
             background = rounded(elevatedColor, dp(22), strokeColor, 1)
+            setOnClickListener { showExpandedPlayer() }
         }
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        row.addView(artTile("M", "Music", dp(46)), LinearLayout.LayoutParams(dp(46), dp(46)).apply {
+        miniArtwork = FrameLayout(this).apply {
+            addView(artTile("M", "Music", dp(46)), FrameLayout.LayoutParams(dp(46), dp(46)))
+        }
+        row.addView(miniArtwork, LinearLayout.LayoutParams(dp(46), dp(46)).apply {
             rightMargin = dp(12)
         })
         val textColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -299,12 +288,12 @@ class MainActivity : Activity() {
         textColumn.addView(miniTitle, matchWrapParams())
         textColumn.addView(miniSubtitle, matchWrapParams())
         row.addView(textColumn, weightParams(1f))
-        row.addView(button("Prev", compact = true, primary = false) { playPrevious() }, LinearLayout.LayoutParams(dp(64), dp(38)))
+        row.addView(iconButton("⏮", primary = false) { playPrevious() }, LinearLayout.LayoutParams(dp(42), dp(38)))
         row.addView(space(dp(6), 1))
-        playButton = button("Play", compact = true) { togglePlayback() }
-        row.addView(playButton, LinearLayout.LayoutParams(dp(68), dp(38)))
+        playButton = iconButton("▶") { togglePlayback() }
+        row.addView(playButton, LinearLayout.LayoutParams(dp(48), dp(38)))
         row.addView(space(dp(6), 1))
-        row.addView(button("Next", compact = true, primary = false) { playNext() }, LinearLayout.LayoutParams(dp(64), dp(38)))
+        row.addView(iconButton("⏭", primary = false) { playNext() }, LinearLayout.LayoutParams(dp(42), dp(38)))
         holder.addView(row, matchWrapParams())
         miniProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 1000
@@ -316,6 +305,107 @@ class MainActivity : Activity() {
             topMargin = dp(10)
         })
         return holder
+    }
+
+    private fun showExpandedPlayer() {
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val screen = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(22), dp(18), dp(22), dp(24))
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(elevatedColor, bgColor)
+            )
+        }
+
+        val topRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        topRow.addView(label("Now Playing", 14f, mutedColor, Typeface.BOLD), weightParams(1f))
+        topRow.addView(iconButton("⌄", primary = false) { dialog.dismiss() }, LinearLayout.LayoutParams(dp(44), dp(40)))
+        screen.addView(topRow, matchWrapParams())
+
+        val track = currentTrack
+        val artworkSize = (resources.displayMetrics.widthPixels - dp(72)).coerceAtMost(dp(320))
+        val artwork = if (track == null) {
+            artTile("M", "Music", artworkSize)
+        } else {
+            artworkTile(track, track.title, track.displayArtist, artworkSize)
+        }
+        screen.addView(artwork, LinearLayout.LayoutParams(artworkSize, artworkSize).apply {
+            topMargin = dp(24)
+            bottomMargin = dp(26)
+        })
+
+        screen.addView(
+            label(track?.title ?: "Nothing playing", 24f, textColor, Typeface.BOLD).apply {
+                gravity = Gravity.CENTER
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+            },
+            matchWrapParams()
+        )
+        screen.addView(
+            label(
+                track?.let { "${it.displayArtist} · ${it.displayAlbum}" } ?: "Choose a track",
+                14f,
+                mutedColor,
+                Typeface.NORMAL
+            ).apply {
+                gravity = Gravity.CENTER
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+            },
+            matchWrapParams()
+        )
+
+        val expandedProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 1000
+            progress = miniProgress.progress
+            progressTintList = ColorStateList.valueOf(accentColor)
+            progressBackgroundTintList = ColorStateList.valueOf(Color.rgb(44, 53, 72))
+        }
+        screen.addView(expandedProgress, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(5)).apply {
+            topMargin = dp(26)
+            bottomMargin = dp(22)
+        })
+
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        controls.addView(iconButton("⏮", primary = false) {
+            playPrevious()
+            dialog.dismiss()
+            mainHandler.postDelayed({ showExpandedPlayer() }, 250)
+        }, LinearLayout.LayoutParams(dp(58), dp(52)).apply { rightMargin = dp(12) })
+        lateinit var expandedPlay: TextView
+        expandedPlay = iconButton(if (isPlaying) "⏸" else "▶") {
+            togglePlayback()
+            expandedPlay.text = if (isPlaying) "⏸" else "▶"
+            expandedProgress.progress = miniProgress.progress
+        }
+        controls.addView(expandedPlay, LinearLayout.LayoutParams(dp(76), dp(56)).apply {
+            leftMargin = dp(4)
+            rightMargin = dp(4)
+        })
+        controls.addView(iconButton("⏭", primary = false) {
+            playNext()
+            dialog.dismiss()
+            mainHandler.postDelayed({ showExpandedPlayer() }, 250)
+        }, LinearLayout.LayoutParams(dp(58), dp(52)).apply { leftMargin = dp(12) })
+        screen.addView(controls, matchWrapParams())
+
+        dialog.setContentView(screen)
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        }
+        dialog.show()
+        dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
     }
 
     private fun handleSearch() {
@@ -330,7 +420,6 @@ class MainActivity : Activity() {
         updateStatus()
         renderTabs()
         updateSearchHint()
-        headerSubtitle.text = "${tracks.size} songs · ${albums.size} albums · ${likedTrackIds.size} liked"
         content.removeAllViews()
         if (isLoading) {
             content.addView(sectionTitle("Loading..."))
@@ -351,12 +440,13 @@ class MainActivity : Activity() {
         tabBar.removeAllViews()
         MusicTab.entries.forEach { tab ->
             val tabButton = TextView(this).apply {
-                text = tab.label
+                text = "${tab.icon()}\n${tab.label}"
                 gravity = Gravity.CENTER
-                textSize = 13f
+                textSize = 11f
                 typeface = Typeface.DEFAULT_BOLD
                 setTextColor(if (selectedTab == tab) Color.BLACK else mutedColor)
                 background = rounded(if (selectedTab == tab) accentColor else Color.TRANSPARENT, dp(14))
+                setLineSpacing(0f, 0.92f)
                 setOnClickListener {
                     selectedTab = tab
                     selectedAlbumId = null
@@ -368,6 +458,16 @@ class MainActivity : Activity() {
                 leftMargin = dp(2)
                 rightMargin = dp(2)
             })
+        }
+    }
+
+    private fun MusicTab.icon(): String {
+        return when (this) {
+            MusicTab.Library -> "⌂"
+            MusicTab.Albums -> "▦"
+            MusicTab.Liked -> "♥"
+            MusicTab.Sources -> "+"
+            MusicTab.Settings -> "⚙"
         }
     }
 
@@ -539,6 +639,12 @@ class MainActivity : Activity() {
             testConnection()
         }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { leftMargin = dp(4) })
         content.addView(buttons, matchWrapParams())
+        content.addView(button("Refresh library", primary = false) {
+            refreshLibrary()
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply {
+            topMargin = dp(10)
+            bottomMargin = dp(4)
+        })
         content.addView(messageCard("On a real Android phone, localhost means the phone itself. Use your Mac/server LAN IP, for example http://192.168.1.50:8000. Plain HTTP is enabled for private LAN development."))
     }
 
@@ -816,13 +922,15 @@ class MainActivity : Activity() {
         if (track == null) {
             miniTitle.text = "Nothing playing"
             miniSubtitle.text = "Choose a track"
-            playButton.text = "Play"
+            playButton.text = "▶"
+            updateMiniArtwork(null)
             miniProgress.progress = 0
             return
         }
         miniTitle.text = track.title
         miniSubtitle.text = "${track.displayArtist} · ${track.displayAlbum}"
-        playButton.text = if (isPlaying) "Pause" else "Play"
+        playButton.text = if (isPlaying) "⏸" else "▶"
+        updateMiniArtwork(track)
         val player = mediaPlayer
         val duration = player?.duration?.takeIf { it > 0 } ?: 0
         miniProgress.progress = if (duration > 0) {
@@ -830,6 +938,20 @@ class MainActivity : Activity() {
         } else {
             0
         }
+    }
+
+    private fun updateMiniArtwork(track: ApiTrack?) {
+        if (!::miniArtwork.isInitialized) return
+        val nextId = track?.id
+        if (miniArtworkTrackId == nextId) return
+        miniArtworkTrackId = nextId
+        miniArtwork.removeAllViews()
+        val artwork = if (track == null) {
+            artTile("M", "Music", dp(46))
+        } else {
+            artworkTile(track, track.title, track.displayArtist, dp(46))
+        }
+        miniArtwork.addView(artwork, FrameLayout.LayoutParams(dp(46), dp(46)))
     }
 
     private fun <T> runIo(
@@ -1334,6 +1456,23 @@ class MainActivity : Activity() {
             textSize = if (compact) 12f else 14f
             setPadding(dp(if (compact) 10 else 14), 0, dp(if (compact) 10 else 14), 0)
             background = rounded(if (primary) accentColor else chipColor, dp(999), if (primary) Color.TRANSPARENT else strokeColor, if (primary) 0 else 1)
+            setOnClickListener { action() }
+        }
+    }
+
+    private fun iconButton(value: String, primary: Boolean = true, action: () -> Unit): TextView {
+        return TextView(this).apply {
+            text = value
+            gravity = Gravity.CENTER
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(if (primary) Color.BLACK else textColor)
+            textSize = if (value.length > 1) 18f else 21f
+            background = rounded(
+                if (primary) accentColor else chipColor,
+                dp(999),
+                if (primary) Color.TRANSPARENT else strokeColor,
+                if (primary) 0 else 1,
+            )
             setOnClickListener { action() }
         }
     }
