@@ -17,6 +17,7 @@ from app.db.models import (
     PlaybackState,
     PlaylistTrack,
     Track,
+    TrackAudioFeature,
     TrackPlay,
     UserAction,
     utcnow,
@@ -234,6 +235,7 @@ async def _apply_delete_track(session: AsyncSession, action: UserAction) -> None
         await session.execute(delete(LikedTrack).where(LikedTrack.track_id == track_id))
         await session.execute(delete(TrackPlay).where(TrackPlay.track_id == track_id))
         await session.execute(delete(PersonalizationSignal).where(PersonalizationSignal.track_id == track_id))
+        await session.execute(delete(TrackAudioFeature).where(TrackAudioFeature.track_id == track_id))
         await session.execute(delete(PlaybackQueueItem).where(PlaybackQueueItem.track_id == track_id))
         await session.execute(
             update(PlaybackState)

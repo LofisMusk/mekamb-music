@@ -130,6 +130,9 @@ class TrackPlay(Base):
     )
     track_id: Mapped[UUID] = mapped_column(ForeignKey("tracks.id"), nullable=False, index=True)
     played_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    completed: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    listen_ratio: Mapped[float | None] = mapped_column(Float)
+    source: Mapped[str] = mapped_column(String(64), default="api", nullable=False, index=True)
 
 
 class PersonalizationSignal(Base):
@@ -148,6 +151,32 @@ class PersonalizationSignal(Base):
     source: Mapped[str] = mapped_column(String(64), default="api", nullable=False, index=True)
     payload: Mapped[dict[str, object]] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class TrackAudioFeature(Base):
+    __tablename__ = "track_audio_features"
+    __table_args__ = (UniqueConstraint("track_id", name="uq_track_audio_features_track"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    track_id: Mapped[UUID] = mapped_column(ForeignKey("tracks.id"), nullable=False, index=True)
+    tempo: Mapped[float | None] = mapped_column(Float)
+    energy: Mapped[float | None] = mapped_column(Float)
+    chroma: Mapped[float | None] = mapped_column(Float)
+    spectral_centroid: Mapped[float | None] = mapped_column(Float)
+    mfcc: Mapped[list[float]] = mapped_column(JSON, default=list, nullable=False)
+    mood_tags: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    extractor: Mapped[str] = mapped_column(String(64), default="local", nullable=False)
+    features_version: Mapped[str] = mapped_column(String(32), default="v1", nullable=False)
+    extracted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+    def vector(self) -> list[float]:
+        values: list[float] = []
+        values.extend(float(value) for value in (self.mfcc or [])[:13])
+        values.extend(
+            float(value or 0.0)
+            for value in (self.tempo, self.energy, self.chroma, self.spectral_centroid)
+        )
+        return values
 
 
 class PlaybackState(Base):

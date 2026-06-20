@@ -151,6 +151,19 @@ class RecommendationImportResponse(BaseModel):
     failed: list[RecommendationImportItemResponse]
 
 
+class TrackAudioFeatureResponse(BaseModel):
+    track_id: UUID
+    tempo: float | None
+    energy: float | None
+    chroma: float | None
+    spectral_centroid: float | None
+    mfcc: list[float]
+    mood_tags: list[str]
+    extractor: str
+    features_version: str
+    extracted_at: datetime
+
+
 class IndexerImportRequest(BaseModel):
     name: str = Field(min_length=1, max_length=512)
     torrent_id: str | None = Field(default=None, max_length=128)
@@ -233,6 +246,14 @@ class LikedTrackListResponse(PageBase):
 class PlaybackEventResponse(BaseModel):
     track: TrackResponse
     played_at: datetime
+    completed: bool = True
+    listen_ratio: float | None = None
+
+
+class PlaybackEventRequest(BaseModel):
+    completed: bool = True
+    listen_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
+    source: str = Field(default="api", max_length=64)
 
 
 class PlaybackEventListResponse(PageBase):

@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     recommendation_sources: str = "indexer"
     recommendation_auto_import_limit: int = 3
     recommendation_min_seeders: int = 1
+    recommendation_use_gemini: bool = True
+    recommendation_gemini_candidate_limit: int = 24
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-1.5-flash"
+    gemini_timeout_seconds: float = 8.0
 
     # ── Redis search cache ───────────────────────────────────────────────────
     search_cache_ttl_seconds: int = 300

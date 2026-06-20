@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import random
 import re
 from collections import defaultdict
@@ -12,7 +13,20 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import DEFAULT_API_KEY_ID
-from app.db.models import ImportJob, LikedTrack, PersonalizationSignal, Track, TrackPlay
+from app.core.config import settings
+from app.db.models import (
+    ImportJob,
+    LikedTrack,
+    PersonalizationSignal,
+    Track,
+    TrackAudioFeature,
+    TrackPlay,
+)
+from app.recommendations.gemini import (
+    GeminiCandidate,
+    GeminiRecommendationClient,
+    GeminiRecommendationUnavailable,
+)
 from app.sources.indexers import MusicIndexerProvider
 from app.sources.personal_1337x import Personal1337xProvider
 from app.sources.piratebay import PirateBayProvider
@@ -77,12 +91,14 @@ class RecommendationEngine:
         personal_1337x: Personal1337xProvider,
         indexer: MusicIndexerProvider,
         api_key_id: str = DEFAULT_API_KEY_ID,
+        gemini_client: GeminiRecommendationClient | None = None,
     ) -> None:
         self.session = session
         self.piratebay = piratebay
         self.personal_1337x = personal_1337x
         self.indexer = indexer
         self.api_key_id = api_key_id
+        self.gemini_client = gemini_client
 
     async def recommend_for_track(
         self,
@@ -256,13 +272,27 @@ class RecommendationEngine:
         *,
         limit: int,
     ) -> list[LocalTrackRecommendation]:
+        if limit <= 0:
+            return []
         tracks = list(await self.session.scalars(select(Track).where(Track.id != seed.id)))
-        scored = [_score_track_against_seed(seed, candidate) for candidate in tracks]
-        return sorted(
+        features = await self._features_by_track_ids([seed.id, *(track.id for track in tracks)])
+        profile = await self._personalization_profile()
+        scored = [
+            _score_track_against_seed(
+                seed,
+                candidate,
+                seed_feature=features.get(seed.id),
+                candidate_feature=features.get(candidate.id),
+                profile=profile,
+            )
+            for candidate in tracks
+        ]
+        ranked = sorted(
             [item for item in scored if item.score > 0],
             key=lambda item: item.score,
             reverse=True,
-        )[:limit]
+        )
+        return await self._maybe_gemini_rerank(seed, ranked, limit=limit)
 
     async def _local_recommendations_for_library(
         self,
@@ -274,14 +304,90 @@ class RecommendationEngine:
             return []
         seed_ids = {track.id for track in seed_tracks}
         candidates = list(await self.session.scalars(select(Track).where(Track.id.not_in(seed_ids))))
+        features = await self._features_by_track_ids(
+            [*(track.id for track in seed_tracks), *(track.id for track in candidates)]
+        )
+        profile = await self._personalization_profile()
         best: dict[UUID, LocalTrackRecommendation] = {}
         for seed in seed_tracks:
             for candidate in candidates:
-                scored = _score_track_against_seed(seed, candidate)
+                scored = _score_track_against_seed(
+                    seed,
+                    candidate,
+                    seed_feature=features.get(seed.id),
+                    candidate_feature=features.get(candidate.id),
+                    profile=profile,
+                )
                 current = best.get(candidate.id)
                 if scored.score > 0 and (current is None or scored.score > current.score):
                     best[candidate.id] = scored
         return sorted(best.values(), key=lambda item: item.score, reverse=True)[:limit]
+
+    async def _features_by_track_ids(self, track_ids: list[UUID]) -> dict[UUID, TrackAudioFeature]:
+        unique_ids = list({track_id for track_id in track_ids})
+        if not unique_ids:
+            return {}
+        rows = await self.session.scalars(
+            select(TrackAudioFeature).where(TrackAudioFeature.track_id.in_(unique_ids))
+        )
+        return {row.track_id: row for row in rows}
+
+    async def _maybe_gemini_rerank(
+        self,
+        seed: Track,
+        ranked: list[LocalTrackRecommendation],
+        *,
+        limit: int,
+    ) -> list[LocalTrackRecommendation]:
+        if limit <= 0:
+            return []
+        if not settings.recommendation_use_gemini or self.gemini_client is None:
+            return ranked[:limit]
+        if not self.gemini_client.is_configured:
+            return ranked[:limit]
+
+        candidates = ranked[: max(limit, settings.recommendation_gemini_candidate_limit)]
+        by_id = {item.track.id: item for item in candidates}
+        try:
+            reranked = await self.gemini_client.rerank(
+                seed=seed,
+                candidates=[
+                    GeminiCandidate(track=item.track, score=item.score, reasons=item.reasons)
+                    for item in candidates
+                ],
+            )
+        except GeminiRecommendationUnavailable as exc:
+            logger.info("Gemini rerank unavailable; using local Python ranking: %s", exc)
+            return ranked[:limit]
+
+        selected: list[LocalTrackRecommendation] = []
+        seen: set[UUID] = set()
+        for track_id in reranked.ordered_ids:
+            item = by_id.get(track_id)
+            if item is None or track_id in seen:
+                continue
+            note = reranked.notes.get(track_id)
+            reasons = [*item.reasons, "gemini_rerank"]
+            if note:
+                reasons.append(f"gemini_note:{note}")
+            selected.append(
+                LocalTrackRecommendation(
+                    track=item.track,
+                    score=item.score,
+                    reasons=_dedupe_text(reasons),
+                )
+            )
+            seen.add(track_id)
+            if len(selected) >= limit:
+                break
+
+        for item in ranked:
+            if item.track.id in seen:
+                continue
+            selected.append(item)
+            if len(selected) >= limit:
+                break
+        return selected
 
     async def _external_candidates_for_queries(
         self,
@@ -378,15 +484,33 @@ class RecommendationEngine:
         return _dedupe_text(expanded)
 
 
-def _score_track_against_seed(seed: Track, candidate: Track) -> LocalTrackRecommendation:
+def _score_track_against_seed(
+    seed: Track,
+    candidate: Track,
+    *,
+    seed_feature: TrackAudioFeature | None = None,
+    candidate_feature: TrackAudioFeature | None = None,
+    profile: PersonalizationProfile | None = None,
+) -> LocalTrackRecommendation:
     score = 0.0
     reasons: list[str] = []
 
+    audio_similarity = _audio_similarity(seed_feature, candidate_feature)
+    if audio_similarity is not None:
+        score += audio_similarity * 70.0
+        reasons.append("audio_similarity")
+        if _near_number(seed_feature.tempo, candidate_feature.tempo, tolerance=8.0):
+            score += 8.0
+            reasons.append("similar_tempo")
+        if _near_number(seed_feature.energy, candidate_feature.energy, tolerance=0.035):
+            score += 6.0
+            reasons.append("similar_energy")
+
     if _same_text(seed.artist, candidate.artist) and seed.artist:
-        score += 55.0
+        score += 35.0
         reasons.append("same_artist")
     if _same_text(seed.album, candidate.album) and seed.album:
-        score += 35.0
+        score += 20.0
         reasons.append("same_album")
 
     overlap = _token_overlap(
@@ -394,19 +518,89 @@ def _score_track_against_seed(seed: Track, candidate: Track) -> LocalTrackRecomm
         f"{candidate.artist or ''} {candidate.album or ''} {candidate.title}",
     )
     if overlap:
-        score += min(25.0, overlap * 6.0)
+        score += min(18.0, overlap * 5.0)
         reasons.append("metadata_overlap")
 
     if seed.duration_seconds and candidate.duration_seconds:
         diff = abs(seed.duration_seconds - candidate.duration_seconds)
         if diff <= 30:
-            score += 10.0
+            score += 7.0
             reasons.append("similar_duration")
         elif diff <= 90:
-            score += 4.0
+            score += 3.0
             reasons.append("near_duration")
 
+    if profile is not None:
+        direct_weight = profile.track_weights.get(candidate.id, 0.0)
+        if direct_weight:
+            score += min(18.0, max(-18.0, direct_weight * 2.0))
+            reasons.append("personal_signal")
+
+        artist_key = _profile_key(candidate.artist)
+        if artist_key and artist_key in profile.artist_weights:
+            score += min(22.0, profile.artist_weights[artist_key] * 1.5)
+            reasons.append("artist_interest")
+
+        album_key = _profile_key(candidate.album)
+        if album_key and album_key in profile.album_weights:
+            score += min(10.0, profile.album_weights[album_key])
+            reasons.append("album_interest")
+
+    score -= _recently_played_penalty(candidate, profile)
     return LocalTrackRecommendation(track=candidate, score=round(score, 2), reasons=reasons)
+
+
+def _audio_similarity(
+    seed_feature: TrackAudioFeature | None,
+    candidate_feature: TrackAudioFeature | None,
+) -> float | None:
+    if seed_feature is None or candidate_feature is None:
+        return None
+    seed_vector = _normalized_audio_vector(seed_feature)
+    candidate_vector = _normalized_audio_vector(candidate_feature)
+    if not seed_vector or len(seed_vector) != len(candidate_vector):
+        return None
+    return max(0.0, _cosine_similarity(seed_vector, candidate_vector))
+
+
+def _normalized_audio_vector(feature: TrackAudioFeature) -> list[float]:
+    mfcc = list(feature.mfcc or [])[:13]
+    while len(mfcc) < 13:
+        mfcc.append(0.0)
+    return [
+        *(float(value) / 100.0 for value in mfcc),
+        float(feature.tempo or 0.0) / 220.0,
+        float(feature.energy or 0.0),
+        float(feature.chroma or 0.0),
+        float(feature.spectral_centroid or 0.0) / 8_000.0,
+    ]
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    dot = sum(a * b for a, b in zip(left, right, strict=True))
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if left_norm == 0 or right_norm == 0:
+        return 0.0
+    return dot / (left_norm * right_norm)
+
+
+def _near_number(left: float | None, right: float | None, *, tolerance: float) -> bool:
+    if left is None or right is None:
+        return False
+    return abs(float(left) - float(right)) <= tolerance
+
+
+def _recently_played_penalty(
+    candidate: Track,
+    profile: PersonalizationProfile | None,
+) -> float:
+    if profile is None:
+        return 0.0
+    direct_weight = profile.track_weights.get(candidate.id, 0.0)
+    if direct_weight < 0:
+        return min(10.0, abs(direct_weight))
+    return 0.0
 
 
 def _score_personalized_tracks(

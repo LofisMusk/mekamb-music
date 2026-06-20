@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
@@ -18,14 +19,22 @@ from app.api.schemas import (
     RecommendationImportRequest,
     RecommendationImportResponse,
     RecommendationResponse,
+    TrackAudioFeatureResponse,
 )
 from app.core.auth import ApiKeyIdentity
 from app.core.config import settings
+from app.db.models import Track, TrackAudioFeature, utcnow
 from app.imports.service import ImportService
+from app.recommendations.audio_features import (
+    AudioFeatureExtractionUnavailable,
+    extract_audio_features,
+)
 from app.recommendations.engine import ExternalRecommendation, RecommendationEngine, RecommendationSet
+from app.recommendations.gemini import GeminiRecommendationClient
 from app.sources.indexers import MusicIndexerProvider
 from app.sources.personal_1337x import Personal1337xProvider
 from app.sources.piratebay import PirateBayProvider
+from app.storage.library import build_library_storage
 from app.sync.actions import IMPORT_TORRENT, import_action_payload, record_user_action
 
 router = APIRouter(dependencies=[Depends(require_token)])
@@ -38,12 +47,20 @@ def _recommendation_engine(
     piratebay: PirateBayProvider = Depends(piratebay_provider),
     personal_1337x: Personal1337xProvider = Depends(personal_1337x_provider),
 ) -> RecommendationEngine:
+    gemini_client = None
+    if settings.recommendation_use_gemini:
+        gemini_client = GeminiRecommendationClient(
+            api_key=settings.gemini_api_key,
+            model=settings.gemini_model,
+            timeout_seconds=settings.gemini_timeout_seconds,
+        )
     return RecommendationEngine(
         session=session,
         indexer=indexer,
         piratebay=piratebay,
         personal_1337x=personal_1337x,
         api_key_id=api_key.id,
+        gemini_client=gemini_client,
     )
 
 
@@ -65,6 +82,50 @@ async def recommend_for_track(
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return _recommendation_response(recommendations)
+
+
+@router.post("/tracks/{track_id}/audio-features", response_model=TrackAudioFeatureResponse)
+async def extract_track_audio_features(
+    track_id: UUID,
+    session: AsyncSession = Depends(db_session),
+) -> TrackAudioFeatureResponse:
+    track = await session.get(Track, track_id)
+    if track is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Track not found.")
+
+    try:
+        storage = build_library_storage(settings)
+        path = storage.ensure_cached(track.storage_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid library path.") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audio file not found.") from exc
+
+    try:
+        extracted = extract_audio_features(path)
+    except AudioFeatureExtractionUnavailable as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    row = await session.scalar(
+        select(TrackAudioFeature).where(TrackAudioFeature.track_id == track_id)
+    )
+    if row is None:
+        row = TrackAudioFeature(track_id=track_id)
+        session.add(row)
+    row.tempo = extracted.tempo
+    row.energy = extracted.energy
+    row.chroma = extracted.chroma
+    row.spectral_centroid = extracted.spectral_centroid
+    row.mfcc = extracted.mfcc
+    row.mood_tags = extracted.mood_tags
+    row.extractor = "librosa"
+    row.features_version = "v1"
+    row.extracted_at = utcnow()
+    await session.commit()
+    await session.refresh(row)
+    return _audio_feature_response(row)
 
 
 @router.get("/library", response_model=RecommendationResponse)
@@ -282,6 +343,21 @@ def _recommendation_response(recommendations: RecommendationSet) -> Recommendati
             for item in recommendations.local_tracks
         ],
         external_candidates=[_candidate_response(item) for item in recommendations.external_candidates],
+    )
+
+
+def _audio_feature_response(row: TrackAudioFeature) -> TrackAudioFeatureResponse:
+    return TrackAudioFeatureResponse(
+        track_id=row.track_id,
+        tempo=row.tempo,
+        energy=row.energy,
+        chroma=row.chroma,
+        spectral_centroid=row.spectral_centroid,
+        mfcc=[float(value) for value in (row.mfcc or [])],
+        mood_tags=[str(value) for value in (row.mood_tags or [])],
+        extractor=row.extractor,
+        features_version=row.features_version,
+        extracted_at=row.extracted_at,
     )
 
 

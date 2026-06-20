@@ -15,6 +15,7 @@ from app.api.schemas import (
     LikedTrackListResponse,
     LikedTrackResponse,
     PlaybackEventListResponse,
+    PlaybackEventRequest,
     PlaybackEventResponse,
     TrackListResponse,
     TrackResponse,
@@ -23,7 +24,15 @@ from app.api.schemas import (
 )
 from app.core.auth import ApiKeyIdentity
 from app.core.config import settings
-from app.db.models import LikedTrack, PersonalizationSignal, PlaylistTrack, Track, TrackPlay, utcnow
+from app.db.models import (
+    LikedTrack,
+    PersonalizationSignal,
+    PlaylistTrack,
+    Track,
+    TrackAudioFeature,
+    TrackPlay,
+    utcnow,
+)
 from app.db.session import AsyncSessionLocal
 from app.library.audio import extract_embedded_artwork, media_type_for_audio_file
 from app.library.queries import (
@@ -249,6 +258,7 @@ async def like_track(
 )
 async def record_track_play(
     track_id: UUID,
+    payload: PlaybackEventRequest | None = None,
     api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
 ) -> PlaybackEventResponse:
@@ -256,16 +266,35 @@ async def record_track_play(
     if track is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Track not found.")
 
-    playback_event = TrackPlay(api_key_id=api_key.id, track_id=track_id)
+    event = payload or PlaybackEventRequest()
+    is_skip = (not event.completed) or (
+        event.listen_ratio is not None and event.listen_ratio < 0.5
+    )
+    signal_type = "skip" if is_skip else "play"
+    signal_weight = -3.0 if is_skip else 1.0
+
+    playback_event = TrackPlay(
+        api_key_id=api_key.id,
+        track_id=track_id,
+        completed=event.completed,
+        listen_ratio=event.listen_ratio,
+        source=event.source,
+    )
     session.add(playback_event)
     session.add(
         PersonalizationSignal(
             api_key_id=api_key.id,
             track_id=track_id,
-            signal_type="play",
-            weight=1.0,
-            source="api",
-            payload={"track_title": track.title, "artist": track.artist, "album": track.album},
+            signal_type=signal_type,
+            weight=signal_weight,
+            source=event.source,
+            payload={
+                "track_title": track.title,
+                "artist": track.artist,
+                "album": track.album,
+                "completed": event.completed,
+                "listen_ratio": event.listen_ratio,
+            },
         )
     )
     await session.commit()
@@ -362,6 +391,7 @@ async def delete_track(
     await session.execute(delete(LikedTrack).where(LikedTrack.track_id == track_id))
     await session.execute(delete(TrackPlay).where(TrackPlay.track_id == track_id))
     await session.execute(delete(PersonalizationSignal).where(PersonalizationSignal.track_id == track_id))
+    await session.execute(delete(TrackAudioFeature).where(TrackAudioFeature.track_id == track_id))
     await clear_deleted_track_from_playback(session, track_id)
     await session.delete(track)
     await session.commit()
@@ -537,7 +567,12 @@ def _liked_track_to_dict(liked_track: LikedTrack, track: Track) -> dict[str, obj
 
 
 def _playback_event_to_dict(playback_event: TrackPlay, track: Track) -> dict[str, object]:
-    return {"track": track.to_dict(), "played_at": playback_event.played_at.isoformat()}
+    return {
+        "track": track.to_dict(),
+        "played_at": playback_event.played_at.isoformat(),
+        "completed": playback_event.completed,
+        "listen_ratio": playback_event.listen_ratio,
+    }
 
 
 async def _resolve_stream_target(
