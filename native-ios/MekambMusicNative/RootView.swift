@@ -73,6 +73,7 @@ struct RootView: View {
         }
         .onChange(of: app.selectedTab) { _, tab in
             if tab != .albums { app.selectedAlbumId = nil }
+            if tab != .playlists { app.selectedPlaylistId = nil }
         }
     }
 
@@ -135,6 +136,9 @@ struct RootView: View {
             case .albums:
                 AlbumsView()
                     .environmentObject(app)
+            case .playlists:
+                PlaylistsView()
+                    .environmentObject(app)
             case .settings:
                 SettingsView()
                     .environmentObject(app)
@@ -150,6 +154,7 @@ struct RootView: View {
                     app.searchMode = .library
                     app.selectedTab = tab
                     if tab != .albums { app.selectedAlbumId = nil }
+                    if tab != .playlists { app.selectedPlaylistId = nil }
                 } label: {
                     VStack(spacing: 4) {
                         Image(systemName: icon(for: tab))
@@ -182,7 +187,9 @@ struct RootView: View {
         case .indexer:
             return "Search indexers..."
         case .library:
-            return app.selectedTab == .albums ? "Search albums..." : "Search library..."
+            if app.selectedTab == .albums { return "Search albums..." }
+            if app.selectedTab == .playlists { return "Search playlists..." }
+            return "Search library..."
         }
     }
 
@@ -192,6 +199,8 @@ struct RootView: View {
             return "music.note.list"
         case .albums:
             return "square.grid.2x2.fill"
+        case .playlists:
+            return "list.bullet.rectangle.fill"
         case .liked:
             return "heart.fill"
         case .settings:
@@ -634,6 +643,192 @@ struct AlbumCardNative: View {
     }
 }
 
+struct PlaylistsView: View {
+    @EnvironmentObject private var app: AppState
+    @State private var showingCreatePlaylist = false
+    @State private var newPlaylistName = ""
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Button { app.selectedPlaylistId = nil } label: {
+                        if app.selectedPlaylistId != nil {
+                            Label("Playlists", systemImage: "chevron.left")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    Text(app.selectedPlaylist?.name ?? "Playlists")
+                        .font(.title2.bold())
+                        .lineLimit(1)
+
+                    Spacer()
+
+                    if app.isLoading {
+                        ProgressView()
+                    } else if app.selectedPlaylistId == nil {
+                        Button {
+                            newPlaylistName = ""
+                            showingCreatePlaylist = true
+                        } label: {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.title3)
+                        }
+                        .accessibilityLabel("Create Playlist")
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.top, 12)
+
+                if let playlist = app.selectedPlaylist {
+                    PlaylistDetailView(playlist: playlist)
+                        .environmentObject(app)
+                } else if app.filteredPlaylists.isEmpty {
+                    ContentUnavailableView(app.canUseApi ? "No playlists" : "Connect API", systemImage: app.canUseApi ? "music.note.list" : "wifi.exclamationmark", description: Text(app.canUseApi ? "Create a playlist or add songs from track menus." : "Open Settings and set endpoint + token."))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 48)
+                } else {
+                    LazyVStack(spacing: 10) {
+                        ForEach(app.filteredPlaylists) { playlist in
+                            PlaylistCardNative(playlist: playlist)
+                                .environmentObject(app)
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+            }
+            .padding(.bottom, 10)
+        }
+        .refreshable { await app.refreshLibrary() }
+        .alert("New Playlist", isPresented: $showingCreatePlaylist) {
+            TextField("Playlist name", text: $newPlaylistName)
+            Button("Create") {
+                Task { await app.createPlaylist(named: newPlaylistName) }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+    }
+}
+
+struct PlaylistCardNative: View {
+    @EnvironmentObject private var app: AppState
+    let playlist: PlaylistDetail
+
+    var body: some View {
+        Button {
+            app.selectedPlaylistId = playlist.id
+        } label: {
+            HStack(spacing: 12) {
+                ZStack {
+                    LinearGradient(colors: [.green.opacity(0.65), .blue.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    Image(systemName: "music.note.list")
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 58, height: 58)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(playlist.name)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text(playlist.trackCountText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(12)
+            .background(Color.white.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct PlaylistDetailView: View {
+    @EnvironmentObject private var app: AppState
+    let playlist: PlaylistDetail
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .bottom, spacing: 16) {
+                ZStack {
+                    LinearGradient(colors: [.green.opacity(0.65), .blue.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    Image(systemName: "music.note.list")
+                        .font(.largeTitle.weight(.semibold))
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 132, height: 132)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(playlist.name)
+                        .font(.title2.bold())
+                        .lineLimit(2)
+                    Text(playlist.trackCountText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    HStack(spacing: 10) {
+                        Button {
+                            if let first = playlist.orderedTracks.first {
+                                app.play(first, queue: playlist.orderedTracks)
+                            }
+                        } label: {
+                            Label("Play", systemImage: "play.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(playlist.orderedTracks.isEmpty)
+
+                        Button {
+                            let tracks = playlist.orderedTracks.shuffled()
+                            if let first = tracks.first {
+                                app.play(first, queue: tracks)
+                            }
+                        } label: {
+                            Image(systemName: "shuffle")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(playlist.orderedTracks.isEmpty)
+
+                        Button(role: .destructive) {
+                            Task { await app.deletePlaylist(playlist) }
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .padding(.top, 6)
+                }
+            }
+            .padding(.horizontal)
+
+            if playlist.orderedTracks.isEmpty {
+                ContentUnavailableView("No tracks", systemImage: "music.note", description: Text("Add songs from a track menu."))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 24)
+            } else {
+                LazyVStack(spacing: 10) {
+                    ForEach(playlist.orderedTracks) { track in
+                        TrackRowNative(track: track, playlist: playlist)
+                            .environmentObject(app)
+                    }
+                }
+                .padding(.horizontal)
+            }
+        }
+    }
+}
+
 struct AlbumArtworkView: View {
     @EnvironmentObject private var app: AppState
     let album: Album
@@ -680,6 +875,7 @@ struct TrackRowNative: View {
     @EnvironmentObject private var app: AppState
     @State private var dragOffset: CGFloat = 0
     let track: ApiTrack
+    var playlist: PlaylistDetail? = nil
 
     var body: some View {
         ZStack(alignment: .leading) {
@@ -723,6 +919,26 @@ struct TrackRowNative: View {
                     } label: {
                         Label("Add to Queue", systemImage: "text.badge.plus")
                     }
+                    if !app.playlists.isEmpty {
+                        Menu {
+                            ForEach(app.playlists) { playlist in
+                                Button {
+                                    Task { await app.addTrack(track, to: playlist) }
+                                } label: {
+                                    Label(playlist.name, systemImage: "music.note.list")
+                                }
+                            }
+                        } label: {
+                            Label("Add to Playlist", systemImage: "text.badge.plus")
+                        }
+                    }
+                    if let playlist {
+                        Button(role: .destructive) {
+                            Task { await app.removeTrack(track, from: playlist) }
+                        } label: {
+                            Label("Remove from Playlist", systemImage: "minus.circle")
+                        }
+                    }
                     if app.isTrackAvailableOffline(track) {
                         Label("Available Offline", systemImage: "arrow.down.circle.fill")
                         Button(role: .destructive) {
@@ -763,7 +979,11 @@ struct TrackRowNative: View {
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
-            app.play(track)
+            if let playlist {
+                app.play(track, queue: playlist.orderedTracks)
+            } else {
+                app.play(track)
+            }
         }
         .simultaneousGesture(
                 DragGesture(minimumDistance: 24)
@@ -917,8 +1137,8 @@ struct PlayerBar: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            ProgressView(value: app.playbackProgress)
-                .tint(.blue)
+            ScrubbablePlaybackBar(tint: .blue)
+                .environmentObject(app)
 
             HStack(spacing: 10) {
                 Button { app.toggleShuffle() } label: {
@@ -1007,6 +1227,48 @@ struct PlayerBar: View {
     }
 }
 
+struct ScrubbablePlaybackBar: View {
+    @EnvironmentObject private var app: AppState
+    let tint: Color
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.16))
+                    .frame(height: 4)
+
+                Capsule()
+                    .fill(tint)
+                    .frame(width: proxy.size.width * app.playbackProgress, height: 4)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        seek(to: value.location.x, width: proxy.size.width)
+                    }
+                    .onEnded { value in
+                        seek(to: value.location.x, width: proxy.size.width)
+                    }
+            )
+        }
+        .frame(height: 18)
+        .accessibilityLabel("Playback position")
+        .accessibilityValue("\(Int(app.playbackProgress * 100)) percent")
+    }
+
+    private func seek(to x: CGFloat, width: CGFloat) {
+        guard width > 0,
+              let duration = app.currentTrack?.durationSeconds,
+              duration.isFinite,
+              duration > 0 else { return }
+        let fraction = min(max(Double(x / width), 0), 1)
+        app.seek(to: duration * fraction)
+    }
+}
+
 struct NowPlayingSheetView: View {
     @EnvironmentObject private var app: AppState
     @Environment(\.dismiss) private var dismiss
@@ -1063,8 +1325,8 @@ struct NowPlayingSheetView: View {
                                     .accessibilityLabel(app.likedTrackIds.contains(track.id) ? "Unlike" : "Like")
                                 }
 
-                                ProgressView(value: app.playbackProgress)
-                                    .tint(.white)
+                                ScrubbablePlaybackBar(tint: .white)
+                                    .environmentObject(app)
                                     .padding(.top, 12)
 
                                 HStack {

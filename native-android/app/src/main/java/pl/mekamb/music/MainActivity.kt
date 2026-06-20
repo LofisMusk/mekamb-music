@@ -20,6 +20,7 @@ import android.text.InputType
 import android.text.TextUtils
 import android.util.LruCache
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
@@ -51,6 +52,7 @@ class MainActivity : Activity() {
     private enum class MusicTab(val label: String) {
         Library("Library"),
         Albums("Albums"),
+        Playlists("Playlists"),
         Liked("Liked"),
         Settings("Settings")
     }
@@ -107,6 +109,15 @@ class MainActivity : Activity() {
         val tracks: List<ApiTrack>
     )
 
+    private data class Playlist(
+        val id: String,
+        val name: String,
+        val tracks: List<ApiTrack>,
+        val updatedAt: String?
+    ) {
+        val trackCountText: String get() = if (tracks.size == 1) "1 song" else "${tracks.size} songs"
+    }
+
     private data class TorrentResult(
         val name: String,
         val torrentId: String,
@@ -119,6 +130,13 @@ class MainActivity : Activity() {
         val sizeBytes: Long?,
         val sizeLabel: String?,
         val uploader: String?
+    )
+
+    private data class OfflineRecord(
+        val track: ApiTrack,
+        val relativePath: String,
+        val sizeBytes: Long,
+        val downloadedAt: Long
     )
 
     private class ApiException(message: String) : Exception(message)
@@ -163,19 +181,26 @@ class MainActivity : Activity() {
     private var shuffleEnabled = false
     private var repeatMode = RepeatMode.Off
     private var selectedAlbumId: String? = null
+    private var selectedPlaylistId: String? = null
     private var isLoading = false
     private var statusMessage: String? = null
 
     private var tracks: List<ApiTrack> = emptyList()
     private var albums: List<Album> = emptyList()
+    private var playlists: List<Playlist> = emptyList()
     private var likedTrackIds: Set<String> = emptySet()
     private var torrents: List<TorrentResult> = emptyList()
+    private var offlineRecords: MutableMap<String, OfflineRecord> = mutableMapOf()
+    private var offlineTrackIds: Set<String> = emptySet()
+    private var downloadingTrackIds: Set<String> = emptySet()
+    private var downloadingAlbumIds: Set<String> = emptySet()
     private val artworkCache = object : LruCache<String, Bitmap>(32 * 1024) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
     }
     private val missingArtworkIds = mutableSetOf<String>()
     private val requestedArtworkIds = mutableSetOf<String>()
     private val playbackRequestId = AtomicInteger(0)
+    private val playbackPrefetchingTrackIds = mutableSetOf<String>()
 
     private var mediaPlayer: MediaPlayer? = null
     private var currentTrack: ApiTrack? = null
@@ -186,6 +211,7 @@ class MainActivity : Activity() {
 
     private val prefs by lazy { getSharedPreferences("mekamb_music_android", Context.MODE_PRIVATE) }
     private val artworkDiskDir by lazy { File(cacheDir, "artwork/v1").apply { mkdirs() } }
+    private val offlineTrackDir by lazy { File(filesDir, "offline/tracks").apply { mkdirs() } }
     private var apiEndpoint: String
         get() = prefs.getString("api_endpoint", "") ?: ""
         set(value) = prefs.edit().putString("api_endpoint", value).apply()
@@ -200,6 +226,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         window.statusBarColor = bgColor
         window.navigationBarColor = bgColor
+        loadOfflineLibrary()
         buildLayout()
         render()
         refreshLibrary()
@@ -364,6 +391,15 @@ class MainActivity : Activity() {
             progress = 0
             progressTintList = ColorStateList.valueOf(accentAltColor)
             progressBackgroundTintList = ColorStateList.valueOf(Color.rgb(44, 53, 72))
+            setOnTouchListener { view, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE, MotionEvent.ACTION_UP -> {
+                        seekFromProgressTouch(event.x, view.width)
+                        true
+                    }
+                    else -> false
+                }
+            }
         }
         holder.addView(miniProgress, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(4)))
 
@@ -375,6 +411,7 @@ class MainActivity : Activity() {
         modeRow.addView(iconText("⇄", if (shuffleEnabled) accentAltColor else mutedColor) {
             shuffleEnabled = !shuffleEnabled
             updateMiniPlayer()
+            schedulePlaybackSideEffects()
         }, LinearLayout.LayoutParams(dp(34), dp(28)))
         modeRow.addView(space(1, 1), weightParams(1f))
         modeRow.addView(label(repeatMode.label, 11f, mutedColor, Typeface.NORMAL), wrapParams())
@@ -386,6 +423,7 @@ class MainActivity : Activity() {
                 RepeatMode.One -> RepeatMode.Off
             }
             updateMiniPlayer()
+            schedulePlaybackSideEffects()
         }, LinearLayout.LayoutParams(dp(34), dp(28)))
         holder.addView(modeRow, matchWrapParams())
 
@@ -503,6 +541,16 @@ class MainActivity : Activity() {
             progress = miniProgress.progress
             progressTintList = ColorStateList.valueOf(Color.WHITE)
             progressBackgroundTintList = ColorStateList.valueOf(Color.rgb(44, 53, 72))
+            setOnTouchListener { view, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE, MotionEvent.ACTION_UP -> {
+                        seekFromProgressTouch(event.x, view.width)
+                        progress = miniProgress.progress
+                        true
+                    }
+                    else -> false
+                }
+            }
         }
         screen.addView(expandedProgress, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(5)).apply {
             topMargin = dp(26)
@@ -516,6 +564,7 @@ class MainActivity : Activity() {
         controls.addView(iconText("⇄", if (shuffleEnabled) accentAltColor else textColor) {
             shuffleEnabled = !shuffleEnabled
             updateMiniPlayer()
+            schedulePlaybackSideEffects()
         }, LinearLayout.LayoutParams(dp(46), dp(52)).apply { rightMargin = dp(10) })
         controls.addView(iconButton("⏮", primary = false) {
             playPrevious()
@@ -544,6 +593,7 @@ class MainActivity : Activity() {
                 RepeatMode.One -> RepeatMode.Off
             }
             updateMiniPlayer()
+            schedulePlaybackSideEffects()
         }, LinearLayout.LayoutParams(dp(46), dp(52)).apply { leftMargin = dp(10) })
         screen.addView(controls, matchWrapParams())
 
@@ -596,6 +646,7 @@ class MainActivity : Activity() {
             when (selectedTab) {
                 MusicTab.Library -> renderLibrary()
                 MusicTab.Albums -> renderAlbums()
+                MusicTab.Playlists -> renderPlaylists()
                 MusicTab.Liked -> renderLiked()
                 MusicTab.Settings -> renderSettings()
             }
@@ -615,6 +666,7 @@ class MainActivity : Activity() {
                     selectedTab = tab
                     searchMode = SearchMode.Library
                     selectedAlbumId = null
+                    selectedPlaylistId = null
                     statusMessage = null
                     render()
                 }
@@ -641,6 +693,7 @@ class MainActivity : Activity() {
         return when (this) {
             MusicTab.Library -> R.drawable.ic_tab_library
             MusicTab.Albums -> R.drawable.ic_tab_albums
+            MusicTab.Playlists -> R.drawable.ic_tab_library
             MusicTab.Liked -> R.drawable.ic_tab_liked
             MusicTab.Settings -> R.drawable.ic_tab_settings
         }
@@ -682,6 +735,7 @@ class MainActivity : Activity() {
             searchMode == SearchMode.Torrent -> "Search torrents..."
             searchMode == SearchMode.Indexers -> "Search indexers..."
             selectedTab == MusicTab.Albums -> "Search albums..."
+            selectedTab == MusicTab.Playlists -> "Search playlists..."
             selectedTab == MusicTab.Settings -> "Search is disabled in settings"
             else -> "Search library..."
         }
@@ -782,6 +836,13 @@ class MainActivity : Activity() {
                 shuffleEnabled = true
                 album.tracks.shuffled().firstOrNull()?.let { playTrack(it, album.tracks.shuffled()) }
             }, LinearLayout.LayoutParams(dp(42), dp(42)))
+            albumActions.addView(iconText(albumOfflineIcon(album), albumOfflineColor(album)) {
+                if (isAlbumOffline(album)) {
+                    removeOfflineAlbum(album)
+                } else {
+                    downloadAlbumForOffline(album)
+                }
+            }, LinearLayout.LayoutParams(dp(42), dp(42)).apply { leftMargin = dp(8) })
             copy.addView(albumActions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46)).apply {
                 topMargin = dp(8)
             })
@@ -824,6 +885,208 @@ class MainActivity : Activity() {
                 bottomMargin = dp(7)
             })
         }
+    }
+
+    private fun renderPlaylists() {
+        val playlistId = selectedPlaylistId
+        if (playlistId != null) {
+            val playlist = playlists.firstOrNull { it.id == playlistId }
+            if (playlist == null) {
+                selectedPlaylistId = null
+                renderPlaylists()
+                return
+            }
+            content.addView(button("Back to playlists", primary = false) {
+                selectedPlaylistId = null
+                render()
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply {
+                leftMargin = dp(16)
+                rightMargin = dp(16)
+                topMargin = dp(10)
+            })
+
+            val hero = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.BOTTOM
+                setPadding(dp(16), dp(16), dp(16), dp(12))
+            }
+            hero.addView(artTile(playlist.name, "Playlist", dp(132)), LinearLayout.LayoutParams(dp(132), dp(132)).apply {
+                rightMargin = dp(16)
+            })
+            val copy = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            copy.addView(label(playlist.name, 22f, textColor, Typeface.BOLD).apply {
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+            }, matchWrapParams())
+            copy.addView(label(playlist.trackCountText, 12f, mutedColor, Typeface.NORMAL), matchWrapParams())
+            val actions = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            actions.addView(iconButton("▶", accent = accentAltColor) {
+                playlist.tracks.firstOrNull()?.let { playTrack(it, playlist.tracks) }
+            }, LinearLayout.LayoutParams(dp(46), dp(42)).apply { rightMargin = dp(10) })
+            actions.addView(iconText("⇄", textColor) {
+                val shuffled = playlist.tracks.shuffled()
+                shuffled.firstOrNull()?.let { playTrack(it, shuffled) }
+            }, LinearLayout.LayoutParams(dp(42), dp(42)))
+            actions.addView(iconText("⌫", dangerColor) {
+                deletePlaylist(playlist)
+            }, LinearLayout.LayoutParams(dp(42), dp(42)).apply { leftMargin = dp(8) })
+            copy.addView(actions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46)).apply {
+                topMargin = dp(8)
+            })
+            hero.addView(copy, weightParams(1f))
+            content.addView(hero, matchWrapParams())
+
+            if (playlist.tracks.isEmpty()) {
+                content.addView(messageCard("No tracks yet. Add songs from the playlist button on a track row."))
+            } else {
+                playlist.tracks.forEach { track ->
+                    content.addView(trackRow(track, playlist.tracks, playlist))
+                }
+            }
+            return
+        }
+
+        val query = searchInput.text.toString().trim().lowercase(Locale.getDefault())
+        val visible = playlists.filter {
+            query.isEmpty() ||
+                it.name.lowercase(Locale.getDefault()).contains(query) ||
+                it.tracks.any { track ->
+                    track.title.lowercase(Locale.getDefault()).contains(query) ||
+                        track.displayArtist.lowercase(Locale.getDefault()).contains(query)
+                }
+        }
+
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), 0, dp(16), 0)
+        }
+        titleRow.addView(sectionTitle("Playlists"), weightParams(1f))
+        titleRow.addView(iconButton("+", accent = accentAltColor) {
+            showCreatePlaylistDialog()
+        }, LinearLayout.LayoutParams(dp(42), dp(42)))
+        content.addView(titleRow, matchWrapParams())
+
+        if (!canUseApi()) {
+            content.addView(messageCard("Set API endpoint and token in Settings."))
+        }
+        if (visible.isEmpty()) {
+            content.addView(messageCard("No playlists yet. Create one with + or add a song from a track row."))
+            return
+        }
+        visible.forEach { playlist ->
+            content.addView(playlistRow(playlist))
+        }
+    }
+
+    private fun playlistRow(playlist: Playlist): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = rounded(surfaceColor, dp(18), strokeColor, 1)
+            setOnClickListener {
+                selectedPlaylistId = playlist.id
+                render()
+            }
+        }
+        row.addView(artTile(playlist.name, "Playlist", dp(56)), LinearLayout.LayoutParams(dp(56), dp(56)).apply {
+            rightMargin = dp(12)
+        })
+        val meta = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        meta.addView(label(playlist.name, 16f, textColor, Typeface.BOLD).singleLineEnd(), matchWrapParams())
+        meta.addView(label(playlist.trackCountText, 13f, mutedColor, Typeface.NORMAL), matchWrapParams())
+        row.addView(meta, weightParams(1f))
+        row.addView(iconText("›", mutedColor) {
+            selectedPlaylistId = playlist.id
+            render()
+        }, LinearLayout.LayoutParams(dp(32), dp(36)))
+        return row.withCardMargin()
+    }
+
+    private fun showCreatePlaylistDialog() {
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+            background = rounded(elevatedColor, dp(22), strokeColor, 1)
+        }
+        box.addView(label("New Playlist", 20f, textColor, Typeface.BOLD), matchWrapParams())
+        val nameField = editField("Playlist name", "", false)
+        box.addView(nameField, fieldParams())
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        actions.addView(button("Cancel", primary = false) { dialog.dismiss() }, LinearLayout.LayoutParams(0, dp(44), 1f).apply {
+            rightMargin = dp(6)
+        })
+        actions.addView(button("Create") {
+            val name = nameField.text.toString()
+            dialog.dismiss()
+            createPlaylist(name)
+        }, LinearLayout.LayoutParams(0, dp(44), 1f).apply {
+            leftMargin = dp(6)
+        })
+        box.addView(actions, matchWrapParams())
+        dialog.setContentView(box)
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.show()
+        dialog.window?.setLayout((resources.displayMetrics.widthPixels * 0.9f).roundToInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
+    }
+
+    private fun showPlaylistPicker(track: ApiTrack, sourcePlaylist: Playlist?) {
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+            background = rounded(elevatedColor, dp(22), strokeColor, 1)
+        }
+        box.addView(label("Playlists", 20f, textColor, Typeface.BOLD), matchWrapParams())
+        box.addView(label(track.title, 13f, mutedColor, Typeface.NORMAL).singleLineEnd(), matchWrapParams())
+
+        box.addView(button("Create new playlist", primary = false) {
+            dialog.dismiss()
+            showCreatePlaylistDialog()
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply {
+            topMargin = dp(12)
+        })
+
+        if (playlists.isEmpty()) {
+            box.addView(messageCard("No playlists yet. Create one first."))
+        } else {
+            playlists.forEach { playlist ->
+                box.addView(button("Add to ${playlist.name}", primary = false) {
+                    dialog.dismiss()
+                    addTrackToPlaylist(track, playlist)
+                }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)).apply {
+                    topMargin = dp(6)
+                })
+            }
+        }
+
+        if (sourcePlaylist != null) {
+            box.addView(button("Remove from ${sourcePlaylist.name}", primary = false) {
+                dialog.dismiss()
+                removeTrackFromPlaylist(track, sourcePlaylist)
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)).apply {
+                topMargin = dp(12)
+            })
+        }
+
+        box.addView(button("Done", primary = true) { dialog.dismiss() }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply {
+            topMargin = dp(12)
+        })
+
+        dialog.setContentView(box)
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.show()
+        dialog.window?.setLayout((resources.displayMetrics.widthPixels * 0.92f).roundToInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
     }
 
     private fun renderSources() {
@@ -878,10 +1141,17 @@ class MainActivity : Activity() {
             topMargin = dp(10)
             bottomMargin = dp(4)
         })
+        content.addView(messageCard("Offline downloads: ${offlineRecords.size} songs · ${formatBytes(offlineStorageBytes())}"))
+        content.addView(button("Remove offline downloads", primary = false) {
+            clearOfflineDownloads()
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply {
+            topMargin = dp(4)
+            bottomMargin = dp(4)
+        })
         content.addView(messageCard("On a real Android phone, localhost means the phone itself. Use your Mac/server LAN IP, for example http://192.168.1.50:8000. Plain HTTP is enabled for private LAN development."))
     }
 
-    private fun trackRow(track: ApiTrack, queue: List<ApiTrack>): View {
+    private fun trackRow(track: ApiTrack, queue: List<ApiTrack>, playlist: Playlist? = null): View {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -899,6 +1169,16 @@ class MainActivity : Activity() {
         row.addView(label(track.durationText(), 12f, mutedColor, Typeface.NORMAL), LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             rightMargin = dp(8)
         })
+        row.addView(iconText("≡", mutedColor) {
+            showPlaylistPicker(track, playlist)
+        }, LinearLayout.LayoutParams(dp(32), dp(36)))
+        row.addView(iconText(offlineIcon(track), offlineIconColor(track)) {
+            if (offlineTrackIds.contains(track.id)) {
+                removeOfflineTrack(track)
+            } else {
+                downloadTrackForOffline(track)
+            }
+        }, LinearLayout.LayoutParams(dp(32), dp(36)))
         row.addView(iconText(if (likedTrackIds.contains(track.id)) "♥" else "♡", if (likedTrackIds.contains(track.id)) Color.rgb(255, 105, 180) else mutedColor) {
             toggleLike(track)
         }, LinearLayout.LayoutParams(dp(32), dp(36)))
@@ -923,7 +1203,14 @@ class MainActivity : Activity() {
 
     private fun refreshLibrary() {
         if (!canUseApi()) {
-            statusMessage = "Set API endpoint and token in Settings."
+            if (offlineRecords.isNotEmpty()) {
+                tracks = offlineRecords.values.map { it.track }.sortedWith(trackComparator())
+                albums = buildAlbums(tracks)
+                playlists = emptyList()
+                statusMessage = "Offline library ready: ${offlineRecords.size} songs."
+            } else {
+                statusMessage = "Set API endpoint and token in Settings."
+            }
             render()
             return
         }
@@ -931,12 +1218,20 @@ class MainActivity : Activity() {
             task = {
                 val loadedTracks = loadAllTracks()
                 val loadedLikes = loadAllLikedTrackIds()
-                Pair(loadedTracks, loadedLikes)
+                val loadedPlaylists = loadAllPlaylists()
+                Triple(loadedTracks, loadedLikes, loadedPlaylists)
             },
-            success = { (loadedTracks, loadedLikes) ->
-                tracks = loadedTracks.sortedWith(trackComparator())
+            success = { (loadedTracks, loadedLikes, loadedPlaylists) ->
+                tracks = (loadedTracks + loadedPlaylists.flatMap { it.tracks })
+                    .distinctBy { it.id }
+                    .sortedWith(trackComparator())
                 likedTrackIds = loadedLikes
                 albums = buildAlbums(tracks)
+                playlists = remapPlaylists(loadedPlaylists)
+                if (selectedPlaylistId != null && playlists.none { it.id == selectedPlaylistId }) {
+                    selectedPlaylistId = null
+                }
+                pruneMissingOfflineFiles()
                 missingArtworkIds.clear()
                 statusMessage = "Library refreshed: ${tracks.size} songs."
                 render()
@@ -1031,6 +1326,138 @@ class MainActivity : Activity() {
         )
     }
 
+    private fun downloadTrackForOffline(track: ApiTrack) {
+        if (offlineTrackIds.contains(track.id) || downloadingTrackIds.contains(track.id)) return
+        if (!canUseApi()) {
+            statusMessage = "Set API endpoint and token before downloading."
+            render()
+            return
+        }
+        downloadingTrackIds = downloadingTrackIds + track.id
+        statusMessage = "Downloading ${track.title}..."
+        render()
+        runIo(
+            showLoading = false,
+            task = {
+                val file = offlineFileFor(track)
+                downloadTrackToFile(track, file)
+                OfflineRecord(track, file.name, file.length(), System.currentTimeMillis())
+            },
+            success = { record ->
+                offlineRecords[track.id] = record
+                saveOfflineLibrary()
+                refreshOfflineState()
+                downloadingTrackIds = downloadingTrackIds - track.id
+                statusMessage = "${track.title} is available offline."
+                render()
+            },
+            error = { error ->
+                downloadingTrackIds = downloadingTrackIds - track.id
+                statusMessage = "Error: ${error.message ?: "download failed."}"
+                render()
+            }
+        )
+    }
+
+    private fun downloadAlbumForOffline(album: Album) {
+        if (downloadingAlbumIds.contains(album.id)) return
+        if (!canUseApi()) {
+            statusMessage = "Set API endpoint and token before downloading."
+            render()
+            return
+        }
+        val missing = album.tracks.filter { !offlineTrackIds.contains(it.id) }
+        if (missing.isEmpty()) {
+            statusMessage = "${album.title} is already offline."
+            render()
+            return
+        }
+        downloadingAlbumIds = downloadingAlbumIds + album.id
+        downloadingTrackIds = downloadingTrackIds + missing.map { it.id }
+        statusMessage = "Downloading ${album.title}..."
+        render()
+        runIo(
+            showLoading = false,
+            task = {
+                var completed = 0
+                missing.forEach { track ->
+                    val file = offlineFileFor(track)
+                    downloadTrackToFile(track, file)
+                    offlineRecords[track.id] = OfflineRecord(track, file.name, file.length(), System.currentTimeMillis())
+                    completed += 1
+                    mainHandler.post {
+                        statusMessage = "Downloaded $completed/${missing.size} from ${album.title}."
+                        updateStatus()
+                    }
+                }
+                saveOfflineLibrary()
+                completed
+            },
+            success = { completed ->
+                refreshOfflineState()
+                downloadingAlbumIds = downloadingAlbumIds - album.id
+                downloadingTrackIds = downloadingTrackIds - missing.map { it.id }.toSet()
+                statusMessage = "${album.title} is offline ($completed songs)."
+                render()
+            },
+            error = { error ->
+                saveOfflineLibrary()
+                refreshOfflineState()
+                downloadingAlbumIds = downloadingAlbumIds - album.id
+                downloadingTrackIds = downloadingTrackIds - missing.map { it.id }.toSet()
+                statusMessage = "Error: ${error.message ?: "album download failed."}"
+                render()
+            }
+        )
+    }
+
+    private fun removeOfflineTrack(track: ApiTrack) {
+        val record = offlineRecords.remove(track.id) ?: return
+        offlineFile(record.relativePath).delete()
+        saveOfflineLibrary()
+        refreshOfflineState()
+        if (!canUseApi()) {
+            tracks = tracks.filter { it.id != track.id }
+            albums = buildAlbums(tracks)
+        }
+        statusMessage = "Removed download for ${track.title}."
+        render()
+    }
+
+    private fun removeOfflineAlbum(album: Album) {
+        var removed = 0
+        album.tracks.forEach { track ->
+            val record = offlineRecords.remove(track.id)
+            if (record != null) {
+                offlineFile(record.relativePath).delete()
+                removed += 1
+            }
+        }
+        saveOfflineLibrary()
+        refreshOfflineState()
+        if (!canUseApi()) {
+            val removedIds = album.tracks.map { it.id }.toSet()
+            tracks = tracks.filter { it.id !in removedIds }
+            albums = buildAlbums(tracks)
+        }
+        statusMessage = "Removed $removed downloads from ${album.title}."
+        render()
+    }
+
+    private fun clearOfflineDownloads() {
+        val removed = offlineRecords.size
+        offlineRecords.values.forEach { offlineFile(it.relativePath).delete() }
+        offlineRecords.clear()
+        saveOfflineLibrary()
+        refreshOfflineState()
+        if (!canUseApi()) {
+            tracks = emptyList()
+            albums = emptyList()
+        }
+        statusMessage = "Removed $removed offline downloads."
+        render()
+    }
+
     private fun testConnection() {
         if (normalizedEndpoint().isBlank()) {
             statusMessage = "Error: enter an API endpoint first."
@@ -1047,6 +1474,21 @@ class MainActivity : Activity() {
     }
 
     private fun playTrack(track: ApiTrack, queue: List<ApiTrack>) {
+        offlinePlaybackFile(track)?.let { file ->
+            val requestId = playbackRequestId.incrementAndGet()
+            mediaPlayer?.release()
+            mediaPlayer = null
+            isPlaying = false
+            currentTrack = track
+            playbackQueue = queue.ifEmpty { tracks.ifEmpty { offlineRecords.values.map { it.track } } }
+            currentIndex = playbackQueue.indexOfFirst { it.id == track.id }
+            statusMessage = null
+            updateStatus()
+            updateMiniPlayer()
+            startCachedTrack(track, file, requestId)
+            return
+        }
+
         if (!canUseApi()) {
             statusMessage = "Set API endpoint and token before streaming."
             updateStatus()
@@ -1109,6 +1551,7 @@ class MainActivity : Activity() {
                 mainHandler.removeCallbacks(progressTick)
                 mainHandler.post(progressTick)
                 updateMiniPlayer()
+                schedulePlaybackSideEffects()
             }
             setOnCompletionListener {
                 when (repeatMode) {
@@ -1152,6 +1595,7 @@ class MainActivity : Activity() {
             isPlaying = true
         }
         updateMiniPlayer()
+        postPlaybackStateAsync()
     }
 
     private fun playNext() {
@@ -1193,6 +1637,73 @@ class MainActivity : Activity() {
         } else {
             0
         }
+    }
+
+    private fun schedulePlaybackSideEffects() {
+        postPlaybackStateAsync()
+        prefetchNextTrackForPlayback()
+    }
+
+    private fun postPlaybackStateAsync() {
+        if (!canUseApi()) return
+        val queue = playbackQueue.ifEmpty { tracks }
+        val payload = JSONObject()
+            .put("current_track_id", currentTrack?.id ?: JSONObject.NULL)
+            .put("position_seconds", ((mediaPlayer?.currentPosition ?: 0).toDouble() / 1000.0).coerceAtLeast(0.0))
+            .put("is_playing", isPlaying)
+            .put("repeat_mode", when (repeatMode) {
+                RepeatMode.Off -> "off"
+                RepeatMode.All -> "queue"
+                RepeatMode.One -> "track"
+            })
+            .put("shuffle", shuffleEnabled)
+            .put("active_device_id", "android-${android.os.Build.MODEL}")
+            .put("active_device_name", android.os.Build.MODEL ?: "Android")
+            .put("queue_track_ids", JSONArray().apply {
+                queue.forEach { put(it.id) }
+            })
+            .toString()
+        executor.execute {
+            runCatching {
+                request("/playback/state", method = "PUT", body = payload)
+            }
+        }
+    }
+
+    private fun prefetchNextTrackForPlayback() {
+        val nextTrack = nextTrackToCache() ?: return
+        if (!canUseApi() || offlinePlaybackFile(nextTrack) != null) return
+        if (!playbackPrefetchingTrackIds.add(nextTrack.id)) return
+        executor.execute {
+            runCatching {
+                downloadTrackForPlayback(nextTrack)
+            }
+            mainHandler.post {
+                playbackPrefetchingTrackIds.remove(nextTrack.id)
+            }
+        }
+    }
+
+    private fun nextTrackToCache(): ApiTrack? {
+        if (repeatMode == RepeatMode.One) return null
+        val queue = playbackQueue.ifEmpty { tracks }
+        if (queue.size <= 1) return null
+        val index = currentIndex.takeIf { it in queue.indices }
+            ?: currentTrack?.let { track -> queue.indexOfFirst { it.id == track.id } }
+            ?: -1
+        if (index < 0) return queue.firstOrNull()
+        if (index < queue.lastIndex) return queue[index + 1]
+        return if (repeatMode == RepeatMode.All) queue.firstOrNull() else null
+    }
+
+    private fun seekFromProgressTouch(x: Float, width: Int) {
+        val player = mediaPlayer ?: return
+        if (width <= 0) return
+        val duration = player.duration.takeIf { it > 0 } ?: return
+        val fraction = (x / width.toFloat()).coerceIn(0f, 1f)
+        val position = (duration * fraction).roundToInt()
+        player.seekTo(position)
+        miniProgress.progress = (fraction * miniProgress.max).roundToInt()
     }
 
     private fun updateMiniArtwork(track: ApiTrack?) {
@@ -1272,35 +1783,305 @@ class MainActivity : Activity() {
         return liked
     }
 
+    private fun loadAllPlaylists(): List<Playlist> {
+        val summaries = mutableListOf<Pair<String, String>>()
+        val limit = 100
+        var offset = 0
+        while (true) {
+            val response = JSONObject(request("/playlists?limit=$limit&offset=$offset"))
+            val items = response.optJSONArray("items") ?: JSONArray()
+            for (index in 0 until items.length()) {
+                val item = items.optJSONObject(index) ?: continue
+                val id = item.optCleanString("id") ?: continue
+                val name = item.optCleanString("name") ?: "Playlist"
+                summaries += id to name
+            }
+            if (items.length() < limit) break
+            offset += limit
+        }
+        return summaries
+            .sortedBy { it.second.lowercase(Locale.getDefault()) }
+            .map { (id, _) -> parsePlaylist(JSONObject(request("/playlists/${encodePath(id)}"))) }
+    }
+
+    private fun parsePlaylist(item: JSONObject): Playlist {
+        val playlistTracks = mutableListOf<Pair<Int, ApiTrack>>()
+        val items = item.optJSONArray("tracks") ?: JSONArray()
+        for (index in 0 until items.length()) {
+            val playlistTrack = items.optJSONObject(index) ?: continue
+            val trackJson = playlistTrack.optJSONObject("track") ?: continue
+            val track = parseTracks(JSONArray().put(trackJson)).firstOrNull() ?: continue
+            playlistTracks += playlistTrack.optInt("position", index + 1) to track
+        }
+        return Playlist(
+            id = item.optCleanString("id") ?: "",
+            name = item.optCleanString("name") ?: "Playlist",
+            tracks = playlistTracks.sortedBy { it.first }.map { it.second },
+            updatedAt = item.optCleanString("updated_at")
+        )
+    }
+
+    private fun remapPlaylists(source: List<Playlist>): List<Playlist> {
+        val byId = tracks.associateBy { it.id }
+        return source
+            .map { playlist ->
+                playlist.copy(tracks = playlist.tracks.map { byId[it.id] ?: it })
+            }
+            .sortedWith(compareBy({ it.name.lowercase(Locale.getDefault()) }, { it.id }))
+    }
+
+    private fun upsertPlaylist(playlist: Playlist) {
+        val remapped = remapPlaylists(listOf(playlist)).first()
+        playlists = (playlists.filterNot { it.id == remapped.id } + remapped)
+            .sortedWith(compareBy({ it.name.lowercase(Locale.getDefault()) }, { it.id }))
+    }
+
+    private fun createPlaylist(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isBlank()) return
+        if (!canUseApi()) {
+            statusMessage = "Set API endpoint and token in Settings."
+            render()
+            return
+        }
+        runIo(
+            showLoading = false,
+            task = {
+                val body = JSONObject().put("name", trimmed).toString()
+                parsePlaylist(JSONObject(request("/playlists", method = "POST", body = body)))
+            },
+            success = { playlist ->
+                upsertPlaylist(playlist)
+                selectedPlaylistId = playlist.id
+                statusMessage = "Created playlist ${playlist.name}."
+                render()
+            }
+        )
+    }
+
+    private fun deletePlaylist(playlist: Playlist) {
+        if (!canUseApi()) return
+        runIo(
+            showLoading = false,
+            task = { request("/playlists/${encodePath(playlist.id)}", method = "DELETE") },
+            success = {
+                playlists = playlists.filterNot { it.id == playlist.id }
+                if (selectedPlaylistId == playlist.id) selectedPlaylistId = null
+                statusMessage = "Deleted playlist ${playlist.name}."
+                render()
+            }
+        )
+    }
+
+    private fun addTrackToPlaylist(track: ApiTrack, playlist: Playlist) {
+        if (!canUseApi()) {
+            statusMessage = "Set API endpoint and token in Settings."
+            render()
+            return
+        }
+        runIo(
+            showLoading = false,
+            task = {
+                val body = JSONObject().put("track_id", track.id).toString()
+                parsePlaylist(JSONObject(request("/playlists/${encodePath(playlist.id)}/tracks", method = "POST", body = body)))
+            },
+            success = { updated ->
+                tracks = (tracks + updated.tracks).distinctBy { it.id }.sortedWith(trackComparator())
+                upsertPlaylist(updated)
+                statusMessage = "Added ${track.title} to ${updated.name}."
+                render()
+            }
+        )
+    }
+
+    private fun removeTrackFromPlaylist(track: ApiTrack, playlist: Playlist) {
+        if (!canUseApi()) return
+        runIo(
+            showLoading = false,
+            task = {
+                parsePlaylist(JSONObject(request(
+                    "/playlists/${encodePath(playlist.id)}/tracks/${encodePath(track.id)}",
+                    method = "DELETE"
+                )))
+            },
+            success = { updated ->
+                upsertPlaylist(updated)
+                statusMessage = "Removed ${track.title} from ${updated.name}."
+                render()
+            }
+        )
+    }
+
+    private fun loadOfflineLibrary() {
+        val payload = prefs.getString("offline_records_json", "[]") ?: "[]"
+        val records = mutableMapOf<String, OfflineRecord>()
+        runCatching {
+            val items = JSONArray(payload)
+            for (index in 0 until items.length()) {
+                val item = items.optJSONObject(index) ?: continue
+                val track = item.optJSONObject("track")?.let { parseTrack(it) } ?: continue
+                val relativePath = item.optCleanString("relative_path") ?: continue
+                val file = offlineFile(relativePath)
+                if (!file.isFile || file.length() <= 0L) continue
+                records[track.id] = OfflineRecord(
+                    track = track,
+                    relativePath = relativePath,
+                    sizeBytes = item.optNullableLong("size_bytes") ?: file.length(),
+                    downloadedAt = item.optNullableLong("downloaded_at") ?: 0L
+                )
+            }
+        }
+        offlineRecords = records
+        refreshOfflineState()
+        if (tracks.isEmpty() && records.isNotEmpty()) {
+            tracks = records.values.map { it.track }.sortedWith(trackComparator())
+            albums = buildAlbums(tracks)
+        }
+    }
+
+    private fun saveOfflineLibrary() {
+        val items = JSONArray()
+        offlineRecords.values
+            .sortedByDescending { it.downloadedAt }
+            .forEach { record ->
+                items.put(
+                    JSONObject()
+                        .put("track", trackJson(record.track))
+                        .put("relative_path", record.relativePath)
+                        .put("size_bytes", record.sizeBytes)
+                        .put("downloaded_at", record.downloadedAt)
+                )
+            }
+        prefs.edit().putString("offline_records_json", items.toString()).apply()
+    }
+
+    private fun refreshOfflineState(save: Boolean = false) {
+        val existing = offlineRecords.values.filter { record ->
+            val file = offlineFile(record.relativePath)
+            file.isFile && file.length() > 0L
+        }
+        if (existing.size != offlineRecords.size) {
+            offlineRecords = existing.associateBy { it.track.id }.toMutableMap()
+            saveOfflineLibrary()
+        } else if (save) {
+            saveOfflineLibrary()
+        }
+        offlineTrackIds = offlineRecords.keys
+    }
+
+    private fun pruneMissingOfflineFiles() {
+        refreshOfflineState()
+    }
+
+    private fun offlinePlaybackFile(track: ApiTrack): File? {
+        val record = offlineRecords[track.id] ?: return null
+        val file = offlineFile(record.relativePath)
+        return file.takeIf { it.isFile && it.length() > 0L }
+    }
+
+    private fun offlineFileFor(track: ApiTrack): File {
+        return offlineFile("${safeTrackIdentity(track.id)}.${playbackExtension(track)}")
+    }
+
+    private fun offlineFile(relativePath: String): File {
+        val clean = relativePath.substringAfterLast('/').substringAfterLast('\\')
+        return File(offlineTrackDir, clean)
+    }
+
+    private fun safeTrackIdentity(trackId: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(trackId.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    private fun offlineStorageBytes(): Long {
+        return offlineRecords.values.sumOf { record ->
+            val file = offlineFile(record.relativePath)
+            if (file.isFile) file.length() else 0L
+        }
+    }
+
+    private fun offlineIcon(track: ApiTrack): String {
+        return when {
+            downloadingTrackIds.contains(track.id) -> "…"
+            offlineTrackIds.contains(track.id) -> "✓"
+            else -> "↓"
+        }
+    }
+
+    private fun offlineIconColor(track: ApiTrack): Int {
+        return when {
+            downloadingTrackIds.contains(track.id) -> accentAltColor
+            offlineTrackIds.contains(track.id) -> accentColor
+            else -> mutedColor
+        }
+    }
+
+    private fun isAlbumOffline(album: Album): Boolean {
+        return album.tracks.isNotEmpty() && album.tracks.all { offlineTrackIds.contains(it.id) }
+    }
+
+    private fun albumOfflineIcon(album: Album): String {
+        return when {
+            downloadingAlbumIds.contains(album.id) -> "…"
+            isAlbumOffline(album) -> "✓"
+            else -> "↓"
+        }
+    }
+
+    private fun albumOfflineColor(album: Album): Int {
+        return when {
+            downloadingAlbumIds.contains(album.id) -> accentAltColor
+            isAlbumOffline(album) -> accentColor
+            else -> textColor
+        }
+    }
+
     private fun downloadTrackForPlayback(track: ApiTrack): File {
+        offlinePlaybackFile(track)?.let { return it }
         val endpoint = endpointUrl("/tracks/${encodePath(track.id)}/stream")
             ?: throw ApiException("Bad API endpoint. Use http://IP:8000.")
+        val directory = File(cacheDir, "playback").apply { mkdirs() }
+        val output = File(directory, "${track.id}.${playbackExtension(track)}")
+        if (output.isFile && output.length() > 0L) return output
+        downloadTrackToFile(track, output, endpoint)
+        return output
+    }
+
+    private fun downloadTrackToFile(track: ApiTrack, output: File, endpointOverride: String? = null) {
+        val endpoint = endpointOverride ?: endpointUrl("/tracks/${encodePath(track.id)}/stream")
+            ?: throw ApiException("Bad API endpoint. Use http://IP:8000.")
+        output.parentFile?.mkdirs()
+        val temp = File(output.parentFile, "${output.name}.tmp")
         val connection = URL(endpoint).openConnection() as HttpURLConnection
         connection.requestMethod = "GET"
         connection.connectTimeout = 20_000
-        connection.readTimeout = 45_000
+        connection.readTimeout = 90_000
         connection.setRequestProperty("Accept", track.mediaType ?: "audio/*")
         connection.setRequestProperty("Authorization", "Bearer $apiToken")
         val status = connection.responseCode
         if (status !in 200..299) {
             val detail = connection.errorStream?.bufferedReader()?.use { it.readText() }
             connection.disconnect()
+            temp.delete()
             throw ApiException(detail?.takeIf { it.isNotBlank() } ?: "stream error $status")
         }
-
-        val directory = File(cacheDir, "playback").apply { mkdirs() }
-        val output = File(directory, "${track.id}.${playbackExtension(track)}")
         connection.inputStream.use { input ->
-            output.outputStream().use { fileOutput ->
+            temp.outputStream().use { fileOutput ->
                 input.copyTo(fileOutput)
             }
         }
         connection.disconnect()
-        if (output.length() <= 0L) {
-            output.delete()
+        if (temp.length() <= 0L) {
+            temp.delete()
             throw ApiException("empty audio file")
         }
-        return output
+        if (!temp.renameTo(output)) {
+            output.delete()
+            if (!temp.renameTo(output)) {
+                temp.delete()
+                throw ApiException("could not save audio file")
+            }
+        }
     }
 
     private fun request(
@@ -1357,20 +2138,37 @@ class MainActivity : Activity() {
         val parsed = mutableListOf<ApiTrack>()
         for (index in 0 until items.length()) {
             val item = items.optJSONObject(index) ?: continue
-            val id = item.optCleanString("id") ?: continue
-            parsed += ApiTrack(
-                id = id,
-                title = item.optCleanString("title") ?: item.optCleanString("original_filename") ?: "Untitled",
-                artist = item.optCleanString("artist"),
-                album = item.optCleanString("album"),
-                originalFilename = item.optCleanString("original_filename"),
-                mediaType = item.optCleanString("media_type"),
-                durationSeconds = item.optNullableDouble("duration_seconds"),
-                sizeBytes = item.optNullableLong("size_bytes"),
-                createdAt = item.optCleanString("created_at")
-            )
+            parsed += parseTrack(item) ?: continue
         }
         return parsed
+    }
+
+    private fun parseTrack(item: JSONObject): ApiTrack? {
+        val id = item.optCleanString("id") ?: return null
+        return ApiTrack(
+            id = id,
+            title = item.optCleanString("title") ?: item.optCleanString("original_filename") ?: "Untitled",
+            artist = item.optCleanString("artist"),
+            album = item.optCleanString("album"),
+            originalFilename = item.optCleanString("original_filename"),
+            mediaType = item.optCleanString("media_type"),
+            durationSeconds = item.optNullableDouble("duration_seconds"),
+            sizeBytes = item.optNullableLong("size_bytes"),
+            createdAt = item.optCleanString("created_at")
+        )
+    }
+
+    private fun trackJson(track: ApiTrack): JSONObject {
+        return JSONObject()
+            .put("id", track.id)
+            .put("title", track.title)
+            .put("artist", track.artist)
+            .put("album", track.album)
+            .put("original_filename", track.originalFilename)
+            .put("media_type", track.mediaType)
+            .put("duration_seconds", track.durationSeconds)
+            .put("size_bytes", track.sizeBytes)
+            .put("created_at", track.createdAt)
     }
 
     private fun parseTorrents(items: JSONArray): List<TorrentResult> {

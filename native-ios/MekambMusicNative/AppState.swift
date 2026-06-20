@@ -71,6 +71,72 @@ struct TrackListResponse: Codable { let items: [ApiTrack] }
 struct LikedTrackItem: Codable { let track: ApiTrack }
 struct LikedTracksResponse: Codable { let items: [LikedTrackItem] }
 
+struct PlaylistSummary: Identifiable, Codable, Hashable {
+    let id: String
+    let name: String
+    let trackCount: Int
+    let createdAt: String?
+    let updatedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case trackCount = "track_count"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
+struct PlaylistTrackItem: Codable, Hashable {
+    let position: Int
+    let addedAt: String?
+    let track: ApiTrack
+
+    enum CodingKeys: String, CodingKey {
+        case position
+        case addedAt = "added_at"
+        case track
+    }
+}
+
+struct PlaylistDetail: Identifiable, Codable, Hashable {
+    let id: String
+    let name: String
+    let tracks: [PlaylistTrackItem]
+    let createdAt: String?
+    let updatedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case tracks
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+
+    var trackCountText: String {
+        tracks.count == 1 ? "1 song" : "\(tracks.count) songs"
+    }
+
+    var orderedTracks: [ApiTrack] {
+        tracks.sorted { left, right in left.position < right.position }.map(\.track)
+    }
+}
+
+struct PlaylistListResponse: Codable { let items: [PlaylistSummary] }
+
+struct PlaylistNamePayload: Encodable {
+    let name: String
+}
+
+struct PlaylistTrackPayload: Encodable {
+    let trackId: String
+
+    enum CodingKeys: String, CodingKey {
+        case trackId = "track_id"
+    }
+}
+
 struct RecommendationTrackPayload: Codable {
     let track: ApiTrack
     let score: Double?
@@ -286,6 +352,7 @@ enum SearchMode: String, CaseIterable, Identifiable {
 enum MusicTab: String, CaseIterable, Identifiable {
     case library = "Library"
     case albums = "Albums"
+    case playlists = "Playlists"
     case liked = "Liked"
     case settings = "Settings"
     var id: String { rawValue }
@@ -338,6 +405,7 @@ final class AppState: ObservableObject {
     @Published var torrents: [TorrentResult] = []
     @Published var albumCovers: [String: UIImage] = [:]
     @Published var selectedAlbumId: String?
+    @Published var selectedPlaylistId: String?
     @Published var isLoading = false
     @Published var isSearchingTorrents = false
     @Published var isTestingConnection = false
@@ -355,6 +423,7 @@ final class AppState: ObservableObject {
     @Published var offlineStorageBytes: Int = 0
     @Published var offlineStatusMessage: String?
     @Published private(set) var albums: [Album] = []
+    @Published private(set) var playlists: [PlaylistDetail] = []
     @Published private(set) var homeRecommendedTracks: [ApiTrack] = []
     @Published private(set) var dailyMixes: [DailyMix] = []
     @Published private(set) var recentlyAddedTracks: [ApiTrack] = []
@@ -372,6 +441,8 @@ final class AppState: ObservableObject {
     private var backendRecommendedTrackIds: [String] = []
     private var backendDailyMixes: [DailyMix] = []
     private var lastPersonalizationRefreshAt: Date?
+    private var playbackPrefetchTask: Task<Void, Never>?
+    private var playbackPrefetchingTrackIds: Set<String> = []
 
     private struct PlaybackSource {
         let url: URL
@@ -583,6 +654,24 @@ final class AppState: ObservableObject {
         return albums.first { $0.id == selectedAlbumId }
     }
 
+    var filteredPlaylists: [PlaylistDetail] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty, searchMode == .library else { return playlists }
+        return playlists.filter {
+            $0.name.lowercased().contains(query)
+            || $0.orderedTracks.contains { track in
+                track.title.lowercased().contains(query)
+                || track.displayArtist.lowercased().contains(query)
+                || track.displayAlbum.lowercased().contains(query)
+            }
+        }
+    }
+
+    var selectedPlaylist: PlaylistDetail? {
+        guard let selectedPlaylistId else { return nil }
+        return playlists.first { $0.id == selectedPlaylistId }
+    }
+
     var queueTracks: [ApiTrack] {
         playbackQueue.isEmpty ? playbackContextTracks() : playbackQueue
     }
@@ -633,13 +722,19 @@ final class AppState: ObservableObject {
         do {
             async let likedIds = loadAllLikedTrackIds()
             async let allTracks = loadAllTracks()
-            let (newLikedIds, newTracks) = try await (likedIds, allTracks)
+            async let playlistDetails = loadAllPlaylists()
+            let (newLikedIds, newTracks, newPlaylists) = try await (likedIds, allTracks, playlistDetails)
             likedTrackIds = newLikedIds
-            tracks = mergeTracks(existing: tracks, incoming: newTracks).sorted(by: stableLibraryTrackOrder)
+            tracks = mergeTracks(
+                existing: tracks,
+                incoming: newTracks + newPlaylists.flatMap(\.orderedTracks)
+            ).sorted(by: stableLibraryTrackOrder)
+            playlists = remapPlaylists(newPlaylists)
             rebuildDerivedLibraryState()
             syncQueueWithLibrary()
             restorePlaybackStateIfNeeded()
             selectedAlbumId = selectedAlbumId.flatMap { id in albums.contains(where: { $0.id == id }) ? id : nil }
+            selectedPlaylistId = selectedPlaylistId.flatMap { id in playlists.contains(where: { $0.id == id }) ? id : nil }
             await loadPersonalizedHome()
             Task { await loadMissingAlbumCovers() }
         } catch {
@@ -827,6 +922,78 @@ final class AppState: ObservableObject {
         }
     }
 
+    func createPlaylist(named name: String) async {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        guard canUseApi else {
+            errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
+            return
+        }
+
+        do {
+            let body = try JSONEncoder().encode(PlaylistNamePayload(name: trimmed))
+            let playlist: PlaylistDetail = try await request("/playlists", method: "POST", body: body)
+            tracks = mergeTracks(existing: tracks, incoming: playlist.orderedTracks).sorted(by: stableLibraryTrackOrder)
+            upsertPlaylist(playlist)
+            selectedPlaylistId = playlist.id
+            offlineStatusMessage = "Created playlist \(playlist.name)."
+        } catch {
+            if !isCancellation(error) { errorMessage = clean(error) }
+        }
+    }
+
+    func deletePlaylist(_ playlist: PlaylistDetail) async {
+        guard canUseApi else {
+            errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
+            return
+        }
+        do {
+            let _: EmptyResponse = try await request("/playlists/\(encodePathComponent(playlist.id))", method: "DELETE")
+            playlists.removeAll { $0.id == playlist.id }
+            if selectedPlaylistId == playlist.id { selectedPlaylistId = nil }
+            offlineStatusMessage = "Deleted playlist \(playlist.name)."
+        } catch {
+            if !isCancellation(error) { errorMessage = clean(error) }
+        }
+    }
+
+    func addTrack(_ track: ApiTrack, to playlist: PlaylistDetail) async {
+        guard canUseApi else {
+            errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
+            return
+        }
+        do {
+            let body = try JSONEncoder().encode(PlaylistTrackPayload(trackId: track.id))
+            let updated: PlaylistDetail = try await request(
+                "/playlists/\(encodePathComponent(playlist.id))/tracks",
+                method: "POST",
+                body: body
+            )
+            tracks = mergeTracks(existing: tracks, incoming: updated.orderedTracks).sorted(by: stableLibraryTrackOrder)
+            upsertPlaylist(updated)
+            offlineStatusMessage = "Added \(track.title) to \(updated.name)."
+        } catch {
+            if !isCancellation(error) { errorMessage = clean(error) }
+        }
+    }
+
+    func removeTrack(_ track: ApiTrack, from playlist: PlaylistDetail) async {
+        guard canUseApi else {
+            errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
+            return
+        }
+        do {
+            let updated: PlaylistDetail = try await request(
+                "/playlists/\(encodePathComponent(playlist.id))/tracks/\(encodePathComponent(track.id))",
+                method: "DELETE"
+            )
+            upsertPlaylist(updated)
+            offlineStatusMessage = "Removed \(track.title) from \(updated.name)."
+        } catch {
+            if !isCancellation(error) { errorMessage = clean(error) }
+        }
+    }
+
     func deleteAlbum(_ album: Album) async {
         guard canUseApi else {
             errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
@@ -953,7 +1120,7 @@ final class AppState: ObservableObject {
         nextPlayer.play()
         isPlaying = true
         updateNowPlayingInfo(for: track, elapsed: elapsed)
-        Task { try? await postPlay(track) }
+        syncPlaybackSideEffects(for: track)
     }
 
     func togglePlayback() {
@@ -974,6 +1141,7 @@ final class AppState: ObservableObject {
             isPlaying = true
         }
         updateNowPlayingPlaybackRate()
+        Task { await postPlaybackState() }
     }
 
     func nextTrack() {
@@ -1040,9 +1208,12 @@ final class AppState: ObservableObject {
         guard let currentTrack else {
             let context = playbackContextTracks()
             playbackQueue = shuffleEnabled ? context.shuffled() : context
+            Task { await postPlaybackState() }
             return
         }
         preparePlaybackQueue(for: currentTrack, from: playbackQueue.isEmpty ? playbackContextTracks() : playbackQueue)
+        schedulePlaybackPrefetch()
+        Task { await postPlaybackState() }
     }
 
     func cycleRepeatMode() {
@@ -1054,6 +1225,7 @@ final class AppState: ObservableObject {
         case .one:
             repeatMode = .off
         }
+        Task { await postPlaybackState() }
     }
 
     func addToQueue(_ track: ApiTrack) {
@@ -1062,15 +1234,21 @@ final class AppState: ObservableObject {
         }
         guard !playbackQueue.contains(where: { $0.id == track.id }) else { return }
         playbackQueue.append(track)
+        schedulePlaybackPrefetch()
+        Task { await postPlaybackState() }
     }
 
     func removeFromQueue(_ track: ApiTrack) {
         guard currentTrack?.id != track.id else { return }
         playbackQueue.removeAll { $0.id == track.id }
+        schedulePlaybackPrefetch()
+        Task { await postPlaybackState() }
     }
 
     func clearQueue() {
         playbackQueue = currentTrack.map { [$0] } ?? []
+        schedulePlaybackPrefetch()
+        Task { await postPlaybackState() }
     }
 
     private func loadAllTracks() async throws -> [ApiTrack] {
@@ -1097,6 +1275,56 @@ final class AppState: ObservableObject {
             offset += limit
         }
         return ids
+    }
+
+    private func loadAllPlaylists() async throws -> [PlaylistDetail] {
+        var summaries: [PlaylistSummary] = []
+        let limit = 100
+        var offset = 0
+        while true {
+            let response: PlaylistListResponse = try await request("/playlists?limit=\(limit)&offset=\(offset)")
+            summaries.append(contentsOf: response.items)
+            if response.items.count < limit { break }
+            offset += limit
+        }
+
+        var details: [PlaylistDetail] = []
+        for summary in summaries.sorted(by: playlistSummaryOrder) {
+            let detail: PlaylistDetail = try await request("/playlists/\(encodePathComponent(summary.id))")
+            details.append(detail)
+        }
+        return details
+    }
+
+    private func remapPlaylists(_ incoming: [PlaylistDetail]) -> [PlaylistDetail] {
+        let byId = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        return incoming
+            .map { playlist in
+                PlaylistDetail(
+                    id: playlist.id,
+                    name: playlist.name,
+                    tracks: playlist.tracks.map { item in
+                        PlaylistTrackItem(
+                            position: item.position,
+                            addedAt: item.addedAt,
+                            track: byId[item.track.id] ?? item.track
+                        )
+                    },
+                    createdAt: playlist.createdAt,
+                    updatedAt: playlist.updatedAt
+                )
+            }
+            .sorted(by: playlistDetailOrder)
+    }
+
+    private func upsertPlaylist(_ playlist: PlaylistDetail) {
+        let remapped = remapPlaylists([playlist])[0]
+        if let index = playlists.firstIndex(where: { $0.id == remapped.id }) {
+            playlists[index] = remapped
+        } else {
+            playlists.append(remapped)
+        }
+        playlists.sort(by: playlistDetailOrder)
     }
 
     private func loadPersonalizedHome(silent: Bool = true) async {
@@ -1267,6 +1495,9 @@ final class AppState: ObservableObject {
         if let localURL = localOfflineFileURL(for: track) {
             return PlaybackSource(url: localURL, headers: nil)
         }
+        if let cachedURL = localPlaybackCacheFileURL(for: track) {
+            return PlaybackSource(url: cachedURL, headers: nil)
+        }
 
         guard canUseApi else { return nil }
         let encodedId = encodePathComponent(track.id)
@@ -1278,6 +1509,15 @@ final class AppState: ObservableObject {
         guard let record = offlineRecords[track.id] else { return nil }
         guard let url = offlineFileURL(relativePath: record.relativePath),
               FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url
+    }
+
+    private func localPlaybackCacheFileURL(for track: ApiTrack) -> URL? {
+        guard let url = try? playbackCacheFileURL(for: track),
+              FileManager.default.fileExists(atPath: url.path),
+              ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0) > 0 else {
+            return nil
+        }
         return url
     }
 
@@ -1311,6 +1551,18 @@ final class AppState: ObservableObject {
         return base
     }
 
+    private func playbackCacheFileURL(for track: ApiTrack) throws -> URL {
+        try playbackCacheDirectory().appendingPathComponent(offlineFileName(for: track), isDirectory: false)
+    }
+
+    private func playbackCacheDirectory() throws -> URL {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MekambMusic", isDirectory: true)
+            .appendingPathComponent("PlaybackCache", isDirectory: true)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base
+    }
+
     private func offlineFileName(for track: ApiTrack) -> String {
         let sourceExtension = URL(fileURLWithPath: downloadFilename(for: track)).pathExtension
         let extensionName = sourceExtension.isEmpty ? "audio" : sourceExtension
@@ -1328,6 +1580,7 @@ final class AppState: ObservableObject {
 
     private func playbackContextTracks() -> [ApiTrack] {
         if selectedTab == .albums, let selectedAlbum { return selectedAlbum.tracks }
+        if selectedTab == .playlists, let selectedPlaylist { return selectedPlaylist.orderedTracks }
         let context = filteredTracks
         return context.isEmpty ? tracks : context
     }
@@ -1493,6 +1746,89 @@ final class AppState: ObservableObject {
         let _: EmptyResponse = try await request("/tracks/\(encodedId)/plays", method: "POST")
         if lastPersonalizationRefreshAt.map({ Date().timeIntervalSince($0) > 60 }) ?? true {
             await loadPersonalizedHome()
+        }
+    }
+
+    private func syncPlaybackSideEffects(for track: ApiTrack) {
+        schedulePlaybackPrefetch()
+        Task {
+            try? await postPlay(track)
+            await postPlaybackState()
+        }
+    }
+
+    private func postPlaybackState() async {
+        guard canUseApi else { return }
+        let queueIds = queueTracks.map(\.id)
+        let repeatValue: String
+        switch repeatMode {
+        case .off:
+            repeatValue = "off"
+        case .all:
+            repeatValue = "queue"
+        case .one:
+            repeatValue = "track"
+        }
+        let payload: [String: Any] = [
+            "current_track_id": (currentTrack?.id as Any?) ?? NSNull(),
+            "position_seconds": currentElapsedTime(),
+            "is_playing": isPlaying,
+            "repeat_mode": repeatValue,
+            "shuffle": shuffleEnabled,
+            "active_device_id": UIDevice.current.identifierForVendor?.uuidString ?? "ios",
+            "active_device_name": UIDevice.current.name,
+            "queue_track_ids": queueIds
+        ]
+        guard JSONSerialization.isValidJSONObject(payload),
+              let body = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        do {
+            let _: EmptyResponse = try await request("/playback/state", method: "PUT", body: body)
+        } catch {
+            if !isCancellation(error) {
+                // Playback continues locally; this only powers server-side queue prefetch.
+            }
+        }
+    }
+
+    private func schedulePlaybackPrefetch() {
+        playbackPrefetchTask?.cancel()
+        playbackPrefetchTask = Task { [weak self] in
+            guard let self else { return }
+            await self.prefetchNextPlaybackTrack()
+        }
+    }
+
+    private func prefetchNextPlaybackTrack() async {
+        guard let nextTrack = upcomingQueueTracks.first else { return }
+        guard !isTrackAvailableOffline(nextTrack), localPlaybackCacheFileURL(for: nextTrack) == nil else { return }
+        guard canUseApi, !playbackPrefetchingTrackIds.contains(nextTrack.id) else { return }
+        playbackPrefetchingTrackIds.insert(nextTrack.id)
+        defer { playbackPrefetchingTrackIds.remove(nextTrack.id) }
+
+        let encodedId = encodePathComponent(nextTrack.id)
+        guard let url = endpointURL(path: "/tracks/\(encodedId)/stream") else { return }
+        do {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 120
+            request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+            let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+            guard !Task.isCancelled else {
+                try? FileManager.default.removeItem(at: temporaryURL)
+                return
+            }
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                try? FileManager.default.removeItem(at: temporaryURL)
+                return
+            }
+            let targetURL = try playbackCacheFileURL(for: nextTrack)
+            try? FileManager.default.removeItem(at: targetURL)
+            try FileManager.default.moveItem(at: temporaryURL, to: targetURL)
+        } catch {
+            if !isCancellation(error) {
+                if let cacheURL = try? playbackCacheFileURL(for: nextTrack) {
+                    try? FileManager.default.removeItem(at: cacheURL)
+                }
+            }
         }
     }
 
@@ -1742,6 +2078,18 @@ final class AppState: ObservableObject {
         return left.id < right.id
     }
 
+    private func playlistSummaryOrder(_ left: PlaylistSummary, _ right: PlaylistSummary) -> Bool {
+        let nameOrder = left.name.localizedStandardCompare(right.name)
+        if nameOrder != .orderedSame { return nameOrder == .orderedAscending }
+        return left.id < right.id
+    }
+
+    private func playlistDetailOrder(_ left: PlaylistDetail, _ right: PlaylistDetail) -> Bool {
+        let nameOrder = left.name.localizedStandardCompare(right.name)
+        if nameOrder != .orderedSame { return nameOrder == .orderedAscending }
+        return left.id < right.id
+    }
+
     private func stableLibraryTrackOrder(_ left: ApiTrack, _ right: ApiTrack) -> Bool {
         let albumOrder = left.displayAlbum.localizedStandardCompare(right.displayAlbum)
         if albumOrder != .orderedSame { return albumOrder == .orderedAscending }
@@ -1861,7 +2209,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func seek(to seconds: TimeInterval) {
+    func seek(to seconds: TimeInterval) {
         let time = CMTime(seconds: seconds, preferredTimescale: 600)
         player?.seek(to: time)
         saveCurrentPlaybackPosition(elapsed: seconds)
