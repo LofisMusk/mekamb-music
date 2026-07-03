@@ -50,38 +50,21 @@ jobs:
       - name: Show Xcode & SDK versions
         run: xcodebuild -version && xcodebuild -showsdks
 
-      - name: Resolve simulator destination
-        id: sim
-        run: |
-          DEVICE=$(xcrun simctl list devices available \
-            | grep -m1 -E "iPhone (1[0-4])" \
-            | sed -E 's/^[[:space:]]*(iPhone[^(]+)\(.*/\1/' \
-            | sed -E 's/[[:space:]]+$//')
-          if [ -z "$DEVICE" ]; then
-            DEVICE=$(xcrun simctl list devices available \
-              | grep -m1 "iPhone" \
-              | sed -E 's/^[[:space:]]*(iPhone[^(]+)\(.*/\1/' \
-              | sed -E 's/[[:space:]]+$//')
-          fi
-          echo "device=$DEVICE" >> "$GITHUB_OUTPUT"
-          echo "Using simulator device: $DEVICE"
-
       - name: Build for testing (Debug, simulator, unsigned)
         run: |
           xcodebuild build-for-testing \
             -project "$PROJECT_PATH" \
             -scheme "$SCHEME" \
-            -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.device }}" \
+            -destination "generic/platform=iOS Simulator" \
             -configuration Debug \
-            CODE_SIGNING_ALLOWED=NO \
-            | xcpretty && exit ${PIPESTATUS[0]}
+            CODE_SIGNING_ALLOWED=NO
 
       - name: Run unit tests
         run: |
           xcodebuild test-without-building \
             -project "$PROJECT_PATH" \
             -scheme "$SCHEME" \
-            -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.device }}" \
+            -destination "generic/platform=iOS Simulator" \
             CODE_SIGNING_ALLOWED=NO \
             | xcpretty --report junit --output build/reports/junit.xml && exit ${PIPESTATUS[0]}
 
