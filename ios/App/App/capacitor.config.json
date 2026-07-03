@@ -1,0 +1,14 @@
+{
+	"appId": "pl.mekamb.music",
+	"appName": "Mekamb Music",
+	"webDir": "client-dist",
+	"ios": {
+		"scheme": "MekambMusic"
+	},
+	"plugins": {
+		"CapacitorHttp": {
+			"enabled": true
+		}
+	},
+	"packageClassList": []
+}
