@@ -1,17 +1,8 @@
-name: iOS Build, Test & Release
+name: iOS Build & Test
 
-# Buduje i testuje aplikację native-ios/MekambMusicNative, następnie pakuje ją
-# jako niepodpisany plik .ipa i publikuje go jako GitHub Release.
-#
-# WAŻNE: ten workflow NIE podpisuje aplikacji certyfikatem dystrybucyjnym Apple.
-# Wynikowy .ipa nie zainstaluje się przez zwykłe "Zainstaluj" na iPhonie bez
-# dodatkowego podpisania (np. AltStore/Sideloadly z własnym Apple ID, albo
-# dodania sekretów Code Signing i przejścia na `xcodebuild -exportArchive`
-# z prawdziwym exportOptions.plist). Ten workflow służy do:
-#   - weryfikacji, że projekt się kompiluje na CI (build-for-testing na symulatorze;
-#     brak XCTest targetu, więc realne testy jednostkowe jeszcze się nie uruchamiają),
-#   - dostarczenia .xcarchive/.ipa jako artefaktu/release do dalszego,
-#     ręcznego podpisania.
+# Weryfikuje, że native-ios/MekambMusicNative kompiluje się na CI (build-for-testing
+# na symulatorze). Publikowanie release'ów (razem z Androidem) obsługuje
+# mobile-release.yml — ten workflow to tylko ciągła weryfikacja na push/PR.
 
 on:
   push:
@@ -23,23 +14,15 @@ on:
     paths:
       - "native-ios/**"
   workflow_dispatch:
-    inputs:
-      create_release:
-        description: "Publikuj GitHub Release z .ipa"
-        type: boolean
-        default: true
 
 env:
   PROJECT_PATH: native-ios/MekambMusicNative.xcodeproj
   SCHEME: MekambMusicNative
-  APP_NAME: MekambMusicNative
 
 jobs:
   build-and-test:
     name: Build & Test (Simulator)
     runs-on: macos-15
-    outputs:
-      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -86,104 +69,3 @@ jobs:
       # xcodebuild test-without-building nie ma czego uruchomić (scheme nie jest
       # skonfigurowany pod akcję "Test"). Krok usunięty do czasu dodania realnego
       # test targetu; wcześniej ten krok zawsze kończył się błędem.
-
-      - name: Compute version string
-        id: version
-        run: |
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          MARKETING_VERSION=$(grep -m1 'MARKETING_VERSION' native-ios/MekambMusicNative.xcodeproj/project.pbxproj | sed -E 's/.*= (.*);/\1/')
-          echo "version=${MARKETING_VERSION}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-
-  archive-and-package:
-    name: Archive & Package .ipa
-    needs: build-and-test
-    runs-on: macos-15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Select Xcode
-        run: |
-          LATEST_XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
-          if [ -z "$LATEST_XCODE" ]; then
-            LATEST_XCODE="/Applications/Xcode.app"
-          fi
-          echo "Using $LATEST_XCODE"
-          sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
-
-      - name: Archive (Release, device, unsigned)
-        run: |
-          xcodebuild archive \
-            -project "$PROJECT_PATH" \
-            -scheme "$SCHEME" \
-            -configuration Release \
-            -archivePath build/${{ env.APP_NAME }}.xcarchive \
-            -destination "generic/platform=iOS" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES \
-            | xcpretty && exit ${PIPESTATUS[0]}
-
-      - name: Package unsigned .ipa
-        run: |
-          set -euo pipefail
-          ARCHIVE="build/${{ env.APP_NAME }}.xcarchive"
-          APP_PATH="$ARCHIVE/Products/Applications/${{ env.APP_NAME }}.app"
-
-          if [ ! -d "$APP_PATH" ]; then
-            echo "::error::Nie znaleziono $APP_PATH w archiwum"
-            find "$ARCHIVE" -maxdepth 4
-            exit 1
-          fi
-
-          mkdir -p build/Payload
-          cp -R "$APP_PATH" build/Payload/
-          cd build
-          zip -r -y "${{ env.APP_NAME }}-${{ needs.build-and-test.outputs.version }}.ipa" Payload
-          cd ..
-
-      - name: Upload .ipa artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.APP_NAME }}-ipa
-          path: build/*.ipa
-
-      - name: Upload .xcarchive artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.APP_NAME }}-xcarchive
-          path: build/${{ env.APP_NAME }}.xcarchive
-
-  release:
-    name: Publish GitHub Release
-    needs: [build-and-test, archive-and-package]
-    if: >
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && inputs.create_release)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download .ipa artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.APP_NAME }}-ipa
-          path: dist
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ios-${{ needs.build-and-test.outputs.version }}
-          name: iOS ${{ needs.build-and-test.outputs.version }}
-          files: dist/*.ipa
-          body: |
-            Automatyczny build native-ios (${{ env.SCHEME }}).
-
-            **Uwaga:** ten `.ipa` jest niepodpisany certyfikatem dystrybucyjnym
-            Apple. Do instalacji na fizycznym iPhonie potrzebujesz własnego
-            podpisania (np. AltStore/Sideloadly z darmowym Apple ID, albo
-            skonfigurowania Code Signing w tym workflow jeśli masz płatne
-            konto Apple Developer).
-          draft: false
-          prerelease: true

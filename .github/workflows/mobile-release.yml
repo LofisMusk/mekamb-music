@@ -1,0 +1,198 @@
+name: Mobile release (Android + iOS)
+
+# Buduje native-android (APK) i native-ios/MekambMusicNative (niepodpisany .ipa)
+# i publikuje JEDEN GitHub Release z obydwoma plikami.
+#
+# Trigger: push tagu "v*" (standardowy release flow — jeden tag = jeden release
+# ze wszystkimi platformami), albo ręcznie z zakładki Actions (workflow_dispatch)
+# z opcjonalnym tagiem do testowania bez pushowania prawdziwego tagu.
+#
+# WAŻNE: .ipa NIE jest podpisany certyfikatem dystrybucyjnym Apple. Do instalacji
+# na fizycznym iPhonie potrzebujesz własnego podpisania (np. AltStore/Sideloadly
+# z darmowym Apple ID, albo skonfigurowania Code Signing w tym workflow jeśli
+# masz płatne konto Apple Developer).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to create, for example v1.2.0"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mobile-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IOS_PROJECT_PATH: native-ios/MekambMusicNative.xcodeproj
+  IOS_SCHEME: MekambMusicNative
+  IOS_APP_NAME: MekambMusicNative
+
+jobs:
+  resolve-tag:
+    name: Resolve release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.release_tag }}"
+            if [ -z "$tag" ]; then
+              tag="v0.0.0-${{ github.run_number }}"
+            fi
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag: ${tag}"
+
+  build-android:
+    name: Build Android APK
+    needs: resolve-tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: native-android
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --no-daemon
+
+      - name: Rename APK
+        id: apk
+        shell: bash
+        run: |
+          apk_name="mekamb-music-${{ needs.resolve-tag.outputs.tag }}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "../${apk_name}"
+          echo "apk_path=${GITHUB_WORKSPACE}/${apk_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: ${{ steps.apk.outputs.apk_path }}
+          if-no-files-found: error
+
+  build-ios:
+    name: Build & Package iOS .ipa
+    needs: resolve-tag
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          LATEST_XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$LATEST_XCODE" ]; then
+            LATEST_XCODE="/Applications/Xcode.app"
+          fi
+          echo "Using $LATEST_XCODE"
+          sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
+
+      - name: Archive (Release, device, unsigned)
+        run: |
+          xcodebuild archive \
+            -project "$IOS_PROJECT_PATH" \
+            -scheme "$IOS_SCHEME" \
+            -configuration Release \
+            -archivePath build/${{ env.IOS_APP_NAME }}.xcarchive \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            | xcpretty && exit ${PIPESTATUS[0]}
+
+      - name: Package unsigned .ipa
+        id: ipa
+        run: |
+          set -euo pipefail
+          ARCHIVE="build/${{ env.IOS_APP_NAME }}.xcarchive"
+          APP_PATH="$ARCHIVE/Products/Applications/${{ env.IOS_APP_NAME }}.app"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "::error::Nie znaleziono $APP_PATH w archiwum"
+            find "$ARCHIVE" -maxdepth 4
+            exit 1
+          fi
+
+          mkdir -p build/Payload
+          cp -R "$APP_PATH" build/Payload/
+          cd build
+          ipa_name="${{ env.IOS_APP_NAME }}-${{ needs.resolve-tag.outputs.tag }}.ipa"
+          zip -r -y "${ipa_name}" Payload
+          echo "ipa_path=${GITHUB_WORKSPACE}/build/${ipa_name}" >> "$GITHUB_OUTPUT"
+          cd ..
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: ${{ steps.ipa.outputs.ipa_path }}
+
+      - name: Upload .xcarchive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.IOS_APP_NAME }}-xcarchive
+          path: build/${{ env.IOS_APP_NAME }}.xcarchive
+
+  release:
+    name: Publish GitHub Release
+    needs: [resolve-tag, build-android, build-ios]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Android APK
+        uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+          path: dist
+
+      - name: Download iOS .ipa
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-ipa
+          path: dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-tag.outputs.tag }}
+          name: Mekamb Music ${{ needs.resolve-tag.outputs.tag }}
+          files: dist/*
+          generate_release_notes: true
+          draft: false
+          prerelease: true
+          body: |
+            Automatyczny build Android + iOS (native-android, native-ios/${{ env.IOS_SCHEME }}).
+
+            **Uwaga:** plik `.ipa` jest niepodpisany certyfikatem dystrybucyjnym
+            Apple. Do instalacji na fizycznym iPhonie potrzebujesz własnego
+            podpisania (np. AltStore/Sideloadly z darmowym Apple ID, albo
+            skonfigurowania Code Signing w tym workflow jeśli masz płatne
+            konto Apple Developer).
