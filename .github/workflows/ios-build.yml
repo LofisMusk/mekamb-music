@@ -45,7 +45,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Select Xcode
-        run: sudo xcode-select -switch /Applications/Xcode_16.app/Contents/Developer
+        run: sudo xcode-select -switch /Applications/Xcode_15.app/Contents/Developer
 
       - name: Show Xcode & SDK versions
         run: xcodebuild -version && xcodebuild -showsdks
@@ -109,7 +109,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Select Xcode
-        run: sudo xcode-select -switch /Applications/Xcode_16.app/Contents/Developer
+        run: sudo xcode-select -switch /Applications/Xcode_15.app/Contents/Developer
 
       - name: Archive (Release, device, unsigned)
         run: |
