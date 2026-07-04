@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from urllib.parse import quote
 from uuid import UUID
@@ -423,7 +424,7 @@ async def get_track_artwork(
                 import mimetypes
                 mime = mimetypes.guess_type(cover_path.name)[0] or "image/jpeg"
                 return Response(
-                    content=cover_path.read_bytes(),
+                    content=await asyncio.to_thread(cover_path.read_bytes),
                     media_type=mime,
                     headers={"Cache-Control": "public, max-age=86400"},
                 )
@@ -440,7 +441,7 @@ async def get_track_artwork(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audio file not found.")
 
     try:
-        artwork = extract_embedded_artwork(path)
+        artwork = await asyncio.to_thread(extract_embedded_artwork, path)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -585,7 +586,7 @@ async def _resolve_stream_target(
 
     try:
         storage = build_library_storage(settings)
-        path = storage.ensure_cached(track.storage_key)
+        path = await asyncio.to_thread(storage.ensure_cached, track.storage_key)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid library path.") from exc
     except FileNotFoundError as exc:

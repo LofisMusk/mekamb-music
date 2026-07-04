@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from uuid import UUID
 
@@ -22,7 +23,7 @@ from app.db.models import ImportJob, Track, UserAction
 from app.imports.service import ImportService
 from app.library.audio import media_type_for_audio_file
 from app.storage.library import build_library_storage
-from app.sync.actions import apply_action, list_actions, merge_remote_action
+from app.sync.actions import apply_action, apply_actions_batch, bulk_merge_remote_actions, list_actions
 
 router = APIRouter(dependencies=[Depends(require_token)])
 
@@ -57,25 +58,9 @@ async def push_sync_actions(
     api_key: ApiKeyIdentity = Depends(require_token),
     session: AsyncSession = Depends(db_session),
 ) -> SyncActionPushResponse:
-    accepted = 0
-    skipped = 0
-    for item in payload.items:
-        existing = await session.get(UserAction, item.id)
-        if existing is not None:
-            skipped += 1
-            continue
-        await merge_remote_action(
-            session,
-            action_id=item.id,
-            action_type=item.action_type,
-            entity_type=item.entity_type,
-            entity_id=item.entity_id,
-            payload=item.payload,
-            origin_instance_id=item.origin_instance_id,
-            api_key_id=api_key.id,
-            created_at=item.created_at,
-        )
-        accepted += 1
+    accepted, skipped = await bulk_merge_remote_actions(
+        session, payload.items, api_key_id=api_key.id
+    )
     return SyncActionPushResponse(accepted=accepted, skipped_existing=skipped)
 
 
@@ -93,9 +78,7 @@ async def apply_pending_sync_actions(
         include_applied=False,
         limit=limit,
     )
-    applied_items: list[UserAction] = []
-    for action in actions:
-        applied_items.append(await apply_action(session, action, import_service=service))
+    applied_items = await apply_actions_batch(session, actions, import_service=service)
 
     failed = sum(1 for action in applied_items if action.apply_error)
     return SyncApplyResponse(
@@ -154,7 +137,8 @@ async def get_sync_track_file(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Track not found.")
 
     try:
-        path = build_library_storage(settings).ensure_cached(track.storage_key)
+        storage = build_library_storage(settings)
+        path = await asyncio.to_thread(storage.ensure_cached, track.storage_key)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid library path.") from exc
     except FileNotFoundError as exc:

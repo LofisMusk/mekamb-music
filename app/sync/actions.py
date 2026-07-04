@@ -41,6 +41,31 @@ class SyncTorrentCandidate:
     source_url: str
 
 
+def _build_user_action(
+    *,
+    action_type: str,
+    entity_type: str,
+    entity_id: str | None,
+    payload: dict[str, Any],
+    action_id: UUID | None = None,
+    origin_instance_id: str | None = None,
+    api_key_id: str = DEFAULT_API_KEY_ID,
+    created_at: datetime | None = None,
+    applied: bool = True,
+) -> UserAction:
+    return UserAction(
+        id=action_id or uuid4(),
+        api_key_id=api_key_id,
+        action_type=action_type,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        payload=payload,
+        origin_instance_id=origin_instance_id or settings.instance_id,
+        created_at=created_at or datetime.now(UTC),
+        applied_at=datetime.now(UTC) if applied else None,
+    )
+
+
 async def record_user_action(
     session: AsyncSession,
     *,
@@ -54,50 +79,56 @@ async def record_user_action(
     created_at: datetime | None = None,
     applied: bool = True,
 ) -> UserAction:
-    action = UserAction(
-        id=action_id or uuid4(),
-        api_key_id=api_key_id,
+    action = _build_user_action(
         action_type=action_type,
         entity_type=entity_type,
         entity_id=entity_id,
         payload=payload,
-        origin_instance_id=origin_instance_id or settings.instance_id,
-        created_at=created_at or datetime.now(UTC),
-        applied_at=datetime.now(UTC) if applied else None,
-    )
-    session.add(action)
-    await session.commit()
-    await session.refresh(action)
-    return action
-
-
-async def merge_remote_action(
-    session: AsyncSession,
-    *,
-    action_id: UUID,
-    action_type: str,
-    entity_type: str,
-    entity_id: str | None,
-    payload: dict[str, Any],
-    origin_instance_id: str,
-    api_key_id: str = DEFAULT_API_KEY_ID,
-    created_at: datetime,
-) -> UserAction:
-    existing = await session.get(UserAction, action_id)
-    if existing is not None:
-        return existing
-    return await record_user_action(
-        session,
         action_id=action_id,
-        action_type=action_type,
-        entity_type=entity_type,
-        entity_id=entity_id,
-        payload=payload,
         origin_instance_id=origin_instance_id,
         api_key_id=api_key_id,
         created_at=created_at,
-        applied=origin_instance_id == settings.instance_id,
+        applied=applied,
     )
+    session.add(action)
+    await session.commit()
+    return action
+
+
+async def bulk_merge_remote_actions(
+    session: AsyncSession,
+    items: list[Any],
+    *,
+    api_key_id: str = DEFAULT_API_KEY_ID,
+) -> tuple[int, int]:
+    """Merge a batch of remote sync actions with a single existence check and a single commit."""
+    if not items:
+        return 0, 0
+
+    existing_ids = set(
+        await session.scalars(
+            select(UserAction.id).where(UserAction.id.in_([item.id for item in items]))
+        )
+    )
+    new_actions = [
+        _build_user_action(
+            action_id=item.id,
+            action_type=item.action_type,
+            entity_type=item.entity_type,
+            entity_id=item.entity_id,
+            payload=item.payload,
+            origin_instance_id=item.origin_instance_id,
+            api_key_id=api_key_id,
+            created_at=item.created_at,
+            applied=item.origin_instance_id == settings.instance_id,
+        )
+        for item in items
+        if item.id not in existing_ids
+    ]
+    if new_actions:
+        session.add_all(new_actions)
+        await session.commit()
+    return len(new_actions), len(items) - len(new_actions)
 
 
 async def list_actions(
@@ -128,17 +159,40 @@ async def apply_action(
     *,
     import_service: ImportService,
 ) -> UserAction:
+    if action.applied_at is not None:
+        return action
+    await _apply_action_and_record_result(session, action, import_service=import_service)
+    await session.commit()
+    return action
+
+
+async def apply_actions_batch(
+    session: AsyncSession,
+    actions: list[UserAction],
+    *,
+    import_service: ImportService,
+) -> list[UserAction]:
+    """Apply a batch of pending sync actions with a single commit for the whole batch."""
+    pending = [action for action in actions if action.applied_at is None]
+    for action in pending:
+        await _apply_action_and_record_result(session, action, import_service=import_service)
+    if pending:
+        await session.commit()
+    return actions
+
+
+async def _apply_action_and_record_result(
+    session: AsyncSession,
+    action: UserAction,
+    *,
+    import_service: ImportService,
+) -> None:
     try:
-        if action.applied_at is not None:
-            return action
         await _apply_action(session, action, import_service=import_service)
         action.applied_at = datetime.now(UTC)
         action.apply_error = None
     except Exception as exc:
         action.apply_error = str(exc)
-    await session.commit()
-    await session.refresh(action)
-    return action
 
 
 async def _apply_action(

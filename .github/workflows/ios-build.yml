@@ -8,8 +8,8 @@ name: iOS Build, Test & Release
 # dodatkowego podpisania (np. AltStore/Sideloadly z własnym Apple ID, albo
 # dodania sekretów Code Signing i przejścia na `xcodebuild -exportArchive`
 # z prawdziwym exportOptions.plist). Ten workflow służy do:
-#   - weryfikacji, że projekt się kompiluje na CI,
-#   - uruchamiania testów jednostkowych na symulatorze,
+#   - weryfikacji, że projekt się kompiluje na CI (build-for-testing na symulatorze;
+#     brak XCTest targetu, więc realne testy jednostkowe jeszcze się nie uruchamiają),
 #   - dostarczenia .xcarchive/.ipa jako artefaktu/release do dalszego,
 #     ręcznego podpisania.
 
@@ -45,7 +45,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Select Xcode
-        run: sudo xcode-select -switch /Applications/Xcode_15.app/Contents/Developer
+        run: |
+          LATEST_XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$LATEST_XCODE" ]; then
+            LATEST_XCODE="/Applications/Xcode.app"
+          fi
+          echo "Using $LATEST_XCODE"
+          sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
 
       - name: Show Xcode & SDK versions
         run: xcodebuild -version && xcodebuild -showsdks
@@ -76,22 +82,10 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             | xcpretty && exit ${PIPESTATUS[0]}
 
-      - name: Run unit tests
-        run: |
-          xcodebuild test-without-building \
-            -project "$PROJECT_PATH" \
-            -scheme "$SCHEME" \
-            -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.device }}" \
-            CODE_SIGNING_ALLOWED=NO \
-            | xcpretty --report junit --output build/reports/junit.xml && exit ${PIPESTATUS[0]}
-
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results
-          path: build/reports/junit.xml
-          if-no-files-found: warn
+      # Brak celu testowego (XCTest target) w projekcie MekambMusicNative.xcodeproj —
+      # xcodebuild test-without-building nie ma czego uruchomić (scheme nie jest
+      # skonfigurowany pod akcję "Test"). Krok usunięty do czasu dodania realnego
+      # test targetu; wcześniej ten krok zawsze kończył się błędem.
 
       - name: Compute version string
         id: version
@@ -109,7 +103,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Select Xcode
-        run: sudo xcode-select -switch /Applications/Xcode_15.app/Contents/Developer
+        run: |
+          LATEST_XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$LATEST_XCODE" ]; then
+            LATEST_XCODE="/Applications/Xcode.app"
+          fi
+          echo "Using $LATEST_XCODE"
+          sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
 
       - name: Archive (Release, device, unsigned)
         run: |

@@ -92,6 +92,7 @@ class RecommendationEngine:
         indexer: MusicIndexerProvider,
         api_key_id: str = DEFAULT_API_KEY_ID,
         gemini_client: GeminiRecommendationClient | None = None,
+        redis=None,
     ) -> None:
         self.session = session
         self.piratebay = piratebay
@@ -99,6 +100,7 @@ class RecommendationEngine:
         self.indexer = indexer
         self.api_key_id = api_key_id
         self.gemini_client = gemini_client
+        self.redis = redis
 
     async def recommend_for_track(
         self,
@@ -150,7 +152,13 @@ class RecommendationEngine:
         mix_count: int,
         mix_size: int,
     ) -> PersonalizedHome:
-        tracks = list(await self.session.scalars(select(Track)))
+        tracks = list(
+            await self.session.scalars(
+                select(Track)
+                .order_by(Track.last_accessed.desc())
+                .limit(settings.recommendation_scan_limit)
+            )
+        )
         if not tracks:
             return PersonalizedHome(recommended_tracks=[], daily_mixes=[])
 
@@ -274,7 +282,14 @@ class RecommendationEngine:
     ) -> list[LocalTrackRecommendation]:
         if limit <= 0:
             return []
-        tracks = list(await self.session.scalars(select(Track).where(Track.id != seed.id)))
+        tracks = list(
+            await self.session.scalars(
+                select(Track)
+                .where(Track.id != seed.id)
+                .order_by(Track.last_accessed.desc())
+                .limit(settings.recommendation_scan_limit)
+            )
+        )
         features = await self._features_by_track_ids([seed.id, *(track.id for track in tracks)])
         profile = await self._personalization_profile()
         scored = [
@@ -303,13 +318,25 @@ class RecommendationEngine:
         if not seed_tracks:
             return []
         seed_ids = {track.id for track in seed_tracks}
-        candidates = list(await self.session.scalars(select(Track).where(Track.id.not_in(seed_ids))))
+        candidates = list(
+            await self.session.scalars(
+                select(Track)
+                .where(Track.id.not_in(seed_ids))
+                .order_by(Track.last_accessed.desc())
+                .limit(settings.recommendation_scan_limit)
+            )
+        )
         features = await self._features_by_track_ids(
             [*(track.id for track in seed_tracks), *(track.id for track in candidates)]
         )
         profile = await self._personalization_profile()
+        vectors = {
+            track_id: _normalized_audio_vector(feature)
+            for track_id, feature in features.items()
+        }
         best: dict[UUID, LocalTrackRecommendation] = {}
         for seed in seed_tracks:
+            seed_vector = vectors.get(seed.id)
             for candidate in candidates:
                 scored = _score_track_against_seed(
                     seed,
@@ -317,6 +344,8 @@ class RecommendationEngine:
                     seed_feature=features.get(seed.id),
                     candidate_feature=features.get(candidate.id),
                     profile=profile,
+                    seed_vector=seed_vector,
+                    candidate_vector=vectors.get(candidate.id),
                 )
                 current = best.get(candidate.id)
                 if scored.score > 0 and (current is None or scored.score > current.score):
@@ -355,6 +384,7 @@ class RecommendationEngine:
                     GeminiCandidate(track=item.track, score=item.score, reasons=item.reasons)
                     for item in candidates
                 ],
+                redis=self.redis,
             )
         except GeminiRecommendationUnavailable as exc:
             logger.info("Gemini rerank unavailable; using local Python ranking: %s", exc)
@@ -451,13 +481,22 @@ class RecommendationEngine:
                 logger.warning("Recommendation Pirate Bay search failed for %r: %s", query, exc)
         if "1337x" in normalized_sources:
             try:
-                results.extend(_from_1337x(item) for item in await self.personal_1337x.search(query, page=1, sort_by="seeders"))
+                results.extend(
+                    _from_1337x(item)
+                    for item in await self.personal_1337x.search(
+                        query, page=1, sort_by="seeders", redis=self.redis
+                    )
+                )
             except Exception as exc:
                 logger.warning("Recommendation 1337x search failed for %r: %s", query, exc)
         return results
 
     async def _library_fingerprint(self) -> set[frozenset[str]]:
-        tracks = await self.session.scalars(select(Track))
+        tracks = await self.session.scalars(
+            select(Track)
+            .order_by(Track.last_accessed.desc())
+            .limit(settings.recommendation_scan_limit)
+        )
         fingerprints: set[frozenset[str]] = set()
         for track in tracks:
             fingerprints.update(_track_fingerprints(track))
@@ -491,11 +530,18 @@ def _score_track_against_seed(
     seed_feature: TrackAudioFeature | None = None,
     candidate_feature: TrackAudioFeature | None = None,
     profile: PersonalizationProfile | None = None,
+    seed_vector: list[float] | None = None,
+    candidate_vector: list[float] | None = None,
 ) -> LocalTrackRecommendation:
     score = 0.0
     reasons: list[str] = []
 
-    audio_similarity = _audio_similarity(seed_feature, candidate_feature)
+    audio_similarity = _audio_similarity(
+        seed_feature,
+        candidate_feature,
+        seed_vector=seed_vector,
+        candidate_vector=candidate_vector,
+    )
     if audio_similarity is not None:
         score += audio_similarity * 70.0
         reasons.append("audio_similarity")
@@ -553,11 +599,16 @@ def _score_track_against_seed(
 def _audio_similarity(
     seed_feature: TrackAudioFeature | None,
     candidate_feature: TrackAudioFeature | None,
+    *,
+    seed_vector: list[float] | None = None,
+    candidate_vector: list[float] | None = None,
 ) -> float | None:
     if seed_feature is None or candidate_feature is None:
         return None
-    seed_vector = _normalized_audio_vector(seed_feature)
-    candidate_vector = _normalized_audio_vector(candidate_feature)
+    if seed_vector is None:
+        seed_vector = _normalized_audio_vector(seed_feature)
+    if candidate_vector is None:
+        candidate_vector = _normalized_audio_vector(candidate_feature)
     if not seed_vector or len(seed_vector) != len(candidate_vector):
         return None
     return max(0.0, _cosine_similarity(seed_vector, candidate_vector))

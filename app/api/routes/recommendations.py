@@ -1,6 +1,9 @@
+import json
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +13,7 @@ from app.api.deps import (
     music_indexer_provider,
     personal_1337x_provider,
     piratebay_provider,
+    redis_client,
     require_token,
 )
 from app.api.schemas import (
@@ -37,6 +41,8 @@ from app.sources.piratebay import PirateBayProvider
 from app.storage.library import build_library_storage
 from app.sync.actions import IMPORT_TORRENT, import_action_payload, record_user_action
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(dependencies=[Depends(require_token)])
 
 
@@ -46,6 +52,7 @@ def _recommendation_engine(
     indexer: MusicIndexerProvider = Depends(music_indexer_provider),
     piratebay: PirateBayProvider = Depends(piratebay_provider),
     personal_1337x: Personal1337xProvider = Depends(personal_1337x_provider),
+    redis: Redis = Depends(redis_client),
 ) -> RecommendationEngine:
     gemini_client = None
     if settings.recommendation_use_gemini:
@@ -53,6 +60,7 @@ def _recommendation_engine(
             api_key=settings.gemini_api_key,
             model=settings.gemini_model,
             timeout_seconds=settings.gemini_timeout_seconds,
+            cache_ttl_seconds=settings.gemini_rerank_cache_ttl_seconds,
         )
     return RecommendationEngine(
         session=session,
@@ -61,7 +69,30 @@ def _recommendation_engine(
         personal_1337x=personal_1337x,
         api_key_id=api_key.id,
         gemini_client=gemini_client,
+        redis=redis,
     )
+
+
+async def _cached_response(redis: Redis, key: str) -> dict[str, object] | None:
+    try:
+        cached = await redis.get(key)
+    except Exception as exc:
+        logger.warning("Redis get failed (ignored): %s", exc)
+        return None
+    if not cached:
+        return None
+    try:
+        return json.loads(cached)
+    except (TypeError, ValueError) as exc:
+        logger.warning("Failed to decode cached recommendation response (ignored): %s", exc)
+        return None
+
+
+async def _store_response(redis: Redis, key: str, payload: dict[str, object]) -> None:
+    try:
+        await redis.setex(key, settings.recommendation_cache_ttl_seconds, json.dumps(payload))
+    except Exception as exc:
+        logger.warning("Redis set failed (ignored): %s", exc)
 
 
 @router.get("/tracks/{track_id}", response_model=RecommendationResponse)
@@ -71,17 +102,30 @@ async def recommend_for_track(
     external_limit: int = Query(default=12, ge=0, le=50),
     sources: str | None = Query(default=None),
     engine: RecommendationEngine = Depends(_recommendation_engine),
+    api_key: ApiKeyIdentity = Depends(require_token),
+    redis: Redis = Depends(redis_client),
 ) -> RecommendationResponse:
+    resolved_sources = _sources(sources)
+    cache_key = (
+        f"rec:track:{api_key.id}:{track_id}:{local_limit}:{external_limit}:"
+        f"{','.join(sorted(resolved_sources))}"
+    )
+    cached = await _cached_response(redis, cache_key)
+    if cached is not None:
+        return RecommendationResponse.model_validate(cached)
+
     try:
         recommendations = await engine.recommend_for_track(
             track_id,
             local_limit=local_limit,
             external_limit=external_limit,
-            sources=_sources(sources),
+            sources=resolved_sources,
         )
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    return _recommendation_response(recommendations)
+    response = _recommendation_response(recommendations)
+    await _store_response(redis, cache_key, response.model_dump(mode="json"))
+    return response
 
 
 @router.post("/tracks/{track_id}/audio-features", response_model=TrackAudioFeatureResponse)
@@ -134,13 +178,26 @@ async def recommend_for_library(
     external_limit: int = Query(default=20, ge=0, le=100),
     sources: str | None = Query(default=None),
     engine: RecommendationEngine = Depends(_recommendation_engine),
+    api_key: ApiKeyIdentity = Depends(require_token),
+    redis: Redis = Depends(redis_client),
 ) -> RecommendationResponse:
+    resolved_sources = _sources(sources)
+    cache_key = (
+        f"rec:library:{api_key.id}:{local_limit}:{external_limit}:"
+        f"{','.join(sorted(resolved_sources))}"
+    )
+    cached = await _cached_response(redis, cache_key)
+    if cached is not None:
+        return RecommendationResponse.model_validate(cached)
+
     recommendations = await engine.recommend_for_library(
         local_limit=local_limit,
         external_limit=external_limit,
-        sources=_sources(sources),
+        sources=resolved_sources,
     )
-    return _recommendation_response(recommendations)
+    response = _recommendation_response(recommendations)
+    await _store_response(redis, cache_key, response.model_dump(mode="json"))
+    return response
 
 
 @router.get("/personalized", response_model=PersonalizedHomeResponse)
@@ -149,13 +206,20 @@ async def personalized_home(
     mix_count: int = Query(default=4, ge=1, le=8),
     mix_size: int = Query(default=12, ge=1, le=50),
     engine: RecommendationEngine = Depends(_recommendation_engine),
+    api_key: ApiKeyIdentity = Depends(require_token),
+    redis: Redis = Depends(redis_client),
 ) -> PersonalizedHomeResponse:
+    cache_key = f"rec:home:{api_key.id}:{local_limit}:{mix_count}:{mix_size}"
+    cached = await _cached_response(redis, cache_key)
+    if cached is not None:
+        return PersonalizedHomeResponse.model_validate(cached)
+
     home = await engine.personalized_home(
         local_limit=local_limit,
         mix_count=mix_count,
         mix_size=mix_size,
     )
-    return PersonalizedHomeResponse(
+    response = PersonalizedHomeResponse(
         recommended_tracks=[
             {
                 "track": item.track.to_dict(),
@@ -182,6 +246,8 @@ async def personalized_home(
             for mix in home.daily_mixes
         ],
     )
+    await _store_response(redis, cache_key, response.model_dump(mode="json"))
+    return response
 
 
 @router.post("/tracks/{track_id}/import-missing", response_model=RecommendationImportResponse)

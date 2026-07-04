@@ -100,9 +100,7 @@ class MusicIndexerProvider:
             )
             return []
 
-        results: list[MusicIndexerSearchResult] = []
-        last_error: Exception | None = None
-        if self.prowlarr_url:
+        async def _search_prowlarr() -> tuple[list[MusicIndexerSearchResult], Exception | None]:
             try:
                 logger.warning(
                     "Searching Prowlarr indexers: query=%r categories=%s",
@@ -132,27 +130,38 @@ class MusicIndexerProvider:
                         _payload_count(payload),
                         len(prowlarr_results),
                     )
-                results.extend(prowlarr_results)
+                return prowlarr_results, None
             except Exception as exc:
                 logger.warning("Prowlarr music indexer search failed for %r: %s", query, exc)
                 if _is_selected_indexers_unavailable(exc):
                     logger.warning(
                         "Prowlarr has no currently available selected indexers; returning no results."
                     )
-                else:
-                    last_error = exc
+                    return [], None
+                return [], exc
 
-        for url in self.torznab_urls:
+        async def _search_torznab(url: str) -> tuple[list[MusicIndexerSearchResult], Exception | None]:
             try:
                 logger.warning("Searching Torznab indexer: url=%s query=%r", _redact_query(url), query)
                 payload = await asyncio.to_thread(self._fetch_torznab, url, query)
                 parsed = _parse_torznab_results(payload, source_url=url)
                 logger.warning("Torznab search parsed_count=%d url=%s", len(parsed), _redact_query(url))
-                results.extend(parsed)
+                return parsed, None
             except Exception as exc:
                 logger.warning("Torznab music indexer search failed for %s: %s", _redact_query(url), exc)
-                last_error = exc
-                continue
+                return [], exc
+
+        tasks = []
+        if self.prowlarr_url:
+            tasks.append(_search_prowlarr())
+        tasks.extend(_search_torznab(url) for url in self.torznab_urls)
+
+        results: list[MusicIndexerSearchResult] = []
+        last_error: Exception | None = None
+        for source_results, error in await asyncio.gather(*tasks):
+            results.extend(source_results)
+            if error is not None:
+                last_error = error
 
         if not results and last_error is not None:
             raise MusicIndexerSourceError(f"Music indexer search failed: {last_error}") from last_error

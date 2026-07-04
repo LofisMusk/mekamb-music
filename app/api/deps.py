@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from fastapi import Depends, Header, HTTPException, status
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import ApiKeyIdentity, match_bearer_token
@@ -43,6 +44,10 @@ def piratebay_provider() -> PirateBayProvider:
 
 def music_indexer_provider() -> MusicIndexerProvider:
     return MusicIndexerProvider.from_settings(settings)
+
+
+def redis_client() -> Redis:
+    return RedisImportQueue.from_settings(settings).client
 
 
 def torrent_downloader() -> QBittorrentDownloader:

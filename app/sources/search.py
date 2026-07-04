@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import asdict, dataclass
@@ -50,11 +51,12 @@ class UnifiedTorrentSearch:
 
         results: list[UnifiedTorrentSearchItem] = []
         for variant in variants:
-            piratebay_items = await self._search_piratebay(variant)
+            piratebay_items, thirteen_items = await asyncio.gather(
+                self._search_piratebay(variant),
+                self._search_1337x(variant, redis=redis),
+            )
             if piratebay_items is not None:
                 results.extend(piratebay_items)
-
-            thirteen_items = await self._search_1337x(variant, redis=redis)
             if thirteen_items is not None:
                 results.extend(thirteen_items)
 
