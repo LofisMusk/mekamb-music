@@ -19,43 +19,6 @@ The API listens on `http://localhost:8000`.
 Open `http://localhost:8000/` for a very small browser frontend that uses the
 same API token and calls the backend directly.
 
-## Desktop App
-
-The desktop app is a client only. It ships the web player UI locally, connects
-to one of your remote API endpoints, and forwards system media keys to the
-player:
-
-- play / pause
-- next track
-- previous track
-- stop, when the keyboard or desktop environment exposes it
-
-Run it locally:
-
-```bash
-npm install
-npm run desktop
-```
-
-You can enter API endpoints in the app, one per line. The first reachable
-endpoint wins, so you can put a cloud URL and a home-server URL in priority
-order. You can also prefill them at launch:
-
-```bash
-MEKAMB_MUSIC_URLS="https://music.example.com,http://home-server:8000" npm run desktop
-```
-
-Build desktop packages:
-
-```bash
-npm run desktop:dist:mac
-npm run desktop:dist:linux
-```
-
-On macOS, media keys may require allowing the app in System Settings when the
-system asks for keyboard/accessibility permissions. On Linux, global media-key
-support depends on the desktop environment and window manager.
-
 ## Native iOS App
 
 A native SwiftUI iPhone client lives in `native-ios/`. It does not use Electron,
