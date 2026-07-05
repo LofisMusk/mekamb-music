@@ -330,7 +330,7 @@ jobs:
           files: dist/*
           generate_release_notes: true
           draft: false
-          prerelease: true
+          prerelease: false
           body: |
             Automatyczny build wszystkich platform (Android, iOS, macOS, Linux, Windows).
 
