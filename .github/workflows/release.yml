@@ -231,15 +231,20 @@ jobs:
         continue-on-error: true
         run: |
           ../native-linux/package-appimage.sh "${{ needs.resolve-tag.outputs.tag }}"
-          echo "path=${GITHUB_WORKSPACE}/native-linux/build/mekamb-music-desktop-${{ needs.resolve-tag.outputs.tag }}-linux-x86_64.AppImage" >> "$GITHUB_OUTPUT"
+          # Stage the AppImage at the workspace root next to the .deb so both
+          # artifacts share a common upload root and land flat in dist/ (a
+          # nested path here becomes a dist/native-linux/ dir that breaks the
+          # sha256sum step and would not be picked up by the release glob).
+          mv native-linux/build/*.AppImage \
+            "${GITHUB_WORKSPACE}/mekamb-music-desktop-${{ needs.resolve-tag.outputs.tag }}-linux-x86_64.AppImage"
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
           name: desktop-linux
           path: |
-            ${{ steps.deb.outputs.path }}
-            native-linux/build/*.AppImage
+            ${{ github.workspace }}/mekamb-music-desktop-*-linux-amd64.deb
+            ${{ github.workspace }}/mekamb-music-desktop-*-linux-x86_64.AppImage
           if-no-files-found: error
 
   build-desktop-windows:
@@ -311,7 +316,10 @@ jobs:
         shell: bash
         run: |
           cd dist
-          sha256sum * > SHA256SUMS.txt
+          # Hash only regular files, and never the checksum file itself, so a
+          # stray subdirectory or a re-run can't break the step.
+          find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -printf '%f\n' \
+            | sort | xargs sha256sum > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Create GitHub Release
