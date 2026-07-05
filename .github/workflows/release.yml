@@ -235,7 +235,7 @@ jobs:
           # artifacts share a common upload root and land flat in dist/ (a
           # nested path here becomes a dist/native-linux/ dir that breaks the
           # sha256sum step and would not be picked up by the release glob).
-          mv native-linux/build/*.AppImage \
+          mv ../native-linux/build/*.AppImage \
             "${GITHUB_WORKSPACE}/mekamb-music-desktop-${{ needs.resolve-tag.outputs.tag }}-linux-x86_64.AppImage"
 
       - name: Upload Linux artifacts
