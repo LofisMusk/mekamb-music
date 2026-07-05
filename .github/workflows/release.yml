@@ -1,0 +1,333 @@
+name: Release (Android + iOS + Desktop)
+
+# Jeden tag v* = jeden release ze wszystkimi platformami:
+# Android .apk, iOS .ipa (niepodpisany), macOS .dmg (arm64, niepodpisany),
+# Linux .deb + .AppImage, Windows .msi — plus SHA256SUMS.txt (weryfikowany
+# przez desktopowy auto-updater).
+#
+# Nazwy artefaktów desktop są dopasowywane po sufiksie przez auto-updater
+# (PlatformAssets.kt) — nie zmieniaj ich bez aktualizacji tamtej logiki.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to create, for example v1.2.0"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IOS_PROJECT_PATH: native-ios/MekambMusicNative.xcodeproj
+  IOS_SCHEME: MekambMusicNative
+  IOS_APP_NAME: MekambMusicNative
+
+jobs:
+  resolve-tag:
+    name: Resolve release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.release_tag }}"
+            if [ -z "$tag" ]; then
+              tag="v1.0.0-test${{ github.run_number }}"
+            fi
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag: ${tag} (version: ${tag#v})"
+
+  build-android:
+    name: Build Android APK
+    needs: resolve-tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: native-android
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --no-daemon
+
+      - name: Rename APK
+        id: apk
+        shell: bash
+        run: |
+          apk_name="mekamb-music-${{ needs.resolve-tag.outputs.tag }}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "../${apk_name}"
+          echo "apk_path=${GITHUB_WORKSPACE}/${apk_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: ${{ steps.apk.outputs.apk_path }}
+          if-no-files-found: error
+
+  build-ios:
+    name: Build & Package iOS .ipa
+    needs: resolve-tag
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          LATEST_XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$LATEST_XCODE" ]; then
+            LATEST_XCODE="/Applications/Xcode.app"
+          fi
+          echo "Using $LATEST_XCODE"
+          sudo xcode-select -switch "$LATEST_XCODE/Contents/Developer"
+
+      - name: Archive (Release, device, unsigned)
+        run: |
+          xcodebuild archive \
+            -project "$IOS_PROJECT_PATH" \
+            -scheme "$IOS_SCHEME" \
+            -configuration Release \
+            -archivePath build/${{ env.IOS_APP_NAME }}.xcarchive \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            | xcpretty && exit ${PIPESTATUS[0]}
+
+      - name: Package unsigned .ipa
+        run: |
+          set -euo pipefail
+          ARCHIVE="build/${{ env.IOS_APP_NAME }}.xcarchive"
+          APP_PATH="$ARCHIVE/Products/Applications/${{ env.IOS_APP_NAME }}.app"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "::error::Nie znaleziono $APP_PATH w archiwum"
+            find "$ARCHIVE" -maxdepth 4
+            exit 1
+          fi
+
+          mkdir -p build/Payload
+          cp -R "$APP_PATH" build/Payload/
+          cd build
+          zip -r -y "${{ env.IOS_APP_NAME }}-${{ needs.resolve-tag.outputs.tag }}.ipa" Payload
+          cd ..
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: build/*.ipa
+
+  build-desktop-macos:
+    name: Build macOS .dmg (arm64)
+    needs: resolve-tag
+    runs-on: macos-15
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: native-desktop
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Package DMG
+        run: ./gradlew :native-mac:packageDmg -PappVersion=${{ needs.resolve-tag.outputs.version }} --no-daemon
+
+      - name: Rename DMG
+        id: dmg
+        shell: bash
+        run: |
+          src=$(ls ../native-mac/build/compose/binaries/main/dmg/*.dmg | head -1)
+          dst="${GITHUB_WORKSPACE}/mekamb-music-desktop-${{ needs.resolve-tag.outputs.tag }}-macos-arm64.dmg"
+          mv "$src" "$dst"
+          echo "path=$dst" >> "$GITHUB_OUTPUT"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-macos
+          path: ${{ steps.dmg.outputs.path }}
+          if-no-files-found: error
+
+  build-desktop-linux:
+    name: Build Linux .deb + .AppImage
+    needs: resolve-tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: native-desktop
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Package Deb + distributable
+        run: |
+          ./gradlew :native-linux:packageDeb :native-linux:createDistributable \
+            -PappVersion=${{ needs.resolve-tag.outputs.version }} --no-daemon
+
+      - name: Rename Deb
+        id: deb
+        shell: bash
+        run: |
+          src=$(ls ../native-linux/build/compose/binaries/main/deb/*.deb | head -1)
+          dst="${GITHUB_WORKSPACE}/mekamb-music-desktop-${{ needs.resolve-tag.outputs.tag }}-linux-amd64.deb"
+          mv "$src" "$dst"
+          echo "path=$dst" >> "$GITHUB_OUTPUT"
+
+      - name: Build AppImage
+        id: appimage
+        shell: bash
+        continue-on-error: true
+        run: |
+          ../native-linux/package-appimage.sh "${{ needs.resolve-tag.outputs.tag }}"
+          echo "path=${GITHUB_WORKSPACE}/native-linux/build/mekamb-music-desktop-${{ needs.resolve-tag.outputs.tag }}-linux-x86_64.AppImage" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-linux
+          path: |
+            ${{ steps.deb.outputs.path }}
+            native-linux/build/*.AppImage
+          if-no-files-found: error
+
+  build-desktop-windows:
+    name: Build Windows .msi
+    needs: resolve-tag
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: native-desktop
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Package MSI
+        run: ./gradlew :native-windows:packageMsi -PappVersion=${{ needs.resolve-tag.outputs.version }} --no-daemon
+
+      - name: Rename MSI
+        id: msi
+        shell: bash
+        run: |
+          src=$(ls ../native-windows/build/compose/binaries/main/msi/*.msi | head -1)
+          dst="${GITHUB_WORKSPACE}/mekamb-music-desktop-${{ needs.resolve-tag.outputs.tag }}-windows-x64.msi"
+          mv "$src" "$dst"
+          echo "path=$dst" >> "$GITHUB_OUTPUT"
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows
+          path: ${{ steps.msi.outputs.path }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs:
+      - resolve-tag
+      - build-android
+      - build-ios
+      - build-desktop-macos
+      - build-desktop-linux
+      - build-desktop-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-tag.outputs.tag }}
+          name: Mekamb Music ${{ needs.resolve-tag.outputs.tag }}
+          files: dist/*
+          generate_release_notes: true
+          draft: false
+          prerelease: true
+          body: |
+            Automatyczny build wszystkich platform (Android, iOS, macOS, Linux, Windows).
+
+            **Desktop:** aplikacje macOS/Windows/Linux mają wbudowany auto-updater
+            (sprawdza nowe wersje z GitHub Releases przy starcie).
+
+            **Uwaga — niepodpisane buildy:**
+            - `.ipa` jest niepodpisany certyfikatem Apple — do instalacji na iPhonie
+              potrzebujesz własnego podpisania (np. AltStore/Sideloadly).
+            - `.dmg` (macOS) jest niepodpisany — przy pierwszym uruchomieniu kliknij
+              prawym przyciskiem → Otwórz, albo zatwierdź w Ustawieniach systemowych
+              → Prywatność i ochrona.
+            - `SHA256SUMS.txt` służy do weryfikacji pobrań (auto-updater sprawdza je
+              automatycznie).

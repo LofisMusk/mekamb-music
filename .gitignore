@@ -6,8 +6,16 @@ __pycache__/
 .env
 .DS_Store
 build/
-data/
+/data/
 ios/
 dist/
 client-dist/
 node_modules/
+
+# Desktop (Compose Multiplatform)
+native-desktop/.gradle/
+native-desktop/build/
+native-desktop/shared/build/
+native-mac/build/
+native-linux/build/
+native-windows/build/

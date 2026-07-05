@@ -1,0 +1,58 @@
+name: Desktop CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "native-desktop/**"
+      - "native-mac/**"
+      - "native-linux/**"
+      - "native-windows/**"
+      - ".github/workflows/desktop-ci.yml"
+  pull_request:
+    paths:
+      - "native-desktop/**"
+      - "native-mac/**"
+      - "native-linux/**"
+      - "native-windows/**"
+      - ".github/workflows/desktop-ci.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & Test (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: native-desktop
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build all modules & run shared tests
+        run: ./gradlew build --no-daemon
+
+      - name: Packaging smoke test (deb)
+        run: ./gradlew :native-linux:packageDeb --no-daemon
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-test-reports
+          path: native-desktop/shared/build/reports/tests/
+          if-no-files-found: ignore
