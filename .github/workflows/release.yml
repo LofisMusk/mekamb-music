@@ -250,6 +250,12 @@ jobs:
     defaults:
       run:
         working-directory: native-desktop
+        # Force bash (Git Bash ships on windows-latest). Under the default
+        # PowerShell, an unquoted `-PappVersion=1.0.1` gets mangled at the dots
+        # so Gradle receives `1`, and the MSI packager fails with
+        # "Illegal version for 'Msi': '1'". bash passes the argument verbatim,
+        # matching the macOS/Linux jobs.
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@v4
