@@ -2,6 +2,7 @@ import AVFoundation
 import Foundation
 import ImageIO
 import MediaPlayer
+import Network
 import SwiftUI
 import UIKit
 
@@ -174,6 +175,14 @@ struct OfflineTrackRecord: Codable, Hashable {
     let relativePath: String
     let downloadedAt: Date
     let sizeBytes: Int?
+}
+
+/// Last-known-good disk snapshot of the library, used to hydrate the UI instantly on cold start
+/// before `refreshLibrary()`'s network calls resolve. See `loadCachedLibrarySnapshot()`.
+struct LibrarySnapshot: Codable {
+    let tracks: [ApiTrack]
+    let likedTrackIds: Set<String>
+    let playlists: [PlaylistDetail]
 }
 
 enum TorrentSource: String, Codable, CaseIterable, Identifiable {
@@ -434,6 +443,8 @@ final class AppState: ObservableObject {
     private var timeObserver: Any?
     private weak var timeObserverPlayer: AVPlayer?
     private var playerItemEndObserver: NSObjectProtocol?
+    private var playerItemStalledObserver: NSObjectProtocol?
+    private var playerItemFailedObserver: NSObjectProtocol?
     private var isLoadingAlbumCovers = false
     private var failedAlbumCoverIds: Set<String> = []
     private var didRestorePlaybackState = false
@@ -443,6 +454,14 @@ final class AppState: ObservableObject {
     private var lastPersonalizationRefreshAt: Date?
     private var playbackPrefetchTask: Task<Void, Never>?
     private var playbackPrefetchingTrackIds: Set<String> = []
+    private var currentTrackCacheTask: Task<Void, Never>?
+    private var pathMonitor: NWPathMonitor?
+    private var isAwaitingReconnectToResume = false
+    private var isRecoveringPlayback = false
+
+    /// Live connectivity state, used to auto-resume playback once the network returns after a
+    /// drop that happened before the current track finished caching locally.
+    @Published private(set) var isNetworkReachable = true
 
     private struct PlaybackSource {
         let url: URL
@@ -450,9 +469,11 @@ final class AppState: ObservableObject {
     }
 
     init() {
+        loadCachedLibrarySnapshot()
         loadOfflineLibrary()
         configureAudioSession()
         configureRemoteCommandCenter()
+        startNetworkMonitoring()
     }
 
     deinit {
@@ -462,6 +483,14 @@ final class AppState: ObservableObject {
         if let playerItemEndObserver {
             NotificationCenter.default.removeObserver(playerItemEndObserver)
         }
+        if let playerItemStalledObserver {
+            NotificationCenter.default.removeObserver(playerItemStalledObserver)
+        }
+        if let playerItemFailedObserver {
+            NotificationCenter.default.removeObserver(playerItemFailedObserver)
+        }
+        pathMonitor?.cancel()
+        currentTrackCacheTask?.cancel()
         player?.pause()
     }
 
@@ -735,6 +764,7 @@ final class AppState: ObservableObject {
             restorePlaybackStateIfNeeded()
             selectedAlbumId = selectedAlbumId.flatMap { id in albums.contains(where: { $0.id == id }) ? id : nil }
             selectedPlaylistId = selectedPlaylistId.flatMap { id in playlists.contains(where: { $0.id == id }) ? id : nil }
+            persistLibrarySnapshot()
             await loadPersonalizedHome()
             Task { await loadMissingAlbumCovers() }
         } catch {
@@ -750,17 +780,48 @@ final class AppState: ObservableObject {
         isLoadingAlbumCovers = true
         defer { isLoadingAlbumCovers = false }
 
-        let targets = albums.compactMap { album -> (String, String)? in
+        let targets = albums.compactMap { album -> (albumId: String, trackId: String)? in
             guard albumCovers[album.id] == nil, !failedAlbumCoverIds.contains(album.id), let trackId = album.coverTrackId else { return nil }
             return (album.id, trackId)
         }
-        for (albumId, trackId) in targets {
-            if let image = try? await loadArtwork(trackId: trackId) {
-                albumCovers[albumId] = image
+        guard !targets.isEmpty else { return }
+
+        // Disk-cached artwork is a fast local decode — apply every hit before spending any
+        // network requests on the remaining misses.
+        var networkTargets: [(albumId: String, trackId: String)] = []
+        for target in targets {
+            if let cached = loadCachedArtworkFromDisk(albumId: target.albumId) {
+                albumCovers[target.albumId] = cached
             } else {
-                failedAlbumCoverIds.insert(albumId)
+                networkTargets.append(target)
             }
-            await Task.yield()
+        }
+        guard !networkTargets.isEmpty else { return }
+
+        // Fetch the actual network misses concurrently (bounded) instead of one at a time —
+        // this was the dominant cost for libraries with many albums.
+        let maxConcurrent = 6
+        await withTaskGroup(of: (albumId: String, fetched: (image: UIImage, jpegData: Data)?).self) { group in
+            var nextIndex = 0
+            func addNext() {
+                guard nextIndex < networkTargets.count else { return }
+                let target = networkTargets[nextIndex]
+                nextIndex += 1
+                group.addTask {
+                    let fetched = try? await self.loadArtwork(trackId: target.trackId)
+                    return (target.albumId, fetched ?? nil)
+                }
+            }
+            for _ in 0..<min(maxConcurrent, networkTargets.count) { addNext() }
+            while let result = await group.next() {
+                if let fetched = result.fetched {
+                    albumCovers[result.albumId] = fetched.image
+                    persistArtworkToDisk(fetched.jpegData, albumId: result.albumId)
+                } else {
+                    failedAlbumCoverIds.insert(result.albumId)
+                }
+                addNext()
+            }
         }
     }
 
@@ -1086,9 +1147,11 @@ final class AppState: ObservableObject {
         }
 
         configureAudioSession()
-        removePlayerItemEndObserver()
+        removePlaybackItemObservers()
         removeTimeObserver()
         player?.pause()
+        isRecoveringPlayback = false
+        isAwaitingReconnectToResume = false
 
         let asset: AVURLAsset
         if let headers = source.headers {
@@ -1098,14 +1161,7 @@ final class AppState: ObservableObject {
         }
         let item = AVPlayerItem(asset: asset)
         let nextPlayer = AVPlayer(playerItem: item)
-
-        playerItemEndObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime,
-            object: item,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in self?.nextTrack() }
-        }
+        addPlaybackItemObservers(to: item, track: track)
 
         player = nextPlayer
         currentTrack = track
@@ -1121,6 +1177,44 @@ final class AppState: ObservableObject {
         isPlaying = true
         updateNowPlayingInfo(for: track, elapsed: elapsed)
         syncPlaybackSideEffects(for: track)
+    }
+
+    /// Registers the "track ended" observer plus the stall/failure observers that drive seamless
+    /// recovery when the network drops mid-stream (see `handlePlaybackInterruption`).
+    private func addPlaybackItemObservers(to item: AVPlayerItem, track: ApiTrack) {
+        playerItemEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.nextTrack() }
+        }
+        playerItemStalledObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemPlaybackStalled,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in await self?.handlePlaybackInterruption(for: track) }
+        }
+        playerItemFailedObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in await self?.handlePlaybackInterruption(for: track) }
+        }
+    }
+
+    private func removePlaybackItemObservers() {
+        removePlayerItemEndObserver()
+        if let playerItemStalledObserver {
+            NotificationCenter.default.removeObserver(playerItemStalledObserver)
+        }
+        playerItemStalledObserver = nil
+        if let playerItemFailedObserver {
+            NotificationCenter.default.removeObserver(playerItemFailedObserver)
+        }
+        playerItemFailedObserver = nil
     }
 
     func togglePlayback() {
@@ -1288,12 +1382,24 @@ final class AppState: ObservableObject {
             offset += limit
         }
 
-        var details: [PlaylistDetail] = []
-        for summary in summaries.sorted(by: playlistSummaryOrder) {
-            let detail: PlaylistDetail = try await request("/playlists/\(encodePathComponent(summary.id))")
-            details.append(detail)
+        // Fetch every playlist's detail concurrently instead of one-at-a-time: this used to be
+        // a sequential N+1 (one round trip per playlist) that dominated cold-start latency for
+        // libraries with many playlists.
+        let orderedSummaries = summaries.sorted(by: playlistSummaryOrder)
+        let detailsById = try await withThrowingTaskGroup(of: (String, PlaylistDetail).self) { group in
+            for summary in orderedSummaries {
+                group.addTask {
+                    let detail: PlaylistDetail = try await self.request("/playlists/\(self.encodePathComponent(summary.id))")
+                    return (summary.id, detail)
+                }
+            }
+            var results: [String: PlaylistDetail] = [:]
+            for try await (id, detail) in group {
+                results[id] = detail
+            }
+            return results
         }
-        return details
+        return orderedSummaries.compactMap { detailsById[$0.id] }
     }
 
     private func remapPlaylists(_ incoming: [PlaylistDetail]) -> [PlaylistDetail] {
@@ -1416,6 +1522,53 @@ final class AppState: ObservableObject {
         } catch {
             offlineStatusMessage = "Could not load offline library: \(clean(error))"
         }
+    }
+
+    /// Last-known-good snapshot of the library, persisted to disk so the app can render real
+    /// content on the very first frame instead of an empty state while `refreshLibrary()`'s
+    /// network calls are still in flight.
+    private func loadCachedLibrarySnapshot() {
+        do {
+            guard let data = try? Data(contentsOf: librarySnapshotURL()) else { return }
+            let decoder = JSONDecoder()
+            let snapshot = try decoder.decode(LibrarySnapshot.self, from: data)
+            tracks = mergeTracks(existing: tracks, incoming: snapshot.tracks).sorted(by: stableLibraryTrackOrder)
+            likedTrackIds = snapshot.likedTrackIds
+            playlists = remapPlaylists(snapshot.playlists)
+            rebuildDerivedLibraryState()
+            syncQueueWithLibrary()
+            restorePlaybackStateIfNeeded()
+        } catch {
+            // A missing/corrupt snapshot just means a normal cold start; refreshLibrary() will
+            // populate everything from the network as before.
+        }
+    }
+
+    private func persistLibrarySnapshot() {
+        let snapshot = LibrarySnapshot(tracks: tracks, likedTrackIds: likedTrackIds, playlists: playlists)
+        Task.detached(priority: .utility) {
+            do {
+                let encoder = JSONEncoder()
+                let data = try encoder.encode(snapshot)
+                let url = try await self.librarySnapshotURL()
+                try data.write(to: url, options: .atomic)
+            } catch {
+                // Best-effort cache write; a failure here only costs the next cold start its
+                // instant-hydrate, refreshLibrary() remains the source of truth.
+            }
+        }
+    }
+
+    private func librarySnapshotURL() throws -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MekambMusic", isDirectory: true)
+            .appendingPathComponent("LibraryCache", isDirectory: true)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableBase = base
+        try? mutableBase.setResourceValues(values)
+        return base.appendingPathComponent("library-snapshot.json", isDirectory: false)
     }
 
     private func saveOfflineTrack(_ track: ApiTrack, at fileURL: URL) throws {
@@ -1751,10 +1904,87 @@ final class AppState: ObservableObject {
 
     private func syncPlaybackSideEffects(for track: ApiTrack) {
         schedulePlaybackPrefetch()
+        scheduleCurrentTrackBackgroundCache(track)
         Task {
             try? await postPlay(track)
             await postPlaybackState()
         }
+    }
+
+    /// While a track streams live, also download it to the playback cache in the background so a
+    /// network drop later in the song has a local copy to fall back to. No-ops once the track is
+    /// already offline or already cached (`cacheTrackToPlaybackDisk` checks both). Runs on both
+    /// Wi-Fi and cellular — reliability was chosen over saving cellular data for this app.
+    private func scheduleCurrentTrackBackgroundCache(_ track: ApiTrack) {
+        currentTrackCacheTask?.cancel()
+        currentTrackCacheTask = Task { [weak self] in
+            await self?.cacheTrackToPlaybackDisk(track)
+        }
+    }
+
+    private func startNetworkMonitoring() {
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let reachable = path.status == .satisfied
+            Task { @MainActor in
+                guard let self else { return }
+                let becameReachable = reachable && !self.isNetworkReachable
+                self.isNetworkReachable = reachable
+                if becameReachable, self.isAwaitingReconnectToResume {
+                    self.isAwaitingReconnectToResume = false
+                    await self.resumePlaybackAfterReconnect()
+                }
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "com.mekamb.music.network-monitor"))
+        pathMonitor = monitor
+    }
+
+    /// Called when the currently playing item stalls or fails — most likely a network drop.
+    /// If the background cache for this track has already finished, swap to it seamlessly at the
+    /// current position; otherwise wait for connectivity to return and reload the same stream
+    /// from where it left off. A track that drops in its first few seconds (before the background
+    /// cache can finish) may still hiccup once — there's no way to have a local copy of audio
+    /// that hasn't been downloaded yet — but playback recovers on its own as soon as either the
+    /// cache finishes or the network returns, instead of staying silently stuck.
+    private func handlePlaybackInterruption(for track: ApiTrack) async {
+        guard currentTrack?.id == track.id, !isRecoveringPlayback else { return }
+        if let cachedURL = localPlaybackCacheFileURL(for: track) {
+            isRecoveringPlayback = true
+            defer { isRecoveringPlayback = false }
+            swapToLocalFile(cachedURL, for: track)
+        } else {
+            isAwaitingReconnectToResume = true
+        }
+    }
+
+    private func resumePlaybackAfterReconnect() async {
+        guard let track = currentTrack, !isRecoveringPlayback else { return }
+        isRecoveringPlayback = true
+        defer { isRecoveringPlayback = false }
+        if let cachedURL = localPlaybackCacheFileURL(for: track) {
+            swapToLocalFile(cachedURL, for: track)
+        } else {
+            let resumeElapsed = player?.currentTime().seconds ?? currentElapsedTime()
+            play(track, updateQueue: false, startAt: resumeElapsed)
+        }
+    }
+
+    /// Swaps the live AVPlayerItem for one backed by a local file, preserving playback position,
+    /// without going through `play()` (which would re-resolve the source and could re-trigger a
+    /// remote download attempt).
+    private func swapToLocalFile(_ fileURL: URL, for track: ApiTrack) {
+        let resumeElapsed = player?.currentTime().seconds ?? currentElapsedTime()
+        removePlaybackItemObservers()
+        let item = AVPlayerItem(asset: AVURLAsset(url: fileURL))
+        addPlaybackItemObservers(to: item, track: track)
+        player?.replaceCurrentItem(with: item)
+        if resumeElapsed > 0 {
+            player?.seek(to: CMTime(seconds: resumeElapsed, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+        player?.play()
+        isPlaying = true
+        updateNowPlayingPlaybackRate(elapsed: resumeElapsed)
     }
 
     private func postPlaybackState() async {
@@ -1794,18 +2024,35 @@ final class AppState: ObservableObject {
         playbackPrefetchTask?.cancel()
         playbackPrefetchTask = Task { [weak self] in
             guard let self else { return }
-            await self.prefetchNextPlaybackTrack()
+            await self.prefetchUpcomingPlaybackTracks()
         }
     }
 
-    private func prefetchNextPlaybackTrack() async {
-        guard let nextTrack = upcomingQueueTracks.first else { return }
-        guard !isTrackAvailableOffline(nextTrack), localPlaybackCacheFileURL(for: nextTrack) == nil else { return }
-        guard canUseApi, !playbackPrefetchingTrackIds.contains(nextTrack.id) else { return }
-        playbackPrefetchingTrackIds.insert(nextTrack.id)
-        defer { playbackPrefetchingTrackIds.remove(nextTrack.id) }
+    /// Caches the next few queued tracks to disk so advancing the queue is a seamless local-file
+    /// swap instead of waiting on a fresh stream. Extended from 1 to 2 tracks ahead so a quick
+    /// skip still lands on an already-cached file.
+    private func prefetchUpcomingPlaybackTracks() async {
+        let candidates = Array(upcomingQueueTracks.prefix(2))
+        guard !candidates.isEmpty else { return }
+        await withTaskGroup(of: Void.self) { group in
+            for track in candidates {
+                group.addTask { [weak self] in
+                    await self?.cacheTrackToPlaybackDisk(track)
+                }
+            }
+        }
+    }
 
-        let encodedId = encodePathComponent(nextTrack.id)
+    /// Downloads a track to the playback cache directory if it isn't already available locally.
+    /// Shared by the upcoming-queue prefetch above and the current-track background cache used
+    /// for seamless offline fallback.
+    private func cacheTrackToPlaybackDisk(_ track: ApiTrack) async {
+        guard !isTrackAvailableOffline(track), localPlaybackCacheFileURL(for: track) == nil else { return }
+        guard canUseApi, !playbackPrefetchingTrackIds.contains(track.id) else { return }
+        playbackPrefetchingTrackIds.insert(track.id)
+        defer { playbackPrefetchingTrackIds.remove(track.id) }
+
+        let encodedId = encodePathComponent(track.id)
         guard let url = endpointURL(path: "/tracks/\(encodedId)/stream") else { return }
         do {
             var request = URLRequest(url: url)
@@ -1820,19 +2067,19 @@ final class AppState: ObservableObject {
                 try? FileManager.default.removeItem(at: temporaryURL)
                 return
             }
-            let targetURL = try playbackCacheFileURL(for: nextTrack)
+            let targetURL = try playbackCacheFileURL(for: track)
             try? FileManager.default.removeItem(at: targetURL)
             try FileManager.default.moveItem(at: temporaryURL, to: targetURL)
         } catch {
             if !isCancellation(error) {
-                if let cacheURL = try? playbackCacheFileURL(for: nextTrack) {
+                if let cacheURL = try? playbackCacheFileURL(for: track) {
                     try? FileManager.default.removeItem(at: cacheURL)
                 }
             }
         }
     }
 
-    private func loadArtwork(trackId: String) async throws -> UIImage? {
+    private func loadArtwork(trackId: String) async throws -> (image: UIImage, jpegData: Data)? {
         let encodedId = encodePathComponent(trackId)
         guard let url = endpointURL(path: "/tracks/\(encodedId)/artwork") else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
@@ -1840,7 +2087,36 @@ final class AppState: ObservableObject {
         request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
-        return downsampleArtwork(data: data, maxPixelSize: 420)
+        guard let image = downsampleArtwork(data: data, maxPixelSize: 420),
+              let jpegData = image.jpegData(compressionQuality: 0.85) else { return nil }
+        return (image, jpegData)
+    }
+
+    /// Reads a previously-cached album cover straight from disk (fast local decode, no network).
+    private func loadCachedArtworkFromDisk(albumId: String) -> UIImage? {
+        guard let url = try? artworkCacheFileURL(albumId: albumId),
+              let data = try? Data(contentsOf: url) else { return nil }
+        return UIImage(data: data)
+    }
+
+    /// Fire-and-forget disk write so the next launch is a cache hit instead of a network fetch.
+    private func persistArtworkToDisk(_ jpegData: Data, albumId: String) {
+        Task.detached(priority: .utility) {
+            guard let url = try? await self.artworkCacheFileURL(albumId: albumId) else { return }
+            try? jpegData.write(to: url, options: .atomic)
+        }
+    }
+
+    private func artworkCacheFileURL(albumId: String) throws -> URL {
+        try artworkCacheDirectory().appendingPathComponent("\(safeFileComponent(albumId)).jpg", isDirectory: false)
+    }
+
+    private func artworkCacheDirectory() throws -> URL {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MekambMusic", isDirectory: true)
+            .appendingPathComponent("ArtworkCache", isDirectory: true)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base
     }
 
     private func downsampleArtwork(data: Data, maxPixelSize: CGFloat) -> UIImage? {

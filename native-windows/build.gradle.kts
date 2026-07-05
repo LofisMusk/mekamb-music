@@ -37,6 +37,10 @@ compose.desktop {
                 menu = true
                 shortcut = true
                 iconFile.set(project.file("icons/app.ico"))
+                // The top-level packageVersion above isn't picked up by the MSI/WiX packager on
+                // its own (it falls back to an invalid single-digit default) — must be set here
+                // explicitly too.
+                msiPackageVersion = packageVersionString
             }
         }
     }
