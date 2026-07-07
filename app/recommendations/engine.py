@@ -6,7 +6,7 @@ import random
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -174,6 +174,64 @@ class RecommendationEngine:
             mix_size=mix_size,
         )
         return PersonalizedHome(recommended_tracks=recommended, daily_mixes=mixes)
+
+    async def autoplay_queue(
+        self,
+        seed_track_id: UUID,
+        *,
+        exclude_track_ids: set[UUID],
+        limit: int,
+    ) -> list[LocalTrackRecommendation]:
+        """Radio-style continuation for when the playback queue runs out.
+
+        Local tracks only — no external torrent candidates — ordered for continuous
+        listening: seed similarity plus the personalization profile, capped per artist so
+        the radio doesn't collapse into one artist's discography. Tracks the client already
+        has queued (exclude_track_ids) and tracks played in the last few hours are skipped
+        so the continuation doesn't replay what the listener just heard.
+        """
+        seed = await self.session.get(Track, seed_track_id)
+        if seed is None:
+            raise LookupError(f"Track {seed_track_id} not found.")
+
+        excluded = {seed.id, *exclude_track_ids, *await self._recently_played_track_ids()}
+        candidates = list(
+            await self.session.scalars(
+                select(Track)
+                .where(Track.id.not_in(excluded))
+                .order_by(Track.last_accessed.desc())
+                .limit(settings.recommendation_scan_limit)
+            )
+        )
+        if not candidates:
+            return []
+
+        features = await self._features_by_track_ids([seed.id, *(track.id for track in candidates)])
+        profile = await self._personalization_profile()
+        scored = [
+            _score_track_against_seed(
+                seed,
+                candidate,
+                seed_feature=features.get(seed.id),
+                candidate_feature=features.get(candidate.id),
+                profile=profile,
+            )
+            for candidate in candidates
+        ]
+        ranked = sorted(scored, key=lambda item: item.score, reverse=True)
+        # Unlike one-shot recommendations, radio must keep playing even when nothing
+        # scores positively (tiny library, no metadata overlap) — so no score>0 filter.
+        return _diversify_recommendations(ranked, limit=limit, max_per_artist=3)
+
+    async def _recently_played_track_ids(self, *, hours: int = 3) -> set[UUID]:
+        cutoff = datetime.now(UTC) - timedelta(hours=hours)
+        rows = await self.session.scalars(
+            select(TrackPlay.track_id)
+            .where(TrackPlay.api_key_id == self.api_key_id)
+            .where(TrackPlay.played_at >= cutoff)
+            .limit(200)
+        )
+        return set(rows)
 
     async def _library_seed_tracks(self, *, limit: int) -> list[Track]:
         liked_rows = await self.session.scalars(

@@ -50,6 +50,12 @@ from app.library.streaming import (
     resolve_library_file,
 )
 from app.library.prefetch import prefetch_next_queue_tracks
+from app.library.transcode import (
+    AAC_MEDIA_TYPE,
+    TranscodeUnavailable,
+    is_lossless_source,
+    transcode_to_aac,
+)
 from app.storage.library import build_library_storage
 from app.workers.cache_cleanup import get_cache_stats, run_cleanup_once
 from app.api.routes.playback import clear_deleted_track_from_playback
@@ -460,9 +466,12 @@ async def stream_track(
     track_id: UUID,
     background_tasks: BackgroundTasks,
     range_header: str | None = Header(default=None, alias="Range"),
+    format: str | None = Query(default=None),
     session: AsyncSession = Depends(db_session),
 ):
-    track, path, media_type, size = await _resolve_stream_target(track_id, session)
+    track, path, media_type, size = await _resolve_stream_target(
+        track_id, session, want_aac=(format or "").lower() == "aac"
+    )
 
     # Touch last_accessed w tle — nie blokuje odpowiedzi
     background_tasks.add_task(_touch_last_accessed, track_id)
@@ -497,9 +506,12 @@ async def stream_track(
 @router.head("/{track_id}/stream")
 async def inspect_track_stream(
     track_id: UUID,
+    format: str | None = Query(default=None),
     session: AsyncSession = Depends(db_session),
 ) -> Response:
-    track, _, media_type, size = await _resolve_stream_target(track_id, session)
+    track, _, media_type, size = await _resolve_stream_target(
+        track_id, session, want_aac=(format or "").lower() == "aac"
+    )
     return Response(
         status_code=status.HTTP_200_OK,
         media_type=media_type,
@@ -579,6 +591,8 @@ def _playback_event_to_dict(playback_event: TrackPlay, track: Track) -> dict[str
 async def _resolve_stream_target(
     track_id: UUID,
     session: AsyncSession,
+    *,
+    want_aac: bool = False,
 ) -> tuple[Track, Path, str, int]:
     track = await session.get(Track, track_id)
     if track is None:
@@ -600,6 +614,22 @@ async def _resolve_stream_target(
     media_type = track.media_type
     if not media_type or media_type == "application/octet-stream":
         media_type = media_type_for_audio_file(path)
+
+    # "AAC" / "Auto" quality: shrink lossless sources to a cached AAC file. Lossy sources are
+    # already compact and are served untouched. Any transcode failure falls back to the original.
+    if want_aac and settings.transcode_enabled and is_lossless_source(path, media_type):
+        try:
+            aac_path = await asyncio.to_thread(
+                transcode_to_aac,
+                path,
+                track_id=str(track_id),
+                cache_root=settings.transcode_cache_root,
+                bitrate=settings.transcode_aac_bitrate,
+            )
+            return track, aac_path, AAC_MEDIA_TYPE, aac_path.stat().st_size
+        except TranscodeUnavailable:
+            pass
+
     return track, path, media_type, path.stat().st_size
 
 

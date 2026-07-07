@@ -170,6 +170,44 @@ struct PersonalizedHomeResponse: Codable {
     }
 }
 
+struct RecentPlayPayload: Codable, Hashable {
+    let track: ApiTrack
+    let playedAt: String?
+    let completed: Bool?
+    let listenRatio: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case track
+        case playedAt = "played_at"
+        case completed
+        case listenRatio = "listen_ratio"
+    }
+}
+
+struct RecentPlaysResponse: Codable { let items: [RecentPlayPayload] }
+
+struct AutoplayQueuePayload: Codable {
+    let seedTrack: ApiTrack
+    let tracks: [RecommendationTrackPayload]
+
+    enum CodingKeys: String, CodingKey {
+        case seedTrack = "seed_track"
+        case tracks
+    }
+}
+
+struct PlaybackEventBody: Encodable {
+    let completed: Bool
+    let listenRatio: Double?
+    let source: String
+
+    enum CodingKeys: String, CodingKey {
+        case completed
+        case listenRatio = "listen_ratio"
+        case source
+    }
+}
+
 struct OfflineTrackRecord: Codable, Hashable {
     let track: ApiTrack
     let relativePath: String
@@ -183,6 +221,8 @@ struct LibrarySnapshot: Codable {
     let tracks: [ApiTrack]
     let likedTrackIds: Set<String>
     let playlists: [PlaylistDetail]
+    // Optional so snapshots written before play-history caching still decode.
+    let recentPlays: [RecentPlayPayload]?
 }
 
 enum TorrentSource: String, Codable, CaseIterable, Identifiable {
@@ -359,12 +399,17 @@ enum SearchMode: String, CaseIterable, Identifiable {
 }
 
 enum MusicTab: String, CaseIterable, Identifiable {
-    case library = "Library"
+    case library = "Home"
+    case search = "Search"
     case albums = "Albums"
     case playlists = "Playlists"
     case liked = "Liked"
     case settings = "Settings"
     var id: String { rawValue }
+
+    /// Tabs shown in the bottom bar. `albums`/`playlists` stay in the enum for in-app navigation
+    /// (tapping a shelf card) but are no longer top-level tabs.
+    static var barItems: [MusicTab] { [.library, .search, .liked, .settings] }
 }
 
 enum RepeatMode: String, CaseIterable, Identifiable {
@@ -397,18 +442,51 @@ enum RepeatMode: String, CaseIterable, Identifiable {
     var isActive: Bool { self != .off }
 }
 
+/// User-selectable streaming quality. `auto` picks lossless on unmetered Wi-Fi and AAC on
+/// constrained/cellular connections; `aac` always transcodes lossless sources to AAC; `lossless`
+/// always streams the original file.
+enum PlaybackQuality: String, CaseIterable, Identifiable {
+    case auto
+    case aac
+    case lossless
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .auto: return "Auto"
+        case .aac: return "AAC"
+        case .lossless: return "Lossless"
+        }
+    }
+    var detail: String {
+        switch self {
+        case .auto: return "Lossless on Wi‑Fi, AAC on cellular"
+        case .aac: return "Smaller files, saves data"
+        case .lossless: return "Original quality (FLAC)"
+        }
+    }
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @AppStorage("mekambMusicApiEndpoint") var apiEndpoint: String = ""
     @AppStorage("mekambMusicApiToken") var apiToken: String = ""
     @AppStorage("mekambMusicProwlarrApiKey") var prowlarrApiKey: String = ""
     @AppStorage("mekambMusicAutoplaySimilarEnabled") var autoplaySimilarEnabled: Bool = true
+    @AppStorage("mekambMusicPlaybackQuality") var playbackQuality: PlaybackQuality = .auto
     @AppStorage("mekambMusicLastTrackId") private var savedPlaybackTrackId: String = ""
     @AppStorage("mekambMusicLastElapsedTime") private var savedPlaybackElapsedTime: Double = 0
 
     @Published var searchMode: SearchMode = .library
     @Published var selectedTab: MusicTab = .library
     @Published var searchText: String = ""
+
+    /// Clears any in-progress query/results — used when leaving the Search tab.
+    func resetSearch() {
+        searchText = ""
+        searchMode = .library
+        torrents = []
+    }
     @Published var tracks: [ApiTrack] = []
     @Published var likedTrackIds: Set<String> = []
     @Published var torrents: [TorrentResult] = []
@@ -438,10 +516,17 @@ final class AppState: ObservableObject {
     @Published private(set) var recentlyAddedTracks: [ApiTrack] = []
     @Published private(set) var downloadedTracks: [ApiTrack] = []
     @Published private(set) var likedTracksPreview: [ApiTrack] = []
+    @Published private(set) var recentlyPlayedTracks: [ApiTrack] = []
+    @Published private(set) var jumpBackInAlbums: [Album] = []
+    @Published private(set) var albumsFeaturingLikedTracks: [Album] = []
 
     private var player: AVPlayer?
     private var timeObserver: Any?
     private weak var timeObserverPlayer: AVPlayer?
+    /// KVO on the live player's `timeControlStatus` so `isPlaying` tracks the *actual* transport
+    /// state — including pauses/plays driven by the lock screen, Control Center, Siri, or audio
+    /// interruptions, which never route through our own `togglePlayback()`.
+    private var timeControlObserver: NSKeyValueObservation?
     private var playerItemEndObserver: NSObjectProtocol?
     private var playerItemStalledObserver: NSObjectProtocol?
     private var playerItemFailedObserver: NSObjectProtocol?
@@ -458,10 +543,23 @@ final class AppState: ObservableObject {
     private var pathMonitor: NWPathMonitor?
     private var isAwaitingReconnectToResume = false
     private var isRecoveringPlayback = false
+    /// Raw play-history feed from GET /tracks/recent (newest first); shelves derive from it.
+    private var recentPlayEvents: [RecentPlayPayload] = []
+    /// Backend radio continuation prefetched while the last queued track plays, consumed
+    /// synchronously in nextTrack() so autoplay is gapless. Seed id guards against staleness.
+    private var autoplayStash: [ApiTrack] = []
+    private var autoplayStashSeedId: String?
+    private var autoplayPrefetchTask: Task<Void, Never>?
+    /// Outgoing-track listening session used to report real skip/completion signals.
+    private var playSession: (track: ApiTrack, maxElapsed: TimeInterval)?
 
     /// Live connectivity state, used to auto-resume playback once the network returns after a
     /// drop that happened before the current track finished caching locally.
     @Published private(set) var isNetworkReachable = true
+    /// True on cellular/metered/constrained links; drives "Auto" quality to pick AAC.
+    @Published private(set) var isConstrainedNetwork = false
+    /// Short codec label ("FLAC"/"AAC"/…) of the track currently playing, shown next to it.
+    @Published private(set) var currentCodecBadge: String?
 
     private struct PlaybackSource {
         let url: URL
@@ -469,11 +567,23 @@ final class AppState: ObservableObject {
     }
 
     init() {
-        loadCachedLibrarySnapshot()
-        loadOfflineLibrary()
         configureAudioSession()
         configureRemoteCommandCenter()
         startNetworkMonitoring()
+        // Deferred to a Task so `init()` returns immediately and the scene can render its first
+        // frame. These do disk I/O (JSON decode, per-file existence checks) and rebuild derived
+        // state (albums/recommendations/mixes) — running them inline here used to block the whole
+        // app launch until they finished, which on a real library is slow enough that iOS treats
+        // it as a launch hang and kills the process before anything is ever drawn.
+        Task { @MainActor [weak self] in
+            self?.loadCachedLibrarySnapshot()
+            self?.loadOfflineLibrary()
+            // Paint disk-cached album covers immediately after the snapshot hydrates, instead of
+            // waiting for refreshLibrary()'s full network round-trip to finish first — otherwise
+            // the home sits on gradient placeholders for the whole "connecting" window even though
+            // the real covers are already on disk from a previous run.
+            await self?.loadMissingAlbumCovers()
+        }
     }
 
     deinit {
@@ -489,8 +599,10 @@ final class AppState: ObservableObject {
         if let playerItemFailedObserver {
             NotificationCenter.default.removeObserver(playerItemFailedObserver)
         }
+        timeControlObserver?.invalidate()
         pathMonitor?.cancel()
         currentTrackCacheTask?.cancel()
+        autoplayPrefetchTask?.cancel()
         player?.pause()
     }
 
@@ -542,6 +654,58 @@ final class AppState: ObservableObject {
         }.prefix(18))
         downloadedTracks = Array(tracks.filter { offlineTrackIds.contains($0.id) }.sorted(by: stableLibraryTrackOrder).prefix(18))
         likedTracksPreview = Array(tracks.filter { likedTrackIds.contains($0.id) }.sorted(by: stableLibraryTrackOrder).prefix(18))
+        rebuildPlayHistoryShelves(rebuiltAlbums: rebuiltAlbums, tracksById: tracksById)
+    }
+
+    /// Derives the play-history-driven home shelves from `recentPlayEvents`:
+    /// recently played (newest first, distinct), "Jump back in" (albums you listened to
+    /// 1–21 days ago but not today), and "Albums featuring songs you like".
+    private func rebuildPlayHistoryShelves(rebuiltAlbums: [Album], tracksById: [String: ApiTrack]) {
+        var seenTrackIds = Set<String>()
+        var playedTracks: [ApiTrack] = []
+        for event in recentPlayEvents {
+            guard seenTrackIds.insert(event.track.id).inserted else { continue }
+            playedTracks.append(tracksById[event.track.id] ?? event.track)
+        }
+        recentlyPlayedTracks = Array(playedTracks.prefix(30))
+
+        var albumByTrackId: [String: Album] = [:]
+        for album in rebuiltAlbums {
+            for track in album.tracks {
+                albumByTrackId[track.id] = album
+            }
+        }
+
+        let now = Date()
+        let freshTrackIds = Set(recentlyPlayedTracks.prefix(8).map(\.id))
+        var seenAlbumIds = Set<String>()
+        var olderAlbums: [Album] = []
+        for event in recentPlayEvents {
+            guard let playedAt = event.playedAt.flatMap(parseISOTimestamp) else { continue }
+            let age = now.timeIntervalSince(playedAt)
+            guard age >= 86_400, age <= 21 * 86_400 else { continue }
+            guard !freshTrackIds.contains(event.track.id) else { continue }
+            guard let album = albumByTrackId[event.track.id] else { continue }
+            guard seenAlbumIds.insert(album.id).inserted else { continue }
+            olderAlbums.append(album)
+        }
+        jumpBackInAlbums = Array(olderAlbums.prefix(12))
+
+        albumsFeaturingLikedTracks = Array(
+            rebuiltAlbums
+                .map { album in (album: album, likedCount: album.tracks.filter { likedTrackIds.contains($0.id) }.count) }
+                .filter { $0.likedCount > 0 }
+                .sorted { left, right in
+                    if left.likedCount != right.likedCount { return left.likedCount > right.likedCount }
+                    return stableAlbumOrder(left.album, right.album)
+                }
+                .map(\.album)
+                .prefix(12)
+        )
+    }
+
+    private func parseISOTimestamp(_ value: String) -> Date? {
+        parseTimestampString(value).map { Date(timeIntervalSince1970: $0) }
     }
 
     private func buildAlbumGroups(from tracks: [ApiTrack]) -> [Album] {
@@ -752,11 +916,15 @@ final class AppState: ObservableObject {
             async let likedIds = loadAllLikedTrackIds()
             async let allTracks = loadAllTracks()
             async let playlistDetails = loadAllPlaylists()
-            let (newLikedIds, newTracks, newPlaylists) = try await (likedIds, allTracks, playlistDetails)
+            async let recentPlays = loadRecentPlays()
+            let (newLikedIds, newTracks, newPlaylists, newRecentPlays) = try await (likedIds, allTracks, playlistDetails, recentPlays)
             likedTrackIds = newLikedIds
+            if let newRecentPlays {
+                recentPlayEvents = newRecentPlays
+            }
             tracks = mergeTracks(
                 existing: tracks,
-                incoming: newTracks + newPlaylists.flatMap(\.orderedTracks)
+                incoming: newTracks + newPlaylists.flatMap(\.orderedTracks) + (newRecentPlays ?? []).map(\.track)
             ).sorted(by: stableLibraryTrackOrder)
             playlists = remapPlaylists(newPlaylists)
             rebuildDerivedLibraryState()
@@ -1149,6 +1317,7 @@ final class AppState: ObservableObject {
         configureAudioSession()
         removePlaybackItemObservers()
         removeTimeObserver()
+        removePlayerStateObserver()
         player?.pause()
         isRecoveringPlayback = false
         isAwaitingReconnectToResume = false
@@ -1165,11 +1334,14 @@ final class AppState: ObservableObject {
 
         player = nextPlayer
         currentTrack = track
+        currentCodecBadge = codecBadge(for: track, playingOffline: localOfflineFileURL(for: track) != nil)
         savedPlaybackTrackId = track.id
         let elapsed = normalizedPlaybackStartTime(startTime, for: track)
         savedPlaybackElapsedTime = elapsed
         playbackProgress = playbackProgress(for: elapsed, in: track)
+        beginPlaySession(for: track, startingAt: elapsed)
         addTimeObserver(to: nextPlayer)
+        observePlayerState(nextPlayer)
         if elapsed > 0 {
             nextPlayer.seek(to: CMTime(seconds: elapsed, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         }
@@ -1177,6 +1349,7 @@ final class AppState: ObservableObject {
         isPlaying = true
         updateNowPlayingInfo(for: track, elapsed: elapsed)
         syncPlaybackSideEffects(for: track)
+        scheduleAutoplayPrefetchIfNeeded(for: track)
     }
 
     /// Registers the "track ended" observer plus the stall/failure observers that drive seamless
@@ -1187,7 +1360,10 @@ final class AppState: ObservableObject {
             object: item,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.nextTrack() }
+            Task { @MainActor in
+                self?.finalizePlaySession(naturalEnd: true)
+                self?.nextTrack()
+            }
         }
         playerItemStalledObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemPlaybackStalled,
@@ -1262,7 +1438,22 @@ final class AppState: ObservableObject {
         } else if repeatMode == .all, let first = list.first {
             play(first, queue: list, updateQueue: false)
         } else {
-            let recommendations = autoplaySimilarEnabled ? autoplayRecommendations(after: currentTrack, excluding: list) : []
+            // Prefer the backend radio continuation prefetched while this track played;
+            // a stale stash (different seed) is discarded, and offline/failed prefetch
+            // falls back to the on-device heuristic.
+            let stashed = autoplayStashSeedId == currentTrack.id
+                ? autoplayStash.filter { candidate in !list.contains { $0.id == candidate.id } }
+                : []
+            autoplayStash = []
+            autoplayStashSeedId = nil
+            let recommendations: [ApiTrack]
+            if !autoplaySimilarEnabled {
+                recommendations = []
+            } else if !stashed.isEmpty {
+                recommendations = stashed
+            } else {
+                recommendations = autoplayRecommendations(after: currentTrack, excluding: list)
+            }
             if let first = recommendations.first {
                 play(first, queue: list + recommendations, updateQueue: false)
                 return
@@ -1318,6 +1509,14 @@ final class AppState: ObservableObject {
             repeatMode = .one
         case .one:
             repeatMode = .off
+        }
+        if repeatMode != .off {
+            // A repeating queue never runs out, so a prefetched radio continuation is moot.
+            autoplayPrefetchTask?.cancel()
+            autoplayStash = []
+            autoplayStashSeedId = nil
+        } else if let currentTrack {
+            scheduleAutoplayPrefetchIfNeeded(for: currentTrack)
         }
         Task { await postPlaybackState() }
     }
@@ -1433,6 +1632,18 @@ final class AppState: ObservableObject {
         playlists.sort(by: playlistDetailOrder)
     }
 
+    /// Fetches the play-history feed that powers the recently-played grid, "Recents", and
+    /// "Jump back in" shelves. Returns nil on failure so callers keep the cached feed.
+    private func loadRecentPlays() async -> [RecentPlayPayload]? {
+        guard canUseApi else { return nil }
+        do {
+            let response: RecentPlaysResponse = try await request("/tracks/recent?limit=60")
+            return response.items
+        } catch {
+            return nil
+        }
+    }
+
     private func loadPersonalizedHome(silent: Bool = true) async {
         guard canUseApi else {
             backendRecommendedTrackIds = []
@@ -1514,11 +1725,13 @@ final class AppState: ObservableObject {
                 offlineFileURL(relativePath: record.relativePath).map { FileManager.default.fileExists(atPath: $0.path) } ?? false
             }
             offlineRecords = Dictionary(uniqueKeysWithValues: records.map { ($0.track.id, $0) })
+            // With no offline downloads there's nothing to merge into the library, so skip the
+            // expensive derived-state rebuild the snapshot load already did — this used to double
+            // the cold-start cost by recomputing albums/recommendations/mixes a second time.
+            guard !records.isEmpty else { return }
             tracks = mergeTracks(existing: tracks, incoming: records.map(\.track)).sorted(by: stableLibraryTrackOrder)
             refreshOfflineState()
-            if records.count > 0 {
-                offlineStatusMessage = "Offline library ready: \(records.count) downloaded songs."
-            }
+            offlineStatusMessage = "Offline library ready: \(records.count) downloaded songs."
         } catch {
             offlineStatusMessage = "Could not load offline library: \(clean(error))"
         }
@@ -1535,6 +1748,7 @@ final class AppState: ObservableObject {
             tracks = mergeTracks(existing: tracks, incoming: snapshot.tracks).sorted(by: stableLibraryTrackOrder)
             likedTrackIds = snapshot.likedTrackIds
             playlists = remapPlaylists(snapshot.playlists)
+            recentPlayEvents = snapshot.recentPlays ?? []
             rebuildDerivedLibraryState()
             syncQueueWithLibrary()
             restorePlaybackStateIfNeeded()
@@ -1545,7 +1759,12 @@ final class AppState: ObservableObject {
     }
 
     private func persistLibrarySnapshot() {
-        let snapshot = LibrarySnapshot(tracks: tracks, likedTrackIds: likedTrackIds, playlists: playlists)
+        let snapshot = LibrarySnapshot(
+            tracks: tracks,
+            likedTrackIds: likedTrackIds,
+            playlists: playlists,
+            recentPlays: Array(recentPlayEvents.prefix(60))
+        )
         Task.detached(priority: .utility) {
             do {
                 let encoder = JSONEncoder()
@@ -1654,8 +1873,61 @@ final class AppState: ObservableObject {
 
         guard canUseApi else { return nil }
         let encodedId = encodePathComponent(track.id)
-        guard let url = endpointURL(path: "/tracks/\(encodedId)/stream") else { return nil }
+        let query = streamFormatParam(for: track) == "aac" ? "?format=aac" : ""
+        guard let url = endpointURL(path: "/tracks/\(encodedId)/stream\(query)") else { return nil }
         return PlaybackSource(url: url, headers: ["Authorization": "Bearer \(apiToken)"])
+    }
+
+    /// Whether the current quality setting + connection want an AAC stream (before considering the
+    /// source format).
+    private var wantsAacStream: Bool {
+        switch playbackQuality {
+        case .lossless: return false
+        case .aac: return true
+        case .auto: return isConstrainedNetwork
+        }
+    }
+
+    private static let losslessExtensions: Set<String> = ["flac", "wav", "wave", "aif", "aiff", "alac", "ape", "wv"]
+
+    private func sourceExtension(for track: ApiTrack) -> String {
+        let fromName = URL(fileURLWithPath: track.originalFilename ?? "").pathExtension.lowercased()
+        if !fromName.isEmpty { return fromName }
+        switch (track.mediaType ?? "").lowercased() {
+        case "audio/flac", "audio/x-flac": return "flac"
+        case "audio/wav", "audio/x-wav", "audio/wave": return "wav"
+        case "audio/aiff", "audio/x-aiff": return "aiff"
+        case "audio/mpeg": return "mp3"
+        case "audio/mp4", "audio/aac", "audio/x-m4a": return "m4a"
+        case "audio/ogg": return "ogg"
+        default: return ""
+        }
+    }
+
+    private func isLosslessSource(_ track: ApiTrack) -> Bool {
+        Self.losslessExtensions.contains(sourceExtension(for: track))
+    }
+
+    /// The `format` query value to request for this track: only lossless sources get transcoded to
+    /// AAC — lossy sources are already compact and are always served as-is.
+    private func streamFormatParam(for track: ApiTrack) -> String? {
+        (wantsAacStream && isLosslessSource(track)) ? "aac" : nil
+    }
+
+    /// Short codec label to show next to the playing track.
+    private func codecBadge(for track: ApiTrack, playingOffline: Bool) -> String {
+        if !playingOffline, streamFormatParam(for: track) == "aac" { return "AAC" }
+        switch sourceExtension(for: track) {
+        case "flac": return "FLAC"
+        case "wav", "wave": return "WAV"
+        case "aif", "aiff": return "AIFF"
+        case "alac": return "ALAC"
+        case "mp3": return "MP3"
+        case "m4a", "aac", "mp4": return "AAC"
+        case "ogg", "opus": return sourceExtension(for: track).uppercased()
+        case "": return "AUDIO"
+        default: return sourceExtension(for: track).uppercased()
+        }
     }
 
     private func localOfflineFileURL(for track: ApiTrack) -> URL? {
@@ -1705,7 +1977,9 @@ final class AppState: ObservableObject {
     }
 
     private func playbackCacheFileURL(for track: ApiTrack) throws -> URL {
-        try playbackCacheDirectory().appendingPathComponent(offlineFileName(for: track), isDirectory: false)
+        // Namespace the cache by requested format so an AAC copy and a lossless copy never collide.
+        let prefix = streamFormatParam(for: track) == "aac" ? "aac-" : ""
+        return try playbackCacheDirectory().appendingPathComponent("\(prefix)\(offlineFileName(for: track))", isDirectory: false)
     }
 
     private func playbackCacheDirectory() throws -> URL {
@@ -1893,21 +2167,108 @@ final class AppState: ObservableObject {
         return min(max(elapsed / duration, 0), 1)
     }
 
-    private func postPlay(_ track: ApiTrack) async throws {
+    private func postPlay(_ track: ApiTrack, completed: Bool, listenRatio: Double?) async throws {
         guard canUseApi else { return }
         let encodedId = encodePathComponent(track.id)
-        let _: EmptyResponse = try await request("/tracks/\(encodedId)/plays", method: "POST")
+        let body = try JSONEncoder().encode(
+            PlaybackEventBody(completed: completed, listenRatio: listenRatio, source: "ios")
+        )
+        let _: EmptyResponse = try await request("/tracks/\(encodedId)/plays", method: "POST", body: body)
         if lastPersonalizationRefreshAt.map({ Date().timeIntervalSince($0) > 60 }) ?? true {
             await loadPersonalizedHome()
         }
     }
 
+    /// Starts a listening session for the track that just began playing. Restarting the same
+    /// track (pause/resume, repeat-one, previous-at-start) keeps the current session so it
+    /// isn't miscounted as a skip.
+    private func beginPlaySession(for track: ApiTrack, startingAt elapsed: TimeInterval) {
+        if playSession?.track.id == track.id { return }
+        finalizePlaySession()
+        playSession = (track: track, maxElapsed: elapsed)
+    }
+
+    /// Reports the outgoing track's real listening outcome to the backend. Uses the session's
+    /// max elapsed position (not the final one) so seeking back near the end doesn't turn a
+    /// full listen into a skip. completed=false with a low listen_ratio is what the backend
+    /// records as a skip signal for personalization.
+    private func finalizePlaySession(naturalEnd: Bool = false) {
+        guard let session = playSession else { return }
+        playSession = nil
+        var ratio: Double?
+        if let duration = session.track.durationSeconds, duration.isFinite, duration > 0 {
+            ratio = min(max(session.maxElapsed / duration, 0), 1)
+        }
+        if naturalEnd { ratio = 1.0 }
+        let completed = naturalEnd || (ratio ?? 0) >= 0.9
+        Task { try? await postPlay(session.track, completed: completed, listenRatio: ratio) }
+    }
+
     private func syncPlaybackSideEffects(for track: ApiTrack) {
         schedulePlaybackPrefetch()
         scheduleCurrentTrackBackgroundCache(track)
+        recordLocalRecentPlay(track)
         Task {
-            try? await postPlay(track)
             await postPlaybackState()
+        }
+    }
+
+    /// Optimistically prepends the started track to the local play-history feed so the
+    /// recently-played shelves update instantly; the authoritative feed comes back from
+    /// GET /tracks/recent on the next library refresh. Only the play-history shelves are
+    /// rebuilt — a full rebuildDerivedLibraryState() on every track change is needless work.
+    private func recordLocalRecentPlay(_ track: ApiTrack) {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        recentPlayEvents.insert(
+            RecentPlayPayload(track: track, playedAt: timestamp, completed: nil, listenRatio: nil),
+            at: 0
+        )
+        if recentPlayEvents.count > 120 {
+            recentPlayEvents.removeLast(recentPlayEvents.count - 120)
+        }
+        let tracksById = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        rebuildPlayHistoryShelves(rebuiltAlbums: albums, tracksById: tracksById)
+    }
+
+    /// Prefetches the backend radio continuation while the LAST queued track plays, so the
+    /// hand-off at queue end is a synchronous, gapless queue extension in nextTrack().
+    /// Starting any track that is not last — or with repeat on — invalidates the stash,
+    /// because the queue can no longer run out from that track.
+    private func scheduleAutoplayPrefetchIfNeeded(for track: ApiTrack) {
+        guard autoplaySimilarEnabled, repeatMode == .off, canUseApi,
+              !queueTracks.isEmpty, upcomingQueueTracks.isEmpty else {
+            autoplayPrefetchTask?.cancel()
+            autoplayStash = []
+            autoplayStashSeedId = nil
+            return
+        }
+        guard autoplayStashSeedId != track.id || autoplayStash.isEmpty else { return }
+
+        autoplayPrefetchTask?.cancel()
+        autoplayPrefetchTask = Task { [weak self] in
+            await self?.prefetchAutoplayContinuation(seed: track)
+        }
+    }
+
+    private func prefetchAutoplayContinuation(seed: ApiTrack) async {
+        // The backend also excludes its own recent-plays window, so capping the client-sent
+        // exclude list keeps the URL small even when the queue is the whole library.
+        let excludeIds = queueTracks.suffix(100).map(\.id).joined(separator: ",")
+        let encodedSeed = encodePathComponent(seed.id)
+        let encodedExclude = excludeIds.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? excludeIds
+        do {
+            let response: AutoplayQueuePayload = try await request(
+                "/recommendations/autoplay?seed_track_id=\(encodedSeed)&exclude=\(encodedExclude)&limit=25"
+            )
+            guard !Task.isCancelled, currentTrack?.id == seed.id else { return }
+            let fetched = response.tracks.map(\.track)
+            guard !fetched.isEmpty else { return }
+            tracks = mergeTracks(existing: tracks, incoming: fetched).sorted(by: stableLibraryTrackOrder)
+            let queueIds = Set(queueTracks.map(\.id))
+            autoplayStash = fetched.filter { !queueIds.contains($0.id) }
+            autoplayStashSeedId = seed.id
+        } catch {
+            // Offline or backend error — nextTrack() falls back to the local heuristic.
         }
     }
 
@@ -1926,10 +2287,12 @@ final class AppState: ObservableObject {
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self] path in
             let reachable = path.status == .satisfied
+            let constrained = path.isExpensive || path.isConstrained || path.usesInterfaceType(.cellular)
             Task { @MainActor in
                 guard let self else { return }
                 let becameReachable = reachable && !self.isNetworkReachable
                 self.isNetworkReachable = reachable
+                self.isConstrainedNetwork = constrained
                 if becameReachable, self.isAwaitingReconnectToResume {
                     self.isAwaitingReconnectToResume = false
                     await self.resumePlaybackAfterReconnect()
@@ -2053,7 +2416,8 @@ final class AppState: ObservableObject {
         defer { playbackPrefetchingTrackIds.remove(track.id) }
 
         let encodedId = encodePathComponent(track.id)
-        guard let url = endpointURL(path: "/tracks/\(encodedId)/stream") else { return }
+        let query = streamFormatParam(for: track) == "aac" ? "?format=aac" : ""
+        guard let url = endpointURL(path: "/tracks/\(encodedId)/stream\(query)") else { return }
         do {
             var request = URLRequest(url: url)
             request.timeoutInterval = 120
@@ -2411,15 +2775,36 @@ final class AppState: ObservableObject {
         return nil
     }
 
-    private func createdTimestamp(_ track: ApiTrack) -> TimeInterval {
-        guard let createdAt = track.createdAt, !createdAt.isEmpty else { return 0 }
-        let fractionalFormatter = ISO8601DateFormatter()
-        fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractionalFormatter.date(from: createdAt) { return date.timeIntervalSince1970 }
-
+    /// Shared ISO-8601 parsers. Allocating an `ISO8601DateFormatter` is surprisingly expensive, and
+    /// `createdTimestamp` runs inside `stableLibraryTrackOrder` — the comparator every library sort
+    /// uses — so the old per-call allocation cost tens of thousands of formatter creations per
+    /// rebuild (~seconds of the cold-start hang). Reuse one instance each; main-actor only.
+    private static let iso8601Fractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private static let iso8601Plain: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: createdAt)?.timeIntervalSince1970 ?? 0
+        return formatter
+    }()
+    /// Memoizes parsed timestamps by their raw string. A given `created_at` always maps to the same
+    /// instant, so this never needs invalidation — it just collapses O(n log n) sort-comparator
+    /// parses down to one parse per distinct string.
+    private var parsedTimestampCache: [String: TimeInterval] = [:]
+
+    private func parseTimestampString(_ value: String) -> TimeInterval? {
+        if let cached = parsedTimestampCache[value] { return cached }
+        let parsed = Self.iso8601Fractional.date(from: value)?.timeIntervalSince1970
+            ?? Self.iso8601Plain.date(from: value)?.timeIntervalSince1970
+        if let parsed { parsedTimestampCache[value] = parsed }
+        return parsed
+    }
+
+    private func createdTimestamp(_ track: ApiTrack) -> TimeInterval {
+        guard let createdAt = track.createdAt, !createdAt.isEmpty else { return 0 }
+        return parseTimestampString(createdAt) ?? 0
     }
 
     private func stableStringOrder(_ left: String, _ right: String) -> Bool {
@@ -2503,7 +2888,35 @@ final class AppState: ObservableObject {
         if let duration = track.durationSeconds, duration.isFinite, duration > 0 {
             info[MPMediaItemPropertyPlaybackDuration] = duration
         }
+        if let image = nowPlayingArtworkImage(for: track) {
+            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+        }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        fetchNowPlayingArtworkIfNeeded(for: track)
+    }
+
+    /// Best available cover for the lock screen without touching the network: the in-memory album
+    /// cover if the home grid already loaded it, otherwise the on-disk artwork cache.
+    private func nowPlayingArtworkImage(for track: ApiTrack) -> UIImage? {
+        coverImage(for: track) ?? loadCachedArtworkFromDisk(albumId: stableAlbumKey(for: track))
+    }
+
+    /// When no cover is cached yet (e.g. playing a track before its album art loaded), fetch it
+    /// once and splice it into the current Now Playing info so the lock screen fills in. Also
+    /// seeds the shared cover cache so the in-app UI benefits from the same fetch.
+    private func fetchNowPlayingArtworkIfNeeded(for track: ApiTrack) {
+        guard nowPlayingArtworkImage(for: track) == nil, canUseApi else { return }
+        let albumKey = stableAlbumKey(for: track)
+        Task { [weak self] in
+            guard let self else { return }
+            guard let fetched = try? await self.loadArtwork(trackId: track.id) else { return }
+            guard self.currentTrack?.id == track.id else { return }
+            self.albumCovers[albumKey] = fetched.image
+            self.persistArtworkToDisk(fetched.jpegData, albumId: albumKey)
+            guard var info = MPNowPlayingInfoCenter.default().nowPlayingInfo else { return }
+            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: fetched.image.size) { _ in fetched.image }
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        }
     }
 
     private func updateNowPlayingPlaybackRate(elapsed: TimeInterval? = nil) {
@@ -2533,6 +2946,10 @@ final class AppState: ObservableObject {
                 if duration.isFinite, duration > 0 {
                     self.playbackProgress = min(max(time.seconds / duration, 0), 1)
                 }
+                if var session = self.playSession, session.track.id == self.currentTrack?.id, time.seconds.isFinite {
+                    session.maxElapsed = max(session.maxElapsed, time.seconds)
+                    self.playSession = session
+                }
                 self.saveCurrentPlaybackPosition(elapsed: time.seconds)
                 self.updateNowPlayingPlaybackRate(elapsed: time.seconds)
             }
@@ -2546,6 +2963,27 @@ final class AppState: ObservableObject {
         }
         timeObserver = nil
         timeObserverPlayer = nil
+    }
+
+    /// Mirrors the player's real transport state into `isPlaying`. Anything that pauses or resumes
+    /// the player outside our own controls — the lock-screen/Control-Center buttons, Siri, a phone
+    /// call or another app grabbing the audio session — flips `timeControlStatus`, and this keeps
+    /// the in-app play/pause button and Now Playing rate honest instead of stuck on "playing".
+    private func observePlayerState(_ observedPlayer: AVPlayer) {
+        timeControlObserver = observedPlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+            let playing = player.timeControlStatus != .paused
+            Task { @MainActor [weak self] in
+                guard let self, self.player === player else { return }
+                guard self.isPlaying != playing else { return }
+                self.isPlaying = playing
+                self.updateNowPlayingPlaybackRate()
+            }
+        }
+    }
+
+    private func removePlayerStateObserver() {
+        timeControlObserver?.invalidate()
+        timeControlObserver = nil
     }
 
     private func removePlayerItemEndObserver() {

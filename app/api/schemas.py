@@ -133,6 +133,11 @@ class PersonalizedHomeResponse(BaseModel):
     daily_mixes: list[DailyMixResponse]
 
 
+class AutoplayQueueResponse(BaseModel):
+    seed_track: TrackResponse
+    tracks: list[RecommendationTrackItemResponse]
+
+
 class RecommendationImportRequest(BaseModel):
     limit: int = Field(default=3, ge=1, le=20)
     sources: list[str] | None = None

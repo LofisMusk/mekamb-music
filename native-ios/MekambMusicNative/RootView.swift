@@ -11,7 +11,9 @@ struct RootView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                searchHeader
+                if showsSearchHeader {
+                    searchHeader
+                }
 
                 if let warning = app.endpointWarning, app.selectedTab == .settings {
                     Text(warning)
@@ -74,36 +76,51 @@ struct RootView: View {
         .onChange(of: app.selectedTab) { _, tab in
             if tab != .albums { app.selectedAlbumId = nil }
             if tab != .playlists { app.selectedPlaylistId = nil }
+            // Auto-focus the field when entering Search; clear the query when leaving it.
+            searchFocused = tab == .search
+            if tab != .search { app.resetSearch() }
+        }
+    }
+
+    /// The home leads with content like the reference design, so it has no search bar. The
+    /// dedicated Search tab always shows it, and the (card-reachable) Albums/Playlists/Liked
+    /// screens keep an inline filter bar.
+    private var showsSearchHeader: Bool {
+        switch app.selectedTab {
+        case .library, .settings: return false
+        case .search, .albums, .playlists, .liked: return true
         }
     }
 
     private var searchHeader: some View {
         VStack(spacing: 10) {
             HStack(spacing: 10) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField(searchPlaceholder, text: $app.searchText)
-                    .focused($searchFocused)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .submitLabel(.search)
-                    .onSubmit {
-                        dismissSearch()
-                        if app.searchMode.searchesRemoteSources { Task { await app.searchTorrents() } }
-                    }
-                if !app.searchText.isEmpty {
-                    Button {
-                        app.searchText = ""
-                        app.torrents = []
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField(searchPlaceholder, text: $app.searchText)
+                        .focused($searchFocused)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .submitLabel(.search)
+                        .onSubmit {
+                            dismissSearch()
+                            if app.searchMode.searchesRemoteSources { Task { await app.searchTorrents() } }
+                        }
+                    if !app.searchText.isEmpty {
+                        Button {
+                            app.searchText = ""
+                            app.torrents = []
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
+                .padding(12)
+                .background(Color.white.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
-            .padding(12)
-            .background(Color.white.opacity(0.08))
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 
             if searchFocused || !app.searchText.isEmpty || app.searchMode.searchesRemoteSources {
                 Picker("Search mode", selection: $app.searchMode) {
@@ -133,6 +150,9 @@ struct RootView: View {
             case .library, .liked:
                 LibraryView()
                     .environmentObject(app)
+            case .search:
+                SearchView()
+                    .environmentObject(app)
             case .albums:
                 AlbumsView()
                     .environmentObject(app)
@@ -148,10 +168,10 @@ struct RootView: View {
 
     private var tabBar: some View {
         HStack(spacing: 6) {
-            ForEach(MusicTab.allCases) { tab in
+            ForEach(MusicTab.barItems) { tab in
                 Button {
                     dismissSearch()
-                    app.searchMode = .library
+                    if tab != .search { app.searchMode = .library }
                     app.selectedTab = tab
                     if tab != .albums { app.selectedAlbumId = nil }
                     if tab != .playlists { app.selectedPlaylistId = nil }
@@ -196,7 +216,9 @@ struct RootView: View {
     private func icon(for tab: MusicTab) -> String {
         switch tab {
         case .library:
-            return "music.note.list"
+            return "house.fill"
+        case .search:
+            return "magnifyingglass"
         case .albums:
             return "square.grid.2x2.fill"
         case .playlists:
@@ -209,14 +231,52 @@ struct RootView: View {
     }
 }
 
+struct SearchView: View {
+    @EnvironmentObject private var app: AppState
+
+    var body: some View {
+        let query = app.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        ScrollView {
+            if query.isEmpty {
+                ContentUnavailableView(
+                    "Search",
+                    systemImage: "magnifyingglass",
+                    description: Text("Find songs in your library, or switch to Torrent or Indexers to import new music.")
+                )
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 64)
+            } else if app.filteredTracks.isEmpty {
+                ContentUnavailableView(
+                    "No results",
+                    systemImage: "magnifyingglass",
+                    description: Text("Nothing in your library matches \u{201C}\(query)\u{201D}. Switch to Torrent or Indexers to import it.")
+                )
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 64)
+            } else {
+                LazyVStack(spacing: 10) {
+                    ForEach(app.filteredTracks) { track in
+                        TrackRowNative(track: track)
+                            .environmentObject(app)
+                            .padding(.horizontal)
+                    }
+                }
+                .padding(.vertical, 12)
+            }
+        }
+    }
+}
+
 struct LibraryView: View {
     @EnvironmentObject private var app: AppState
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 22) {
-                HStack {
-                    Text(app.selectedTab == .liked ? "Liked Songs" : "Made For You")
+                HStack(spacing: 12) {
+                    Text(app.selectedTab == .liked ? "Liked Songs" : "Home")
                         .font(.title2.bold())
                     Spacer()
                     if app.isLoading { ProgressView() }
@@ -261,8 +321,26 @@ struct LibraryView: View {
         }
     }
 
+    // Shelf order mirrors the reference design: quick-access tiles lead, then playlists, then
+    // the play-history shelves, then the generated mixes and recommendations.
     private var homeContent: some View {
         VStack(alignment: .leading, spacing: 22) {
+            RecentTileGridView()
+                .environmentObject(app)
+
+            PlaylistShelfView(title: "Your Playlists", playlists: Array(app.playlists.prefix(10)))
+                .environmentObject(app)
+
+            AlbumShelfView(title: "Jump Back In", albums: app.jumpBackInAlbums)
+                .environmentObject(app)
+
+            // The tile grid shows the first 8 recent plays; this shelf continues from there.
+            TrackShelfView(title: "Recents", tracks: Array(app.recentlyPlayedTracks.dropFirst(8).prefix(12)))
+                .environmentObject(app)
+
+            AlbumShelfView(title: "Albums Featuring Songs You Like", albums: app.albumsFeaturingLikedTracks)
+                .environmentObject(app)
+
             DailyMixShelfView(mixes: app.dailyMixes)
                 .environmentObject(app)
 
@@ -455,6 +533,117 @@ struct AlbumRecommendationCard: View {
                     .lineLimit(2)
                     .frame(height: 38, alignment: .topLeading)
                 Text("\(album.artist) • \(album.trackCountText)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(width: 132, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Spotify-style compact grid at the top of home: two columns of small tiles with the
+/// artwork on the left and the title beside it, showing the most recently played tracks.
+struct RecentTileGridView: View {
+    @EnvironmentObject private var app: AppState
+
+    private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
+
+    var body: some View {
+        let tiles = Array(app.recentlyPlayedTracks.prefix(8))
+        if !tiles.isEmpty {
+            LazyVGrid(columns: columns, spacing: 10) {
+                ForEach(tiles) { track in
+                    RecentTileCard(track: track)
+                        .environmentObject(app)
+                }
+            }
+            .padding(.horizontal)
+        }
+    }
+}
+
+struct RecentTileCard: View {
+    @EnvironmentObject private var app: AppState
+    let track: ApiTrack
+
+    var body: some View {
+        Button {
+            app.play(track, queue: app.recentlyPlayedTracks)
+        } label: {
+            HStack(spacing: 10) {
+                TrackArtworkView(track: track, size: 52)
+                    .environmentObject(app)
+                Text(track.title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 56)
+            .background(Color.white.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct PlaylistShelfView: View {
+    @EnvironmentObject private var app: AppState
+    let title: String
+    let playlists: [PlaylistDetail]
+
+    var body: some View {
+        if !playlists.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(title)
+                    .font(.headline)
+                    .padding(.horizontal)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 14) {
+                        ForEach(playlists) { playlist in
+                            PlaylistRecommendationCard(playlist: playlist)
+                                .environmentObject(app)
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+            }
+        }
+    }
+}
+
+struct PlaylistRecommendationCard: View {
+    @EnvironmentObject private var app: AppState
+    let playlist: PlaylistDetail
+
+    var body: some View {
+        Button {
+            app.selectedTab = .playlists
+            app.selectedPlaylistId = playlist.id
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                ZStack {
+                    LinearGradient(colors: [.green.opacity(0.65), .blue.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    Image(systemName: "music.note.list")
+                        .font(.largeTitle.weight(.semibold))
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 132, height: 132)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                Text(playlist.name)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .frame(height: 38, alignment: .topLeading)
+                Text(playlist.trackCountText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -1130,6 +1319,21 @@ struct TorrentImportProgressView: View {
     }
 }
 
+/// Small "FLAC" / "AAC" pill shown next to the track that's playing.
+struct CodecBadgeView: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(.blue)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(Color.blue.opacity(0.18), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .fixedSize()
+    }
+}
+
 struct PlayerBar: View {
     @EnvironmentObject private var app: AppState
     @State private var showingQueue = false
@@ -1179,9 +1383,14 @@ struct PlayerBar: View {
                         }
 
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(app.currentTrack?.title ?? "Nothing playing")
-                                .font(.subheadline.weight(.semibold))
-                                .lineLimit(1)
+                            HStack(spacing: 6) {
+                                Text(app.currentTrack?.title ?? "Nothing playing")
+                                    .font(.subheadline.weight(.semibold))
+                                    .lineLimit(1)
+                                if app.currentTrack != nil, let badge = app.currentCodecBadge {
+                                    CodecBadgeView(text: badge)
+                                }
+                            }
                             Text(app.currentTrack?.displayArtist ?? "Choose a song")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -1299,10 +1508,15 @@ struct NowPlayingSheetView: View {
                             VStack(alignment: .leading, spacing: 8) {
                                 HStack(alignment: .top, spacing: 12) {
                                     VStack(alignment: .leading, spacing: 6) {
-                                        Text(track.title)
-                                            .font(.title2.bold())
-                                            .foregroundStyle(.white)
-                                            .lineLimit(2)
+                                        HStack(spacing: 8) {
+                                            Text(track.title)
+                                                .font(.title2.bold())
+                                                .foregroundStyle(.white)
+                                                .lineLimit(2)
+                                            if let badge = app.currentCodecBadge {
+                                                CodecBadgeView(text: badge)
+                                            }
+                                        }
                                         Text(track.displayArtist)
                                             .font(.headline)
                                             .foregroundStyle(.secondary)
@@ -1645,6 +1859,16 @@ struct SettingsView: View {
                 Toggle(isOn: $app.autoplaySimilarEnabled) {
                     Label("Autoplay Similar Songs", systemImage: "infinity")
                 }
+                Picker(selection: $app.playbackQuality) {
+                    ForEach(PlaybackQuality.allCases) { quality in
+                        Text(quality.label).tag(quality)
+                    }
+                } label: {
+                    Label("Playback Quality", systemImage: "waveform")
+                }
+                Text(app.playbackQuality.detail)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Offline Downloads") {

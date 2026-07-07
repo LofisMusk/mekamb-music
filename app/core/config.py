@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     cache_ttl_days: int = 30
     cache_cleanup_interval_seconds: int = 3600
     playback_prefetch_count: int = 2
+
+    # ── Transcoding (lossless → AAC for the "AAC" / "Auto" playback quality) ──
+    transcode_enabled: bool = True
+    transcode_cache_root: Path = Path("data/transcode")
+    transcode_aac_bitrate: str = "256k"
+
     recommendation_sources: str = "indexer"
     recommendation_auto_import_limit: int = 3
     recommendation_min_seeders: int = 1

@@ -17,6 +17,7 @@ from app.api.deps import (
     require_token,
 )
 from app.api.schemas import (
+    AutoplayQueueResponse,
     DailyMixResponse,
     PersonalizedHomeResponse,
     RecommendationImportItemResponse,
@@ -198,6 +199,50 @@ async def recommend_for_library(
     response = _recommendation_response(recommendations)
     await _store_response(redis, cache_key, response.model_dump(mode="json"))
     return response
+
+
+@router.get("/autoplay", response_model=AutoplayQueueResponse)
+async def autoplay_queue(
+    seed_track_id: UUID = Query(...),
+    exclude: str | None = Query(default=None, description="Comma-separated track IDs already in the queue."),
+    limit: int = Query(default=20, ge=1, le=50),
+    engine: RecommendationEngine = Depends(_recommendation_engine),
+) -> AutoplayQueueResponse:
+    try:
+        items = await engine.autoplay_queue(
+            seed_track_id,
+            exclude_track_ids=_parse_uuid_list(exclude),
+            limit=limit,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    seed = await engine.session.get(Track, seed_track_id)
+    return AutoplayQueueResponse(
+        seed_track=seed.to_dict(),
+        tracks=[
+            {
+                "track": item.track.to_dict(),
+                "score": item.score,
+                "reasons": item.reasons,
+            }
+            for item in items
+        ],
+    )
+
+
+def _parse_uuid_list(raw: str | None) -> set[UUID]:
+    if not raw:
+        return set()
+    ids: set[UUID] = set()
+    for chunk in raw.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            ids.add(UUID(chunk))
+        except ValueError:
+            continue
+    return ids
 
 
 @router.get("/personalized", response_model=PersonalizedHomeResponse)

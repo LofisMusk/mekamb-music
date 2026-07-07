@@ -50,11 +50,18 @@ import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
     private enum class MusicTab(val label: String) {
-        Library("Library"),
+        Library("Home"),
+        Search("Search"),
         Albums("Albums"),
         Playlists("Playlists"),
         Liked("Liked"),
-        Settings("Settings")
+        Settings("Settings");
+
+        companion object {
+            // Tabs shown in the bottom bar. Albums/Playlists stay in the enum for in-app
+            // navigation (tapping a home-shelf card) but are no longer top-level tabs.
+            val barItems = listOf(Library, Search, Liked, Settings)
+        }
     }
 
     private enum class SearchMode(val label: String) {
@@ -64,15 +71,6 @@ class MainActivity : Activity() {
 
         val searchesRemoteSources: Boolean
             get() = this == Torrent || this == Indexers
-    }
-
-    private enum class RepeatMode(val label: String) {
-        Off("Repeat Off"),
-        All("Repeat All"),
-        One("Repeat One");
-
-        val isActive: Boolean
-            get() = this != Off
     }
 
     private enum class TorrentSource(val raw: String, val importPath: String) {
@@ -139,8 +137,21 @@ class MainActivity : Activity() {
         val downloadedAt: Long
     )
 
+    private data class RecentPlay(
+        val track: ApiTrack,
+        val playedAt: String?
+    )
+
+    private data class LibraryLoad(
+        val tracks: List<ApiTrack>,
+        val likes: Set<String>,
+        val playlists: List<Playlist>,
+        val recentPlays: List<RecentPlay>?
+    )
+
     private class ApiException(message: String) : Exception(message)
 
+    private val DAY_MS = 86_400_000L
     private val executor = Executors.newSingleThreadExecutor()
     private val artworkExecutor = Executors.newFixedThreadPool(6)
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -178,8 +189,10 @@ class MainActivity : Activity() {
 
     private var selectedTab = MusicTab.Library
     private var searchMode = SearchMode.Library
-    private var shuffleEnabled = false
-    private var repeatMode = RepeatMode.Off
+    // Playback transport state now lives in the process-scoped Playback engine so it survives the
+    // Activity; these expose it for the UI.
+    private val shuffleEnabled: Boolean get() = Playback.shuffle
+    private val repeatMode: RepeatMode get() = Playback.repeatMode
     private var selectedAlbumId: String? = null
     private var selectedPlaylistId: String? = null
     private var isLoading = false
@@ -189,6 +202,8 @@ class MainActivity : Activity() {
     private var albums: List<Album> = emptyList()
     private var playlists: List<Playlist> = emptyList()
     private var likedTrackIds: Set<String> = emptySet()
+    // Play-history feed from GET /tracks/recent (newest first), driving the home shelves.
+    private var recentPlayEvents: List<RecentPlay> = emptyList()
     private var torrents: List<TorrentResult> = emptyList()
     private var offlineRecords: MutableMap<String, OfflineRecord> = mutableMapOf()
     private var offlineTrackIds: Set<String> = emptySet()
@@ -199,14 +214,7 @@ class MainActivity : Activity() {
     }
     private val missingArtworkIds = mutableSetOf<String>()
     private val requestedArtworkIds = mutableSetOf<String>()
-    private val playbackRequestId = AtomicInteger(0)
-    private val playbackPrefetchingTrackIds = mutableSetOf<String>()
 
-    private var mediaPlayer: MediaPlayer? = null
-    private var currentTrack: ApiTrack? = null
-    private var playbackQueue: List<ApiTrack> = emptyList()
-    private var currentIndex = -1
-    private var isPlaying = false
     private var miniArtworkTrackId: String? = null
 
     private val prefs by lazy { getSharedPreferences("mekamb_music_android", Context.MODE_PRIVATE) }
@@ -221,21 +229,41 @@ class MainActivity : Activity() {
     private var prowlarrApiKey: String
         get() = prefs.getString("prowlarr_api_key", "") ?: ""
         set(value) = prefs.edit().putString("prowlarr_api_key", value).apply()
+    // "auto" | "aac" | "lossless" — read by the Playback engine when building the stream URL.
+    private var playbackQuality: String
+        get() = prefs.getString("playback_quality", "auto") ?: "auto"
+        set(value) = prefs.edit().putString("playback_quality", value).apply()
+
+    private val playbackListener = Playback.Listener { updateMiniPlayer() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.statusBarColor = bgColor
         window.navigationBarColor = bgColor
+        Playback.init(this)
+        Playback.addListener(playbackListener)
+        requestNotificationPermissionIfNeeded()
         loadOfflineLibrary()
         buildLayout()
         render()
+        mainHandler.post(progressTick)
         refreshLibrary()
     }
 
+    private fun requestNotificationPermissionIfNeeded() {
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 42)
+        }
+    }
+
     override fun onDestroy() {
+        // Playback keeps running in its foreground service after the Activity is gone, so we only
+        // detach the UI listener here — we do NOT release the player.
         mainHandler.removeCallbacks(progressTick)
-        mediaPlayer?.release()
-        mediaPlayer = null
+        Playback.removeListener(playbackListener)
         artworkExecutor.shutdownNow()
         executor.shutdownNow()
         super.onDestroy()
@@ -409,21 +437,13 @@ class MainActivity : Activity() {
             setPadding(dp(4), dp(10), dp(4), dp(7))
         }
         modeRow.addView(iconText("⇄", if (shuffleEnabled) accentAltColor else mutedColor) {
-            shuffleEnabled = !shuffleEnabled
-            updateMiniPlayer()
-            schedulePlaybackSideEffects()
+            toggleShuffle()
         }, LinearLayout.LayoutParams(dp(34), dp(28)))
         modeRow.addView(space(1, 1), weightParams(1f))
         modeRow.addView(label(repeatMode.label, 11f, mutedColor, Typeface.NORMAL), wrapParams())
         modeRow.addView(space(1, 1), weightParams(1f))
         modeRow.addView(iconText(repeatIcon(), if (repeatMode.isActive) accentAltColor else mutedColor) {
-            repeatMode = when (repeatMode) {
-                RepeatMode.Off -> RepeatMode.All
-                RepeatMode.All -> RepeatMode.One
-                RepeatMode.One -> RepeatMode.Off
-            }
-            updateMiniPlayer()
-            schedulePlaybackSideEffects()
+            cycleRepeat()
         }, LinearLayout.LayoutParams(dp(34), dp(28)))
         holder.addView(modeRow, matchWrapParams())
 
@@ -439,8 +459,15 @@ class MainActivity : Activity() {
             rightMargin = dp(12)
         })
         val textColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        miniTitle = label("Nothing playing", 15f, textColor, Typeface.BOLD)
-        miniSubtitle = label("Choose a track", 12f, mutedColor, Typeface.NORMAL)
+        // Single-line so a long "AAC · Artist · Album" subtitle can't wrap and grow the row.
+        miniTitle = label("Nothing playing", 15f, textColor, Typeface.BOLD).apply {
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        miniSubtitle = label("Choose a track", 12f, mutedColor, Typeface.NORMAL).apply {
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }
         textColumn.addView(miniTitle, matchWrapParams())
         textColumn.addView(miniSubtitle, matchWrapParams())
         row.addView(textColumn, weightParams(1f))
@@ -477,7 +504,7 @@ class MainActivity : Activity() {
         topRow.addView(iconButton("⌄", primary = false) { dialog.dismiss() }, LinearLayout.LayoutParams(dp(44), dp(40)))
         screen.addView(topRow, matchWrapParams())
 
-        val track = currentTrack
+        val track = currentApiTrack()
         val artworkSize = (resources.displayMetrics.widthPixels - dp(72)).coerceAtMost(dp(340))
         val artwork = if (track == null) {
             artTile("M", "Music", artworkSize)
@@ -493,13 +520,31 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        infoBlock.addView(
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        titleRow.addView(
             label(track?.title ?: "Nothing playing", 24f, textColor, Typeface.BOLD).apply {
                 maxLines = 2
                 ellipsize = TextUtils.TruncateAt.END
             },
-            matchWrapParams()
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         )
+        val codecLabel = if (track != null) Playback.currentCodecLabel else null
+        if (codecLabel != null) {
+            titleRow.addView(TextView(this).apply {
+                text = codecLabel
+                textSize = 10f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.BLACK)
+                background = rounded(accentAltColor, dp(6))
+                setPadding(dp(7), dp(3), dp(7), dp(3))
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                leftMargin = dp(10)
+            })
+        }
+        infoBlock.addView(titleRow, matchWrapParams())
         infoBlock.addView(
             label(
                 track?.displayArtist ?: "Choose a track",
@@ -562,9 +607,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
         }
         controls.addView(iconText("⇄", if (shuffleEnabled) accentAltColor else textColor) {
-            shuffleEnabled = !shuffleEnabled
-            updateMiniPlayer()
-            schedulePlaybackSideEffects()
+            toggleShuffle()
         }, LinearLayout.LayoutParams(dp(46), dp(52)).apply { rightMargin = dp(10) })
         controls.addView(iconButton("⏮", primary = false) {
             playPrevious()
@@ -572,9 +615,9 @@ class MainActivity : Activity() {
             mainHandler.postDelayed({ showExpandedPlayer() }, 250)
         }, LinearLayout.LayoutParams(dp(52), dp(52)).apply { rightMargin = dp(10) })
         lateinit var expandedPlay: TextView
-        expandedPlay = iconButton(if (isPlaying) "⏸" else "▶", accent = Color.WHITE, textColorOverride = Color.BLACK) {
+        expandedPlay = iconButton(if (Playback.isPlaying) "⏸" else "▶", accent = Color.WHITE, textColorOverride = Color.BLACK) {
             togglePlayback()
-            expandedPlay.text = if (isPlaying) "⏸" else "▶"
+            expandedPlay.text = if (Playback.isPlaying) "⏸" else "▶"
             expandedProgress.progress = miniProgress.progress
         }
         controls.addView(expandedPlay, LinearLayout.LayoutParams(dp(68), dp(68)).apply {
@@ -587,13 +630,7 @@ class MainActivity : Activity() {
             mainHandler.postDelayed({ showExpandedPlayer() }, 250)
         }, LinearLayout.LayoutParams(dp(52), dp(52)).apply { leftMargin = dp(10) })
         controls.addView(iconText(repeatIcon(), if (repeatMode.isActive) accentAltColor else textColor) {
-            repeatMode = when (repeatMode) {
-                RepeatMode.Off -> RepeatMode.All
-                RepeatMode.All -> RepeatMode.One
-                RepeatMode.One -> RepeatMode.Off
-            }
-            updateMiniPlayer()
-            schedulePlaybackSideEffects()
+            cycleRepeat()
         }, LinearLayout.LayoutParams(dp(46), dp(52)).apply { leftMargin = dp(10) })
         screen.addView(controls, matchWrapParams())
 
@@ -640,11 +677,13 @@ class MainActivity : Activity() {
             updateMiniPlayer()
             return
         }
+        searchHeader.visibility = if (showsSearchHeader()) View.VISIBLE else View.GONE
         if (searchMode.searchesRemoteSources) {
             renderSources()
         } else {
             when (selectedTab) {
                 MusicTab.Library -> renderLibrary()
+                MusicTab.Search -> renderSearch()
                 MusicTab.Albums -> renderAlbums()
                 MusicTab.Playlists -> renderPlaylists()
                 MusicTab.Liked -> renderLiked()
@@ -654,9 +693,17 @@ class MainActivity : Activity() {
         updateMiniPlayer()
     }
 
+    private fun showsSearchHeader(): Boolean {
+        if (searchMode.searchesRemoteSources) return true
+        return selectedTab == MusicTab.Search ||
+            selectedTab == MusicTab.Albums ||
+            selectedTab == MusicTab.Playlists ||
+            selectedTab == MusicTab.Liked
+    }
+
     private fun renderTabs() {
         tabBar.removeAllViews()
-        MusicTab.entries.forEach { tab ->
+        MusicTab.barItems.forEach { tab ->
             val selected = selectedTab == tab
             val tabButton = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -664,11 +711,20 @@ class MainActivity : Activity() {
                 background = rounded(if (selected) accentColor else Color.TRANSPARENT, dp(14))
                 setOnClickListener {
                     selectedTab = tab
-                    searchMode = SearchMode.Library
+                    if (tab != MusicTab.Search) {
+                        searchMode = SearchMode.Library
+                        searchInput.setText("")
+                        torrents = emptyList()
+                    }
                     selectedAlbumId = null
                     selectedPlaylistId = null
                     statusMessage = null
                     render()
+                    if (tab == MusicTab.Search) {
+                        searchInput.requestFocus()
+                        (getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager)
+                            ?.showSoftInput(searchInput, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+                    }
                 }
             }
             tabButton.addView(ImageView(this).apply {
@@ -692,6 +748,7 @@ class MainActivity : Activity() {
     private fun MusicTab.iconRes(): Int {
         return when (this) {
             MusicTab.Library -> R.drawable.ic_tab_library
+            MusicTab.Search -> R.drawable.ic_tab_search
             MusicTab.Albums -> R.drawable.ic_tab_albums
             MusicTab.Playlists -> R.drawable.ic_tab_library
             MusicTab.Liked -> R.drawable.ic_tab_liked
@@ -755,28 +812,46 @@ class MainActivity : Activity() {
     }
 
     private fun renderLibrary() {
-        val visible = filteredTracks(tracks)
-        content.addView(sectionTitle("Made For You").withHorizontalPagePadding())
+        content.addView(sectionTitle("Home").withHorizontalPagePadding())
         if (!canUseApi()) {
             content.addView(messageCard("Set API endpoint and token in Settings. For a phone or emulator, use your Mac/server LAN IP, not localhost."))
         }
-        if (visible.isEmpty()) {
+        if (tracks.isEmpty()) {
             content.addView(messageCard("No tracks found. Refresh after importing music on the backend."))
             return
         }
-        if (searchInput.text.toString().trim().isNotEmpty()) {
-            content.addView(sectionTitle("Search Results").withHorizontalPagePadding())
-            visible.take(40).forEach { track ->
-                content.addView(trackRow(track, visible))
-            }
-            return
-        }
+        // Shelf order mirrors the reference design: quick-access tiles lead, then playlists, then
+        // the play-history shelves, then the generated mixes and recommendations. (Search now
+        // lives in its own tab.)
+        content.addView(recentTilesGrid())
+        content.addView(playlistShelf("Your Playlists", playlists.take(10)))
+        content.addView(albumShelf("Jump Back In", jumpBackInAlbums()))
+        content.addView(trackShelf("Recents", recentlyPlayedTracks().drop(8).take(12)))
+        content.addView(albumShelf("Albums Featuring Songs You Like", albumsFeaturingLikedTracks()))
         content.addView(dailyMixShelf())
         content.addView(trackShelf("Recommended For You", recommendedTracks()))
         content.addView(trackShelf("Recently Added", recentlyAddedTracks()))
         val likedPreview = tracks.filter { likedTrackIds.contains(it.id) }.take(16)
         if (likedPreview.isNotEmpty()) {
             content.addView(trackShelf("Your Liked Mix", likedPreview))
+        }
+    }
+
+    private fun renderSearch() {
+        val query = searchInput.text.toString().trim()
+        if (query.isEmpty()) {
+            content.addView(sectionTitle("Search").withHorizontalPagePadding())
+            content.addView(messageCard("Find songs in your library, or switch to Torrent or Indexers to import new music."))
+            return
+        }
+        val results = filteredTracks(tracks)
+        if (results.isEmpty()) {
+            content.addView(messageCard("Nothing in your library matches \"$query\". Switch to Torrent or Indexers to import it."))
+            return
+        }
+        content.addView(sectionTitle("Results").withHorizontalPagePadding())
+        results.take(50).forEach { track ->
+            content.addView(trackRow(track, results))
         }
     }
 
@@ -833,8 +908,9 @@ class MainActivity : Activity() {
                 album.tracks.firstOrNull()?.let { playTrack(it, album.tracks) }
             }, LinearLayout.LayoutParams(dp(46), dp(42)).apply { rightMargin = dp(10) })
             albumActions.addView(iconText("⇄", textColor) {
-                shuffleEnabled = true
-                album.tracks.shuffled().firstOrNull()?.let { playTrack(it, album.tracks.shuffled()) }
+                Playback.setShuffle(true)
+                val shuffled = album.tracks.shuffled()
+                shuffled.firstOrNull()?.let { playTrack(it, shuffled) }
             }, LinearLayout.LayoutParams(dp(42), dp(42)))
             albumActions.addView(iconText(albumOfflineIcon(album), albumOfflineColor(album)) {
                 if (isAlbumOffline(album)) {
@@ -1141,6 +1217,39 @@ class MainActivity : Activity() {
             topMargin = dp(10)
             bottomMargin = dp(4)
         })
+
+        content.addView(sectionTitle("Playback Quality").withHorizontalPagePadding())
+        val qualityRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(2), dp(16), dp(2))
+        }
+        listOf("auto" to "Auto", "aac" to "AAC", "lossless" to "Lossless").forEach { (value, labelText) ->
+            val selected = playbackQuality == value
+            qualityRow.addView(TextView(this).apply {
+                text = labelText
+                gravity = Gravity.CENTER
+                textSize = 13f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(if (selected) Color.BLACK else mutedColor)
+                background = rounded(if (selected) accentAltColor else chipColor, dp(12), strokeColor, 1)
+                setPadding(0, dp(11), 0, dp(11))
+                setOnClickListener {
+                    playbackQuality = value
+                    render()
+                }
+            }, LinearLayout.LayoutParams(0, dp(44), 1f).apply {
+                leftMargin = dp(3)
+                rightMargin = dp(3)
+            })
+        }
+        content.addView(qualityRow, matchWrapParams())
+        content.addView(messageCard(when (playbackQuality) {
+            "aac" -> "AAC: smaller files that save data. Lossless (FLAC) songs are transcoded to AAC on the backend."
+            "lossless" -> "Lossless: streams the original file (FLAC)."
+            else -> "Auto: lossless on Wi‑Fi, AAC on a metered/cellular connection."
+        }))
+
         content.addView(messageCard("Offline downloads: ${offlineRecords.size} songs · ${formatBytes(offlineStorageBytes())}"))
         content.addView(button("Remove offline downloads", primary = false) {
             clearOfflineDownloads()
@@ -1219,10 +1328,15 @@ class MainActivity : Activity() {
                 val loadedTracks = loadAllTracks()
                 val loadedLikes = loadAllLikedTrackIds()
                 val loadedPlaylists = loadAllPlaylists()
-                Triple(loadedTracks, loadedLikes, loadedPlaylists)
+                val loadedRecent = runCatching { loadRecentPlays() }.getOrNull()
+                LibraryLoad(loadedTracks, loadedLikes, loadedPlaylists, loadedRecent)
             },
-            success = { (loadedTracks, loadedLikes, loadedPlaylists) ->
-                tracks = (loadedTracks + loadedPlaylists.flatMap { it.tracks })
+            success = { load ->
+                val loadedTracks = load.tracks
+                val loadedLikes = load.likes
+                val loadedPlaylists = load.playlists
+                if (load.recentPlays != null) recentPlayEvents = load.recentPlays
+                tracks = (loadedTracks + loadedPlaylists.flatMap { it.tracks } + (load.recentPlays?.map { it.track } ?: emptyList()))
                     .distinctBy { it.id }
                     .sortedWith(trackComparator())
                 likedTrackIds = loadedLikes
@@ -1233,6 +1347,7 @@ class MainActivity : Activity() {
                 }
                 pruneMissingOfflineFiles()
                 missingArtworkIds.clear()
+                Playback.setLibrary(tracks.map { it.toPlaybackTrack() })
                 statusMessage = "Library refreshed: ${tracks.size} songs."
                 render()
                 prefetchAlbumArtwork()
@@ -1474,150 +1589,51 @@ class MainActivity : Activity() {
     }
 
     private fun playTrack(track: ApiTrack, queue: List<ApiTrack>) {
-        offlinePlaybackFile(track)?.let { file ->
-            val requestId = playbackRequestId.incrementAndGet()
-            mediaPlayer?.release()
-            mediaPlayer = null
-            isPlaying = false
-            currentTrack = track
-            playbackQueue = queue.ifEmpty { tracks.ifEmpty { offlineRecords.values.map { it.track } } }
-            currentIndex = playbackQueue.indexOfFirst { it.id == track.id }
-            statusMessage = null
-            updateStatus()
-            updateMiniPlayer()
-            startCachedTrack(track, file, requestId)
-            return
-        }
-
-        if (!canUseApi()) {
+        if (offlinePlaybackFile(track) == null && !canUseApi()) {
             statusMessage = "Set API endpoint and token before streaming."
             updateStatus()
             return
         }
-        if (endpointUrl("/tracks/${encodePath(track.id)}/stream") == null) {
-            statusMessage = "Error: bad API endpoint."
-            updateStatus()
-            return
-        }
-
-        val requestId = playbackRequestId.incrementAndGet()
-        mediaPlayer?.release()
-        mediaPlayer = null
-        isPlaying = false
-        currentTrack = track
-        playbackQueue = queue.ifEmpty { tracks }
-        currentIndex = playbackQueue.indexOfFirst { it.id == track.id }
-        statusMessage = "Loading ${track.title}..."
+        val effectiveQueue = queue.ifEmpty { tracks.ifEmpty { offlineRecords.values.map { it.track } } }
+        val playbackQueue = effectiveQueue.map { it.toPlaybackTrack() }
+        val index = playbackQueue.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
+        Playback.setLibrary(tracks.map { it.toPlaybackTrack() })
+        Playback.play(playbackQueue, index)
+        statusMessage = null
         updateStatus()
-        updateMiniPlayer()
-
-        executor.execute {
-            val audioFile = runCatching { downloadTrackForPlayback(track) }
-            mainHandler.post {
-                if (requestId != playbackRequestId.get()) return@post
-                audioFile.fold(
-                    onSuccess = { file -> startCachedTrack(track, file, requestId) },
-                    onFailure = { error ->
-                        isPlaying = false
-                        statusMessage = "Error: ${error.message ?: "playback download failed."}"
-                        updateStatus()
-                        updateMiniPlayer()
-                    }
-                )
-            }
-        }
-    }
-
-    private fun startCachedTrack(track: ApiTrack, audioFile: File, requestId: Int) {
-        mediaPlayer?.release()
-        mediaPlayer = MediaPlayer().apply {
-            setWakeMode(this@MainActivity, PowerManager.PARTIAL_WAKE_LOCK)
-            setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                    .build()
-            )
-            setDataSource(audioFile.absolutePath)
-            setOnPreparedListener {
-                if (requestId != playbackRequestId.get()) {
-                    it.release()
-                    return@setOnPreparedListener
-                }
-                it.start()
-                this@MainActivity.isPlaying = true
-                statusMessage = null
-                updateStatus()
-                mainHandler.removeCallbacks(progressTick)
-                mainHandler.post(progressTick)
-                updateMiniPlayer()
-                schedulePlaybackSideEffects()
-            }
-            setOnCompletionListener {
-                when (repeatMode) {
-                    RepeatMode.One -> playTrack(track, playbackQueue.ifEmpty { tracks })
-                    RepeatMode.Off -> {
-                        val queue = playbackQueue.ifEmpty { tracks }
-                        if (currentIndex >= 0 && currentIndex < queue.lastIndex) {
-                            playNext()
-                        } else {
-                            this@MainActivity.isPlaying = false
-                            updateMiniPlayer()
-                        }
-                    }
-                    RepeatMode.All -> playNext()
-                }
-            }
-            setOnErrorListener { _, what, extra ->
-                this@MainActivity.isPlaying = false
-                statusMessage = "Error: playback failed ($what/$extra)."
-                updateStatus()
-                updateMiniPlayer()
-                true
-            }
-            prepareAsync()
-        }
-        currentTrack = track
         updateMiniPlayer()
     }
 
     private fun togglePlayback() {
-        val player = mediaPlayer
-        if (player == null) {
+        if (Playback.currentTrack == null) {
             tracks.firstOrNull()?.let { playTrack(it, tracks) }
             return
         }
-        if (player.isPlaying) {
-            player.pause()
-            isPlaying = false
-        } else {
-            player.start()
-            isPlaying = true
-        }
-        updateMiniPlayer()
-        postPlaybackStateAsync()
+        Playback.toggle()
     }
 
-    private fun playNext() {
-        val queue = playbackQueue.ifEmpty { tracks }
-        if (queue.isEmpty()) return
-        val nextIndex = if (shuffleEnabled && queue.size > 1) {
-            queue.indices.filter { it != currentIndex }.random()
-        } else {
-            if (currentIndex < 0) 0 else (currentIndex + 1) % queue.size
-        }
-        playTrack(queue[nextIndex], queue)
+    private fun playNext() = Playback.next()
+
+    private fun playPrevious() = Playback.previous()
+
+    private fun toggleShuffle() {
+        Playback.setShuffle(!Playback.shuffle)
+        render()
     }
 
-    private fun playPrevious() {
-        val queue = playbackQueue.ifEmpty { tracks }
-        if (queue.isEmpty()) return
-        val previousIndex = if (currentIndex <= 0) queue.lastIndex else currentIndex - 1
-        playTrack(queue[previousIndex], queue)
+    private fun cycleRepeat() {
+        Playback.setRepeat(
+            when (Playback.repeatMode) {
+                RepeatMode.Off -> RepeatMode.All
+                RepeatMode.All -> RepeatMode.One
+                RepeatMode.One -> RepeatMode.Off
+            }
+        )
+        render()
     }
 
     private fun updateMiniPlayer() {
-        val track = currentTrack
+        val track = Playback.currentTrack
         if (track == null) {
             miniTitle.text = "Nothing playing"
             miniSubtitle.text = "Choose a track"
@@ -1627,86 +1643,41 @@ class MainActivity : Activity() {
             return
         }
         miniTitle.text = track.title
-        miniSubtitle.text = "${track.displayArtist} · ${track.displayAlbum}"
-        playButton.text = if (isPlaying) "⏸" else "▶"
+        val codec = Playback.currentCodecLabel
+        miniSubtitle.text = if (codec != null) {
+            "$codec · ${track.displayArtist} · ${track.displayAlbum}"
+        } else {
+            "${track.displayArtist} · ${track.displayAlbum}"
+        }
+        playButton.text = if (Playback.isPlaying) "⏸" else "▶"
         updateMiniArtwork(track)
-        val player = mediaPlayer
-        val duration = player?.duration?.takeIf { it > 0 } ?: 0
+        val duration = Playback.durationMs
         miniProgress.progress = if (duration > 0) {
-            ((player?.currentPosition ?: 0).toDouble() / duration.toDouble() * 1000.0).roundToInt()
+            (Playback.positionMs.toDouble() / duration.toDouble() * 1000.0).roundToInt()
         } else {
             0
         }
     }
 
-    private fun schedulePlaybackSideEffects() {
-        postPlaybackStateAsync()
-        prefetchNextTrackForPlayback()
-    }
-
-    private fun postPlaybackStateAsync() {
-        if (!canUseApi()) return
-        val queue = playbackQueue.ifEmpty { tracks }
-        val payload = JSONObject()
-            .put("current_track_id", currentTrack?.id ?: JSONObject.NULL)
-            .put("position_seconds", ((mediaPlayer?.currentPosition ?: 0).toDouble() / 1000.0).coerceAtLeast(0.0))
-            .put("is_playing", isPlaying)
-            .put("repeat_mode", when (repeatMode) {
-                RepeatMode.Off -> "off"
-                RepeatMode.All -> "queue"
-                RepeatMode.One -> "track"
-            })
-            .put("shuffle", shuffleEnabled)
-            .put("active_device_id", "android-${android.os.Build.MODEL}")
-            .put("active_device_name", android.os.Build.MODEL ?: "Android")
-            .put("queue_track_ids", JSONArray().apply {
-                queue.forEach { put(it.id) }
-            })
-            .toString()
-        executor.execute {
-            runCatching {
-                request("/playback/state", method = "PUT", body = payload)
-            }
-        }
-    }
-
-    private fun prefetchNextTrackForPlayback() {
-        val nextTrack = nextTrackToCache() ?: return
-        if (!canUseApi() || offlinePlaybackFile(nextTrack) != null) return
-        if (!playbackPrefetchingTrackIds.add(nextTrack.id)) return
-        executor.execute {
-            runCatching {
-                downloadTrackForPlayback(nextTrack)
-            }
-            mainHandler.post {
-                playbackPrefetchingTrackIds.remove(nextTrack.id)
-            }
-        }
-    }
-
-    private fun nextTrackToCache(): ApiTrack? {
-        if (repeatMode == RepeatMode.One) return null
-        val queue = playbackQueue.ifEmpty { tracks }
-        if (queue.size <= 1) return null
-        val index = currentIndex.takeIf { it in queue.indices }
-            ?: currentTrack?.let { track -> queue.indexOfFirst { it.id == track.id } }
-            ?: -1
-        if (index < 0) return queue.firstOrNull()
-        if (index < queue.lastIndex) return queue[index + 1]
-        return if (repeatMode == RepeatMode.All) queue.firstOrNull() else null
-    }
-
     private fun seekFromProgressTouch(x: Float, width: Int) {
-        val player = mediaPlayer ?: return
         if (width <= 0) return
-        val duration = player.duration.takeIf { it > 0 } ?: return
+        val duration = Playback.durationMs.takeIf { it > 0 } ?: return
         val fraction = (x / width.toFloat()).coerceIn(0f, 1f)
-        val position = (duration * fraction).roundToInt()
-        player.seekTo(position)
+        Playback.seekTo((duration * fraction).roundToInt())
         miniProgress.progress = (fraction * miniProgress.max).roundToInt()
     }
 
-    private fun updateMiniArtwork(track: ApiTrack?) {
+    private fun ApiTrack.toPlaybackTrack(): PlaybackTrack =
+        PlaybackTrack(id, title, artist, album, originalFilename, mediaType, durationSeconds)
+
+    private fun PlaybackTrack.toApiTrack(): ApiTrack =
+        ApiTrack(id, title, artist, album, originalFilename, mediaType, durationSeconds, null, null)
+
+    /** The currently playing track resolved to a full library [ApiTrack] when possible. */
+    private fun currentApiTrack(): ApiTrack? =
+        Playback.currentTrack?.let { pb -> tracks.firstOrNull { it.id == pb.id } ?: pb.toApiTrack() }
+
+    private fun updateMiniArtwork(track: PlaybackTrack?) {
         if (!::miniArtwork.isInitialized) return
         val nextId = track?.id
         if (miniArtworkTrackId == nextId) return
@@ -1715,7 +1686,18 @@ class MainActivity : Activity() {
         val artwork = if (track == null) {
             artTile("M", "Music", dp(46))
         } else {
-            artworkTile(track, track.title, track.displayArtist, dp(46))
+            val apiTrack = ApiTrack(
+                id = track.id,
+                title = track.title,
+                artist = track.artist,
+                album = track.album,
+                originalFilename = track.originalFilename,
+                mediaType = track.mediaType,
+                durationSeconds = track.durationSeconds,
+                sizeBytes = null,
+                createdAt = null
+            )
+            artworkTile(apiTrack, track.title, track.displayArtist, dp(46))
         }
         miniArtwork.addView(artwork, FrameLayout.LayoutParams(dp(46), dp(46)))
     }
@@ -1781,6 +1763,19 @@ class MainActivity : Activity() {
             offset += limit
         }
         return liked
+    }
+
+    private fun loadRecentPlays(): List<RecentPlay> {
+        val response = JSONObject(request("/tracks/recent?limit=60"))
+        val items = response.optJSONArray("items") ?: JSONArray()
+        val plays = mutableListOf<RecentPlay>()
+        for (index in 0 until items.length()) {
+            val item = items.optJSONObject(index) ?: continue
+            val trackJson = item.optJSONObject("track") ?: continue
+            val track = parseTrack(trackJson) ?: continue
+            plays += RecentPlay(track = track, playedAt = item.optCleanString("played_at"))
+        }
+        return plays
     }
 
     private fun loadAllPlaylists(): List<Playlist> {
@@ -2440,6 +2435,125 @@ class MainActivity : Activity() {
         }
     }
 
+    /// Compact 2-column quick-access grid of the most recently played tracks (artwork + title).
+    private fun recentTilesGrid(): View {
+        val tiles = recentlyPlayedTracks().take(8)
+        if (tiles.isEmpty()) return space(1, 1)
+        val grid = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(6), dp(16), dp(6))
+        }
+        var index = 0
+        while (index < tiles.size) {
+            val rowTracks = tiles.subList(index, minOf(index + 2, tiles.size))
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            rowTracks.forEachIndexed { position, track ->
+                row.addView(recentTileCard(track), LinearLayout.LayoutParams(0, dp(56), 1f).apply {
+                    leftMargin = if (position == 0) 0 else dp(5)
+                    rightMargin = if (position == 0) dp(5) else 0
+                    topMargin = dp(5)
+                })
+            }
+            if (rowTracks.size == 1) {
+                row.addView(space(1, 1), LinearLayout.LayoutParams(0, dp(56), 1f))
+            }
+            grid.addView(row, matchWrapParams())
+            index += 2
+        }
+        return grid
+    }
+
+    private fun recentTileCard(track: ApiTrack): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = rounded(Color.argb(20, 255, 255, 255), dp(10))
+            setOnClickListener { playTrack(track, recentlyPlayedTracks()) }
+            addView(artworkTile(track, track.title, track.displayArtist, dp(56)), LinearLayout.LayoutParams(dp(56), dp(56)))
+            addView(label(track.title, 12.5f, textColor, Typeface.BOLD).apply {
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(dp(8), 0, dp(8), 0)
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+    }
+
+    private fun albumShelf(title: String, shelfAlbums: List<Album>): View {
+        if (shelfAlbums.isEmpty()) return space(1, 1)
+        val section = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(8), 0, dp(8))
+        }
+        section.addView(sectionTitle(title).withHorizontalPagePadding())
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(16), 0, dp(16), 0)
+        }
+        shelfAlbums.take(12).forEach { album ->
+            row.addView(albumShelfCard(album), LinearLayout.LayoutParams(dp(142), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                rightMargin = dp(14)
+            })
+        }
+        section.addView(horizontalScroll(row), matchWrapParams())
+        return section
+    }
+
+    private fun albumShelfCard(album: Album): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setOnClickListener {
+                selectedAlbumId = album.id
+                selectedTab = MusicTab.Albums
+                render()
+            }
+            addView(artworkTile(album.tracks.firstOrNull(), album.title, album.artist, dp(142)), LinearLayout.LayoutParams(dp(142), dp(142)))
+            addView(label(album.title, 14f, textColor, Typeface.BOLD).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(0, dp(8), 0, 0)
+            }, matchWrapParams())
+            addView(label("${album.artist} · ${album.tracks.size} songs", 12f, mutedColor, Typeface.NORMAL).singleLineEnd(), matchWrapParams())
+        }
+    }
+
+    private fun playlistShelf(title: String, shelfPlaylists: List<Playlist>): View {
+        if (shelfPlaylists.isEmpty()) return space(1, 1)
+        val section = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(8), 0, dp(8))
+        }
+        section.addView(sectionTitle(title).withHorizontalPagePadding())
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(16), 0, dp(16), 0)
+        }
+        shelfPlaylists.take(10).forEach { playlist ->
+            row.addView(playlistShelfCard(playlist), LinearLayout.LayoutParams(dp(132), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                rightMargin = dp(14)
+            })
+        }
+        section.addView(horizontalScroll(row), matchWrapParams())
+        return section
+    }
+
+    private fun playlistShelfCard(playlist: Playlist): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setOnClickListener {
+                selectedPlaylistId = playlist.id
+                selectedTab = MusicTab.Playlists
+                render()
+            }
+            addView(artTile(playlist.name, "Playlist", dp(132)), LinearLayout.LayoutParams(dp(132), dp(132)))
+            addView(label(playlist.name, 14f, textColor, Typeface.BOLD).apply {
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(0, dp(8), 0, 0)
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)))
+            addView(label(playlist.trackCountText, 12f, mutedColor, Typeface.NORMAL).singleLineEnd(), matchWrapParams())
+        }
+    }
+
     private fun recommendedTracks(): List<ApiTrack> {
         val likedArtists = tracks
             .filter { likedTrackIds.contains(it.id) }
@@ -2447,6 +2561,58 @@ class MainActivity : Activity() {
             .toSet()
         val personalized = tracks.filter { it.displayArtist in likedArtists && !likedTrackIds.contains(it.id) }
         return (personalized + tracks).distinctBy { it.id }.take(24)
+    }
+
+    /// Distinct most-recently-played tracks, remapped onto the current library.
+    private fun recentlyPlayedTracks(): List<ApiTrack> {
+        val byId = tracks.associateBy { it.id }
+        val seen = LinkedHashSet<String>()
+        val ordered = mutableListOf<ApiTrack>()
+        recentPlayEvents.forEach { event ->
+            if (seen.add(event.track.id)) ordered += (byId[event.track.id] ?: event.track)
+        }
+        return ordered.take(30)
+    }
+
+    /// "Jump back in": albums you played 1–21 days ago (not today), distinct, minus the fresh
+    /// tiles at the top of the recently-played grid so the two shelves don't echo each other.
+    private fun jumpBackInAlbums(): List<Album> {
+        val albumByTrackId = HashMap<String, Album>()
+        albums.forEach { album -> album.tracks.forEach { albumByTrackId[it.id] = album } }
+        val freshIds = recentlyPlayedTracks().take(8).map { it.id }.toSet()
+        val now = System.currentTimeMillis()
+        val seenAlbums = LinkedHashSet<String>()
+        val result = mutableListOf<Album>()
+        recentPlayEvents.forEach { event ->
+            val playedAt = event.playedAt?.let { parseIsoMillis(it) } ?: return@forEach
+            val age = now - playedAt
+            if (age < DAY_MS || age > 21L * DAY_MS) return@forEach
+            if (freshIds.contains(event.track.id)) return@forEach
+            val album = albumByTrackId[event.track.id] ?: return@forEach
+            if (seenAlbums.add(album.id)) result += album
+        }
+        return result.take(12)
+    }
+
+    private fun albumsFeaturingLikedTracks(): List<Album> {
+        return albums
+            .map { album -> album to album.tracks.count { likedTrackIds.contains(it.id) } }
+            .filter { it.second > 0 }
+            .sortedWith(compareByDescending<Pair<Album, Int>> { it.second }
+                .thenBy { it.first.title.lowercase(Locale.getDefault()) })
+            .map { it.first }
+            .take(12)
+    }
+
+    private fun parseIsoMillis(value: String): Long? {
+        return runCatching {
+            val trimmed = value.trim()
+            val normalized = if (trimmed.endsWith("Z")) trimmed.dropLast(1) + "+0000"
+            else trimmed.replace(Regex("([+-]\\d{2}):(\\d{2})$"), "$1$2")
+            val withoutFraction = normalized.replace(Regex("\\.\\d+"), "")
+            val format = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ", Locale.US)
+            format.parse(withoutFraction)?.time
+        }.getOrNull()
     }
 
     private fun recentlyAddedTracks(): List<ApiTrack> {
