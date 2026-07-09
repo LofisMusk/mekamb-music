@@ -24,7 +24,9 @@ from app.core.runtime import prepare_runtime
 from app.db.session import check_database, init_db
 from app.downloads.qbittorrent import check_qbittorrent
 from app.imports.queue import check_redis
+from app.workers.audio_feature_worker import run_feature_extraction_loop
 from app.workers.cache_cleanup import run_cleanup_loop
+from app.workers.collaborative_filtering_worker import run_collaborative_recompute_loop
 
 
 @asynccontextmanager
@@ -34,14 +36,21 @@ async def lifespan(app: FastAPI):
 
     # Cache TTL cleanup jako background asyncio task
     cleanup_task = asyncio.create_task(run_cleanup_loop())
+    # Automatyczna ekstrakcja cech audio dla nowych/przestarzalych trackow
+    feature_task = asyncio.create_task(run_feature_extraction_loop())
+    # Cross-userowy recompute sasiadow trackow (collaborative filtering)
+    collab_task = asyncio.create_task(run_collaborative_recompute_loop())
 
     yield
 
     cleanup_task.cancel()
-    try:
-        await cleanup_task
-    except asyncio.CancelledError:
-        pass
+    feature_task.cancel()
+    collab_task.cancel()
+    for task in (cleanup_task, feature_task, collab_task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 WEB_ROOT = Path(__file__).parent / "web"

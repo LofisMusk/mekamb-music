@@ -165,11 +165,22 @@ class TrackAudioFeature(Base):
     spectral_centroid: Mapped[float | None] = mapped_column(Float)
     mfcc: Mapped[list[float]] = mapped_column(JSON, default=list, nullable=False)
     mood_tags: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # ── v2 richer embedding fields (nullable for backward compatibility) ──────
+    chroma_vector: Mapped[list[float] | None] = mapped_column(JSON)
+    mfcc_delta: Mapped[list[float] | None] = mapped_column(JSON)
+    spectral_contrast: Mapped[list[float] | None] = mapped_column(JSON)
+    spectral_rolloff: Mapped[float | None] = mapped_column(Float)
+    spectral_bandwidth: Mapped[float | None] = mapped_column(Float)
+    zero_crossing_rate: Mapped[float | None] = mapped_column(Float)
+    harmonic_percussive_ratio: Mapped[float | None] = mapped_column(Float)
     extractor: Mapped[str] = mapped_column(String(64), default="local", nullable=False)
     features_version: Mapped[str] = mapped_column(String(32), default="v1", nullable=False)
     extracted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
     def vector(self) -> list[float]:
+        """Legacy convenience accessor — the recommendation engine's actual scoring
+        path builds its own version-aware fixed-length vector. Kept for callers that
+        want the raw v1 scalar/mfcc values."""
         values: list[float] = []
         values.extend(float(value) for value in (self.mfcc or [])[:13])
         values.extend(
@@ -177,6 +188,24 @@ class TrackAudioFeature(Base):
             for value in (self.tempo, self.energy, self.chroma, self.spectral_centroid)
         )
         return values
+
+
+class TrackNeighbor(Base):
+    __tablename__ = "track_neighbors"
+    __table_args__ = (
+        UniqueConstraint("track_id", "neighbor_track_id", name="uq_track_neighbors_pair"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    track_id: Mapped[UUID] = mapped_column(ForeignKey("tracks.id"), nullable=False, index=True)
+    neighbor_track_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tracks.id"), nullable=False, index=True
+    )
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    co_play_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
 
 
 class PlaybackState(Base):
