@@ -90,6 +90,19 @@ class Settings(BaseSettings):
     # ── Redis search cache ───────────────────────────────────────────────────
     search_cache_ttl_seconds: int = 300
 
+    # ── Accounts / authentication ─────────────────────────────────────────────
+    # Email/username/password auth layered on top of the legacy bearer tokens.
+    # New signups land in `pending` and cannot authenticate until an admin
+    # approves them; claiming a legacy token auto-approves (the token proves
+    # prior authorization) and inherits that token's api_key_id so the user's
+    # library, liked songs, plays and playback all carry over unchanged.
+    registration_enabled: bool = True
+    admin_emails: str = ""  # comma-separated emails auto-approved as admins on register/claim
+    auth_session_ttl_days: int = 90
+    password_min_length: int = 8
+    auth_login_rate_limit: int = 10  # failed attempts per identifier within the window
+    auth_login_rate_window_seconds: int = 300
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings()

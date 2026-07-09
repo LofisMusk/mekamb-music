@@ -3,8 +3,10 @@ from fastapi import Depends, Header, HTTPException, status
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.service import identity_for, resolve_session_token
 from app.core.auth import ApiKeyIdentity, match_bearer_token
 from app.core.config import settings
+from app.db.models import User
 from app.db.session import get_session
 from app.downloads.qbittorrent import QBittorrentDownloader
 from app.downloads.service import DownloadService
@@ -19,19 +21,77 @@ from app.sources.personal_1337x import Personal1337xProvider
 from app.sources.piratebay import PirateBayProvider
 
 
-async def require_token(authorization: str | None = Header(default=None)) -> ApiKeyIdentity:
-    api_key = match_bearer_token(settings, authorization)
-    if api_key is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid bearer token.",
-        )
-    return api_key
-
-
 async def db_session() -> AsyncIterator[AsyncSession]:
     async for session in get_session():
         yield session
+
+
+def _extract_bearer(authorization: str | None) -> str | None:
+    if not authorization:
+        return None
+    parts = authorization.strip().split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    token = parts[1].strip()
+    return token or None
+
+
+async def require_token(
+    authorization: str | None = Header(default=None),
+    session: AsyncSession = Depends(db_session),
+) -> ApiKeyIdentity:
+    """Resolve a request to a data-scope identity (``api_key_id``).
+
+    Two auth schemes are accepted in parallel so existing clients keep working:
+      1. Legacy raw ``API_TOKEN(S)`` bearer tokens (matched without a DB hit).
+      2. Session tokens issued by ``/auth/login`` — resolved to an *approved*
+         user; pending/rejected/disabled accounts never resolve, so an
+         unapproved account can never reach a protected endpoint.
+    """
+    api_key = match_bearer_token(settings, authorization)
+    if api_key is not None:
+        return api_key
+
+    token = _extract_bearer(authorization)
+    if token is not None:
+        user = await resolve_session_token(session, token)
+        if user is not None:
+            return identity_for(user)
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Missing or invalid bearer token.",
+    )
+
+
+async def current_user(
+    authorization: str | None = Header(default=None),
+    session: AsyncSession = Depends(db_session),
+) -> User | None:
+    """The logged-in account for a session token, or ``None`` for legacy raw
+    tokens (which authenticate for data access but have no account row)."""
+    token = _extract_bearer(authorization)
+    if token is None:
+        return None
+    return await resolve_session_token(session, token)
+
+
+async def require_user(user: User | None = Depends(current_user)) -> User:
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="This endpoint requires a logged-in account.",
+        )
+    return user
+
+
+async def require_admin(user: User = Depends(require_user)) -> User:
+    if not user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required.",
+        )
+    return user
 
 
 def personal_1337x_provider() -> Personal1337xProvider:

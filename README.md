@@ -15,9 +15,22 @@ then imports completed audio files into a persistent local library.
 docker compose up --build
 ```
 
-The API listens on `http://localhost:8000`.
-Open `http://localhost:8000/` for a very small browser frontend that uses the
-same API token and calls the backend directly.
+The API listens on `http://localhost:8000`. Clients are the native mobile and
+desktop apps; there is no browser frontend.
+
+## Accounts
+
+Users authenticate with email/username + password. Register via
+`POST /auth/register` (new accounts are `pending` and cannot log in until an
+admin approves them), then `POST /auth/login` with either the email or username.
+Emails in `ADMIN_EMAILS` are bootstrapped as approved admins so the first admin
+can get in; admins approve/reject/disable accounts under `/admin/users`.
+
+Existing token-based users migrate without losing data via
+`POST /auth/claim-token` (the "I have a token" flow): supplying a valid
+`API_TOKEN(S)` value creates an approved account that inherits that token's data
+scope, so the library, liked songs, plays, playlists and playback all carry over.
+Raw API tokens keep authenticating in parallel, so a hard cutover isn't required.
 
 ## Native iOS App
 

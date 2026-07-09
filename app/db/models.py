@@ -300,3 +300,67 @@ class PlaylistTrack(Base):
     track_id: Mapped[UUID] = mapped_column(ForeignKey("tracks.id"), nullable=False, index=True)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class User(Base):
+    """An account that authenticates with email/username + password.
+
+    ``api_key_id`` is the data-scope key shared with the legacy bearer-token
+    system: every personal row (liked tracks, plays, personalization signals,
+    playlists, playback state, sync actions) is scoped by this string, so a user
+    who claims an existing token simply inherits that token's ``api_key_id`` and
+    keeps all their data. Fresh signups get a brand-new unique ``api_key_id``.
+
+    New accounts are created ``pending`` and cannot obtain a working session
+    until an admin approves them — token-claim accounts are created ``approved``
+    because possession of a valid token already proves authorization.
+    """
+
+    __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("email_normalized", name="uq_users_email_normalized"),
+        UniqueConstraint("username_normalized", name="uq_users_username_normalized"),
+        UniqueConstraint("api_key_id", name="uq_users_api_key_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    email_normalized: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
+    username: Mapped[str] = mapped_column(String(64), nullable=False)
+    username_normalized: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    api_key_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False, index=True)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approved_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": str(self.id),
+            "email": self.email,
+            "username": self.username,
+            "status": self.status,
+            "is_admin": self.is_admin,
+            "created_at": self.created_at.isoformat(),
+            "approved_at": self.approved_at.isoformat() if self.approved_at else None,
+        }
+
+
+class UserSession(Base):
+    """A server-side session issued on login. Only the SHA-256 of the opaque
+    bearer token is stored, so a database leak never exposes live sessions.
+    Deleting the row (logout) or the owning user losing ``approved`` status
+    revokes access on the very next request."""
+
+    __tablename__ = "user_sessions"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    device_name: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
