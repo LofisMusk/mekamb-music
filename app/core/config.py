@@ -68,6 +68,25 @@ class Settings(BaseSettings):
     gemini_timeout_seconds: float = 8.0
     gemini_rerank_cache_ttl_seconds: int = 3600
 
+    # ── Automatic audio feature extraction ───────────────────────────────────
+    audio_feature_worker_interval_seconds: int = 60
+    audio_feature_batch_size: int = 25
+    audio_feature_current_version: str = "v2"
+    audio_feature_enable_hpss: bool = True
+
+    # ── Cross-user collaborative filtering (item-item co-occurrence) ──────────
+    collaborative_recompute_interval_seconds: int = 21_600
+    collaborative_session_gap_minutes: int = 30
+    collaborative_cooccurrence_window: int = 3
+    collaborative_top_k: int = 30
+    collaborative_like_cooccurrence_bonus: float = 0.5
+    recommendation_collaborative_weight: float = 20.0
+    collaborative_max_session_tracks: int = 200
+
+    # ── Session-aware sequencing (arc ordering + explore/exploit discovery) ───
+    recommendation_discovery_slot_ratio: float = 0.2
+    recommendation_sequencing_enabled: bool = True
+
     # ── Redis search cache ───────────────────────────────────────────────────
     search_cache_ttl_seconds: int = 300
 

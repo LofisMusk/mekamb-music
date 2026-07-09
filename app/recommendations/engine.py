@@ -5,7 +5,7 @@ import math
 import random
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
@@ -20,6 +20,7 @@ from app.db.models import (
     PersonalizationSignal,
     Track,
     TrackAudioFeature,
+    TrackNeighbor,
     TrackPlay,
 )
 from app.recommendations.gemini import (
@@ -208,6 +209,7 @@ class RecommendationEngine:
 
         features = await self._features_by_track_ids([seed.id, *(track.id for track in candidates)])
         profile = await self._personalization_profile()
+        neighbors = await self._collaborative_neighbors(seed.id, [c.id for c in candidates])
         scored = [
             _score_track_against_seed(
                 seed,
@@ -215,12 +217,21 @@ class RecommendationEngine:
                 seed_feature=features.get(seed.id),
                 candidate_feature=features.get(candidate.id),
                 profile=profile,
+                collaborative_neighbor=neighbors.get(candidate.id),
             )
             for candidate in candidates
         ]
         ranked = sorted(scored, key=lambda item: item.score, reverse=True)
         # Unlike one-shot recommendations, radio must keep playing even when nothing
         # scores positively (tiny library, no metadata overlap) — so no score>0 filter.
+        if settings.recommendation_sequencing_enabled:
+            return _sequence_autoplay_batch(
+                ranked,
+                limit=limit,
+                features_by_track_id=features,
+                profile=profile,
+                max_per_artist=3,
+            )
         return _diversify_recommendations(ranked, limit=limit, max_per_artist=3)
 
     async def _recently_played_track_ids(self, *, hours: int = 3) -> set[UUID]:
@@ -350,6 +361,7 @@ class RecommendationEngine:
         )
         features = await self._features_by_track_ids([seed.id, *(track.id for track in tracks)])
         profile = await self._personalization_profile()
+        neighbors = await self._collaborative_neighbors(seed.id, [track.id for track in tracks])
         scored = [
             _score_track_against_seed(
                 seed,
@@ -357,6 +369,7 @@ class RecommendationEngine:
                 seed_feature=features.get(seed.id),
                 candidate_feature=features.get(candidate.id),
                 profile=profile,
+                collaborative_neighbor=neighbors.get(candidate.id),
             )
             for candidate in tracks
         ]
@@ -418,6 +431,24 @@ class RecommendationEngine:
             select(TrackAudioFeature).where(TrackAudioFeature.track_id.in_(unique_ids))
         )
         return {row.track_id: row for row in rows}
+
+    async def _collaborative_neighbors(
+        self,
+        seed_id: UUID,
+        candidate_ids: list[UUID],
+    ) -> dict[UUID, TrackNeighbor]:
+        """Batch-fetch the global cross-user co-occurrence neighbors of ``seed_id``
+        that are among ``candidate_ids``. Keyed by ``neighbor_track_id``."""
+        unique_ids = list({track_id for track_id in candidate_ids})
+        if not unique_ids:
+            return {}
+        rows = await self.session.scalars(
+            select(TrackNeighbor).where(
+                TrackNeighbor.track_id == seed_id,
+                TrackNeighbor.neighbor_track_id.in_(unique_ids),
+            )
+        )
+        return {row.neighbor_track_id: row for row in rows}
 
     async def _maybe_gemini_rerank(
         self,
@@ -590,6 +621,7 @@ def _score_track_against_seed(
     profile: PersonalizationProfile | None = None,
     seed_vector: list[float] | None = None,
     candidate_vector: list[float] | None = None,
+    collaborative_neighbor: TrackNeighbor | None = None,
 ) -> LocalTrackRecommendation:
     score = 0.0
     reasons: list[str] = []
@@ -650,6 +682,10 @@ def _score_track_against_seed(
             score += min(10.0, profile.album_weights[album_key])
             reasons.append("album_interest")
 
+    if collaborative_neighbor is not None:
+        score += min(30.0, collaborative_neighbor.score * settings.recommendation_collaborative_weight)
+        reasons.append("collaborative_signal")
+
     score -= _recently_played_penalty(candidate, profile)
     return LocalTrackRecommendation(track=candidate, score=round(score, 2), reasons=reasons)
 
@@ -672,16 +708,44 @@ def _audio_similarity(
     return max(0.0, _cosine_similarity(seed_vector, candidate_vector))
 
 
+def _pad_to(values: object, length: int, *, scale: float = 1.0) -> list[float]:
+    """Coerce ``values`` into a fixed-length float list, zero-padding (or truncating)
+    to ``length``. ``None``/empty inputs become an all-zero vector of that length, so
+    v1 rows lacking the newer fields degrade gracefully instead of shrinking the vector."""
+    out = [float(value) * scale for value in (values or [])][:length]
+    while len(out) < length:
+        out.append(0.0)
+    return out
+
+
 def _normalized_audio_vector(feature: TrackAudioFeature) -> list[float]:
-    mfcc = list(feature.mfcc or [])[:13]
-    while len(mfcc) < 13:
-        mfcc.append(0.0)
+    """Version-aware, fixed-length (52-dim) embedding usable across v1 and v2 rows.
+
+    v1 rows (where the richer fields are ``None``/empty) zero-pad the new dimensions
+    so cosine similarity between any pair (v1-v1, v1-v2, v2-v2) stays well defined and
+    the earlier 17-dim scoring behavior is preserved for v1-v1 comparisons.
+    """
     return [
-        *(float(value) / 100.0 for value in mfcc),
+        *_pad_to(feature.mfcc, 13, scale=1.0 / 100.0),
+        *_pad_to(getattr(feature, "mfcc_delta", None), 13, scale=1.0 / 100.0),
+        *_pad_to(getattr(feature, "chroma_vector", None), 12),
+        *_pad_to(getattr(feature, "spectral_contrast", None), 7, scale=1.0 / 50.0),
         float(feature.tempo or 0.0) / 220.0,
         float(feature.energy or 0.0),
-        float(feature.chroma or 0.0),
+        # The scalar ``chroma`` mean is redundant with the 12-bin ``chroma_vector``
+        # above, so it is intentionally not folded in here (keeps the vector at 52 dims).
         float(feature.spectral_centroid or 0.0) / 8_000.0,
+        float(getattr(feature, "spectral_rolloff", None) or 0.0) / 8_000.0,
+        float(getattr(feature, "spectral_bandwidth", None) or 0.0) / 4_000.0,
+        float(getattr(feature, "zero_crossing_rate", None) or 0.0),
+        # A missing HPSS ratio contributes 0.0 (not the 1.0/4.0 "neutral" default) so that
+        # a fully-v1 row reduces exactly to the legacy 17-dim vector plus cosine-invariant
+        # zeros — keeping v1-v1 similarity identical to the pre-existing scoring behavior.
+        (
+            float(feature.harmonic_percussive_ratio) / 4.0
+            if getattr(feature, "harmonic_percussive_ratio", None) is not None
+            else 0.0
+        ),
     ]
 
 
@@ -796,6 +860,144 @@ def _diversify_recommendations(
         if len(selected) >= limit:
             break
     return selected
+
+
+# Personalization reasons that mark a track as "known" (exploit) rather than a fresh
+# discovery pick — a track carrying any of these has history and is not explore-eligible.
+_PERSONALIZATION_REASONS = frozenset(
+    {"artist_interest", "album_interest", "personal_signal", "collaborative_signal"}
+)
+
+
+def _sequence_autoplay_batch(
+    ranked: list[LocalTrackRecommendation],
+    *,
+    limit: int,
+    features_by_track_id: dict[UUID, TrackAudioFeature],
+    profile: PersonalizationProfile,
+    max_per_artist: int = 3,
+) -> list[LocalTrackRecommendation]:
+    """Session-aware sequencing for the autoplay radio.
+
+    Diversify into a padded pool (so there's slack for discovery picks and reordering),
+    reserve a fraction of the batch for cold "discovery" tracks (explore) alongside the
+    top personalized/content picks (exploit), then reorder into a rise-then-fall energy
+    arc. Used only by ``autoplay_queue`` — ``_diversify_recommendations`` is left untouched
+    for ``personalized_home``.
+    """
+    if limit <= 0:
+        return []
+
+    pool = _diversify_recommendations(
+        ranked,
+        limit=min(len(ranked), limit * 2),
+        max_per_artist=max_per_artist,
+    )
+
+    # ── Explore/exploit discovery slots ──────────────────────────────────────
+    discovery_slots = max(0, round(limit * settings.recommendation_discovery_slot_ratio))
+    chosen_discovery: list[LocalTrackRecommendation] = []
+    discovery_ids: set[UUID] = set()
+    if discovery_slots > 0:
+        for item in pool:  # pool is already in score order
+            if len(chosen_discovery) >= discovery_slots:
+                break
+            has_history = profile.track_weights.get(item.track.id, 0.0) != 0.0
+            has_personalization_reason = any(
+                reason in _PERSONALIZATION_REASONS for reason in item.reasons
+            )
+            if has_history or has_personalization_reason or item.score <= 0:
+                continue
+            # ``reasons`` lists aren't shared across items, but ``replace`` (frozen dataclass)
+            # is the clean, side-effect-free way to tag the discovery pick.
+            tagged = replace(item, reasons=[*item.reasons, "discovery"])
+            chosen_discovery.append(tagged)
+            discovery_ids.add(item.track.id)
+
+    # ── Final selection: reserved discovery picks + top exploit picks ─────────
+    # Merge approach: keep the discovery picks (already in score order), then fill the
+    # remaining slots from the non-discovery pool in score order. Concatenating in that
+    # order and re-sorting by score would drop the discovery items back down; instead we
+    # deliberately keep discovery items even if a higher-scored exploit item exists, since
+    # the slots are *reserved*. The result is then sorted by score so the batch as a whole
+    # is in descending-score order before arc reordering runs.
+    final_count = min(limit, len(pool))
+    selected: list[LocalTrackRecommendation] = list(chosen_discovery)
+    for item in pool:
+        if len(selected) >= final_count:
+            break
+        if item.track.id in discovery_ids:
+            continue
+        selected.append(item)
+    selected.sort(key=lambda item: item.score, reverse=True)
+
+    return _arc_order(selected, features_by_track_id=features_by_track_id)
+
+
+def _arc_order(
+    selected: list[LocalTrackRecommendation],
+    *,
+    features_by_track_id: dict[UUID, TrackAudioFeature],
+) -> list[LocalTrackRecommendation]:
+    """Reorder (never filter) ``selected`` into a rise-then-fall energy arc.
+
+    Position 0 (the top-ranked, seed-adjacent track) is fixed so the transition from the
+    just-played seed track stays smooth; the arc only shapes positions 1..N-1. Tracks with
+    no usable energy data keep their original relative position in the tail.
+    """
+    if len(selected) <= 2:
+        return selected
+
+    head = selected[0]
+    tail = selected[1:]
+
+    # Partition the tail into "has energy data" vs "no data" (preserving order).
+    has_data: list[LocalTrackRecommendation] = []
+    energies: list[float] = []
+    for item in tail:
+        feature = features_by_track_id.get(item.track.id)
+        if feature is not None and feature.energy is not None:
+            has_data.append(item)
+            energies.append(float(feature.energy))
+
+    m = len(has_data)
+    if m == 0:
+        return selected
+
+    low = min(energies)
+    high = max(energies)
+    if high == low:
+        # All energies equal — no meaningful arc; leave the tail in original order.
+        return selected
+
+    energy_position = [(value - low) / (high - low) for value in energies]
+
+    # Target rise-then-fall shape: sin peaks in the middle, avoiding the degenerate
+    # sin(0)=0 endpoints by offsetting the sampled positions.
+    targets = [math.sin(math.pi * (i + 1) / (m + 1)) for i in range(m)]
+
+    # Greedy nearest-fit: for each arc position, take the remaining has-data track whose
+    # normalized energy is closest to the target. O(M^2), fine at M <= 50.
+    remaining = list(range(m))
+    arc_ordered: list[LocalTrackRecommendation] = []
+    for target in targets:
+        best_idx = min(remaining, key=lambda idx: abs(energy_position[idx] - target))
+        arc_ordered.append(has_data[best_idx])
+        remaining.remove(best_idx)
+
+    # Re-interleave no-data tracks at their original tail slots: walk the original tail,
+    # substituting the next arc-ordered has-data track wherever a has-data track sat, and
+    # keeping no-data tracks in place (preserves no-data tracks' relative order).
+    has_data_ids = {item.track.id for item in has_data}
+    arc_iter = iter(arc_ordered)
+    reordered_tail: list[LocalTrackRecommendation] = []
+    for item in tail:
+        if item.track.id in has_data_ids:
+            reordered_tail.append(next(arc_iter))
+        else:
+            reordered_tail.append(item)
+
+    return [head, *reordered_tail]
 
 
 def _build_daily_mixes(

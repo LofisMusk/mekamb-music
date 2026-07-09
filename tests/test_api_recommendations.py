@@ -62,6 +62,46 @@ def test_autoplay_returns_continuation_and_forwards_params():
     assert call["limit"] == 2
 
 
+def test_autoplay_endpoint_response_includes_discovery_reason_when_applicable():
+    # NOTE: the API test harness uses a fake engine (seeding real audio-feature /
+    # personalization data through the DB layer here is impractical), so we exercise the
+    # sequencing-tagged reason at the schema boundary: the engine returns a track carrying
+    # "discovery" (as Pillar 3's _sequence_autoplay_batch does), and we assert the endpoint
+    # (1) still validates against the unchanged AutoplayQueueResponse schema and
+    # (2) preserves the discovery tag + keeps reasons a list of strings (backward compat).
+    from app.api.schemas import AutoplayQueueResponse
+
+    seed = FakeTrack()
+    cold = FakeTrack()
+    warm = FakeTrack()
+
+    class DiscoveryEngine(FakeAutoplayEngine):
+        async def autoplay_queue(self, seed_track_id, *, exclude_track_ids, limit):
+            if seed_track_id != self.seed.id:
+                raise LookupError(f"Track {seed_track_id} not found.")
+            return [
+                LocalTrackRecommendation(
+                    track=cold, score=10.0, reasons=["audio_similarity", "discovery"]
+                ),
+                LocalTrackRecommendation(track=warm, score=9.0, reasons=["artist_interest"]),
+            ]
+
+    engine = DiscoveryEngine(seed, [cold, warm])
+    try:
+        response = _client(engine).get(f"/recommendations/autoplay?seed_track_id={seed.id}&limit=2")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    # Backward compatibility: response still validates against the unchanged schema.
+    validated = AutoplayQueueResponse.model_validate(payload)
+    for item in validated.tracks:
+        assert isinstance(item.reasons, list)
+        assert all(isinstance(reason, str) for reason in item.reasons)
+    assert any("discovery" in item.reasons for item in validated.tracks)
+
+
 def test_autoplay_missing_seed_returns_404():
     engine = FakeAutoplayEngine(FakeTrack(), [])
     try:

@@ -165,8 +165,15 @@ async def extract_track_audio_features(
     row.spectral_centroid = extracted.spectral_centroid
     row.mfcc = extracted.mfcc
     row.mood_tags = extracted.mood_tags
+    row.chroma_vector = extracted.chroma_vector
+    row.mfcc_delta = extracted.mfcc_delta
+    row.spectral_contrast = extracted.spectral_contrast
+    row.spectral_rolloff = extracted.spectral_rolloff
+    row.spectral_bandwidth = extracted.spectral_bandwidth
+    row.zero_crossing_rate = extracted.zero_crossing_rate
+    row.harmonic_percussive_ratio = extracted.harmonic_percussive_ratio
     row.extractor = "librosa"
-    row.features_version = "v1"
+    row.features_version = settings.audio_feature_current_version
     row.extracted_at = utcnow()
     await session.commit()
     await session.refresh(row)
