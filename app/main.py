@@ -6,22 +6,22 @@ from fastapi import FastAPI, Response, status
 from app.api.routes import (
     admin,
     auth,
-    downloads,
+    catalog,
     imports,
+    libraries,
     library,
     playback,
     playlists,
     recommendations,
-    sources,
     sync,
     tracks,
 )
 from app.api.schemas import HealthResponse, ReadinessResponse
+from app.catalog.lidarr_client import check_lidarr
 from app.core.config import settings
 from app.core.readiness import collect_readiness
 from app.core.runtime import prepare_runtime
 from app.db.session import check_database, init_db
-from app.downloads.qbittorrent import check_qbittorrent
 from app.imports.queue import check_redis
 from app.workers.audio_feature_worker import run_feature_extraction_loop
 from app.workers.cache_cleanup import run_cleanup_loop
@@ -55,14 +55,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
 app.include_router(admin.router, prefix="/admin", tags=["admin"])
-app.include_router(sources.router, prefix="/sources", tags=["sources"])
+app.include_router(catalog.router, prefix="/catalog", tags=["catalog"])
 app.include_router(sync.router, prefix="/sync", tags=["sync"])
 app.include_router(imports.router, prefix="/imports", tags=["imports"])
-app.include_router(downloads.router, prefix="/downloads", tags=["downloads"])
 app.include_router(recommendations.router, prefix="/recommendations", tags=["recommendations"])
 app.include_router(tracks.router, prefix="/tracks", tags=["tracks"])
 app.include_router(playback.router, prefix="/playback", tags=["playback"])
 app.include_router(playlists.router, prefix="/playlists", tags=["playlists"])
+app.include_router(libraries.router, prefix="/libraries", tags=["libraries"])
 app.include_router(library.router, prefix="/library", tags=["library"])
 
 
@@ -77,7 +77,7 @@ async def readiness(response: Response) -> ReadinessResponse:
         settings,
         database_check=check_database,
         redis_check=lambda: check_redis(settings),
-        torrent_client_check=lambda: check_qbittorrent(settings),
+        lidarr_check=lambda: check_lidarr(settings),
     )
     if readiness_payload["status"] != "ready":
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE

@@ -66,23 +66,15 @@ class MainActivity : Activity() {
 
     private enum class SearchMode(val label: String) {
         Library("Library"),
-        Torrent("Torrent"),
-        Indexers("Indexers");
+        Catalog("Add Music");
 
         val searchesRemoteSources: Boolean
-            get() = this == Torrent || this == Indexers
+            get() = this == Catalog
     }
 
-    private enum class TorrentSource(val raw: String, val importPath: String) {
-        PirateBay("piratebay", "/imports/piratebay"),
-        ThirteenThirtySevenX("1337x", "/imports/1337x"),
-        Indexer("indexer", "/imports/indexer");
-
-        companion object {
-            fun from(raw: String?): TorrentSource {
-                return entries.firstOrNull { it.raw == raw } ?: PirateBay
-            }
-        }
+    private enum class CatalogKind(val raw: String, val label: String) {
+        Artist("artist", "Artists"),
+        Album("album", "Albums")
     }
 
     private data class ApiTrack(
@@ -116,18 +108,42 @@ class MainActivity : Activity() {
         val trackCountText: String get() = if (tracks.size == 1) "1 song" else "${tracks.size} songs"
     }
 
-    private data class TorrentResult(
+    private data class CatalogItem(
+        val kind: String,
+        val foreignId: String,
+        val title: String,
+        val artist: String?,
+        val artistForeignId: String?,
+        val disambiguation: String?,
+        val year: Int?
+    ) {
+        val id: String get() = "$kind:$foreignId"
+        val subtitle: String
+            get() = listOfNotNull(
+                artist?.takeIf { it.isNotBlank() },
+                year?.toString(),
+                disambiguation?.takeIf { it.isNotBlank() }
+            ).joinToString(" · ")
+    }
+
+    private data class CatalogRequestItem(
+        val id: String,
+        val kind: String,
+        val foreignId: String,
+        val title: String,
+        val status: String
+    )
+
+    private data class LibrarySummary(
+        val id: String,
         val name: String,
-        val torrentId: String,
-        val source: TorrentSource,
-        val infoHash: String?,
-        val magnetLink: String?,
-        val sourceUrl: String?,
-        val seeders: String?,
-        val leechers: String?,
-        val sizeBytes: Long?,
-        val sizeLabel: String?,
-        val uploader: String?
+        val trackCount: Int
+    )
+
+    private data class LibraryDetail(
+        val id: String,
+        val name: String,
+        val tracks: List<ApiTrack>
     )
 
     private data class OfflineRecord(
@@ -204,7 +220,11 @@ class MainActivity : Activity() {
     private var likedTrackIds: Set<String> = emptySet()
     // Play-history feed from GET /tracks/recent (newest first), driving the home shelves.
     private var recentPlayEvents: List<RecentPlay> = emptyList()
-    private var torrents: List<TorrentResult> = emptyList()
+    private var catalogItems: List<CatalogItem> = emptyList()
+    private var catalogKind: CatalogKind = CatalogKind.Artist
+    private var catalogRequests: List<CatalogRequestItem> = emptyList()
+    private var addedCatalogIds: Set<String> = emptySet()
+    private var libraries: List<LibrarySummary> = emptyList()
     private var offlineRecords: MutableMap<String, OfflineRecord> = mutableMapOf()
     private var offlineTrackIds: Set<String> = emptySet()
     private var downloadingTrackIds: Set<String> = emptySet()
@@ -260,6 +280,8 @@ class MainActivity : Activity() {
         render()
         mainHandler.post(progressTick)
         refreshLibrary()
+        loadLibraries()
+        loadCatalogRequests()
     }
 
     private fun requestNotificationPermissionIfNeeded() {
@@ -334,7 +356,7 @@ class MainActivity : Activity() {
         searchRow.addView(searchInput, LinearLayout.LayoutParams(0, dp(46), 1f))
         searchRow.addView(iconButton("×", primary = false) {
             searchInput.setText("")
-            torrents = emptyList()
+            catalogItems = emptyList()
             searchMode = SearchMode.Library
             render()
         }, LinearLayout.LayoutParams(dp(34), dp(34)))
@@ -671,7 +693,7 @@ class MainActivity : Activity() {
 
     private fun handleSearch() {
         if (searchMode.searchesRemoteSources) {
-            searchSources()
+            searchCatalog()
         } else {
             render()
         }
@@ -691,7 +713,7 @@ class MainActivity : Activity() {
         }
         searchHeader.visibility = if (showsSearchHeader()) View.VISIBLE else View.GONE
         if (searchMode.searchesRemoteSources) {
-            renderSources()
+            renderCatalog()
         } else {
             when (selectedTab) {
                 MusicTab.Library -> renderLibrary()
@@ -726,7 +748,7 @@ class MainActivity : Activity() {
                     if (tab != MusicTab.Search) {
                         searchMode = SearchMode.Library
                         searchInput.setText("")
-                        torrents = emptyList()
+                        catalogItems = emptyList()
                     }
                     selectedAlbumId = null
                     selectedPlaylistId = null
@@ -793,7 +815,7 @@ class MainActivity : Activity() {
             background = rounded(if (searchMode == mode) accentAltColor else Color.argb(28, 255, 255, 255), dp(10))
             setOnClickListener {
                 searchMode = mode
-                if (!mode.searchesRemoteSources) torrents = emptyList()
+                if (!mode.searchesRemoteSources) catalogItems = emptyList()
                 handleSearch()
             }
         }
@@ -801,8 +823,8 @@ class MainActivity : Activity() {
 
     private fun updateSearchHint() {
         searchInput.hint = when {
-            searchMode == SearchMode.Torrent -> "Search torrents..."
-            searchMode == SearchMode.Indexers -> "Search indexers..."
+            searchMode == SearchMode.Catalog ->
+                if (catalogKind == CatalogKind.Artist) "Add an artist..." else "Add an album..."
             selectedTab == MusicTab.Albums -> "Search albums..."
             selectedTab == MusicTab.Playlists -> "Search playlists..."
             selectedTab == MusicTab.Settings -> "Search is disabled in settings"
@@ -1127,6 +1149,38 @@ class MainActivity : Activity() {
         dialog.window?.setLayout((resources.displayMetrics.widthPixels * 0.9f).roundToInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
     }
 
+    private fun showCreateLibraryDialog() {
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+            background = rounded(elevatedColor, dp(22), strokeColor, 1)
+        }
+        box.addView(label("New Library", 20f, textColor, Typeface.BOLD), matchWrapParams())
+        val nameField = editField("Library name", "", false)
+        box.addView(nameField, fieldParams())
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        actions.addView(button("Cancel", primary = false) { dialog.dismiss() }, LinearLayout.LayoutParams(0, dp(44), 1f).apply {
+            rightMargin = dp(6)
+        })
+        actions.addView(button("Create") {
+            val name = nameField.text.toString()
+            dialog.dismiss()
+            createLibrary(name)
+        }, LinearLayout.LayoutParams(0, dp(44), 1f).apply {
+            leftMargin = dp(6)
+        })
+        box.addView(actions, matchWrapParams())
+        dialog.setContentView(box)
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.show()
+        dialog.window?.setLayout((resources.displayMetrics.widthPixels * 0.9f).roundToInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
+    }
+
     private fun showPlaylistPicker(track: ApiTrack, sourcePlaylist: Playlist?) {
         val dialog = Dialog(this)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
@@ -1167,6 +1221,22 @@ class MainActivity : Activity() {
             })
         }
 
+        box.addView(label("My Libraries", 15f, textColor, Typeface.BOLD), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(14)
+        })
+        box.addView(button("Create new library", primary = false) {
+            dialog.dismiss()
+            showCreateLibraryDialog()
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)).apply { topMargin = dp(6) })
+        libraries.forEach { library ->
+            box.addView(button("Add to ${library.name}", primary = false) {
+                dialog.dismiss()
+                addTrackToLibrary(track, library.id)
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)).apply {
+                topMargin = dp(6)
+            })
+        }
+
         box.addView(button("Done", primary = true) { dialog.dismiss() }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply {
             topMargin = dp(12)
         })
@@ -1177,17 +1247,41 @@ class MainActivity : Activity() {
         dialog.window?.setLayout((resources.displayMetrics.widthPixels * 0.92f).roundToInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
     }
 
-    private fun renderSources() {
-        content.addView(sectionTitle(if (searchMode == SearchMode.Indexers) "Indexer Search" else "Torrent Search").withHorizontalPagePadding())
+    private fun renderCatalog() {
+        content.addView(sectionTitle("Add Music").withHorizontalPagePadding())
+
+        val kindRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(16), dp(2), dp(16), dp(8))
+        }
+        CatalogKind.entries.forEach { kind ->
+            val selected = catalogKind == kind
+            kindRow.addView(TextView(this).apply {
+                text = kind.label
+                gravity = Gravity.CENTER
+                textSize = 12f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(if (selected) Color.BLACK else mutedColor)
+                background = rounded(if (selected) accentAltColor else Color.argb(28, 255, 255, 255), dp(10))
+                setOnClickListener {
+                    catalogKind = kind
+                    searchCatalog()
+                }
+            }, LinearLayout.LayoutParams(0, dp(34), 1f).apply { leftMargin = dp(3); rightMargin = dp(3) })
+        }
+        content.addView(kindRow, matchWrapParams())
 
         if (searchInput.text.toString().trim().isEmpty()) {
-            content.addView(messageCard("Search for an artist, album, or track. Imports run on the FastAPI backend, just like the iOS app."))
+            content.addView(messageCard("Search an artist or album; Lidarr fetches it into the shared catalog and it appears in your library once imported."))
+        } else {
+            catalogItems.forEach { item -> content.addView(catalogRow(item)) }
         }
-        if (torrents.isEmpty()) {
-            return
-        }
-        torrents.forEach { torrent ->
-            content.addView(torrentRow(torrent))
+
+        if (catalogRequests.isNotEmpty()) {
+            content.addView(sectionTitle("Recent requests").withHorizontalPagePadding())
+            catalogRequests.take(12).forEach { req ->
+                content.addView(messageCard("${req.title} — ${req.status.replaceFirstChar { it.uppercase() }}"))
+            }
         }
     }
 
@@ -1195,9 +1289,7 @@ class MainActivity : Activity() {
         content.addView(sectionTitle("Backend"))
         content.addView(messageCard("Connect the Android app to your private Mekamb backend."))
         val endpointField = editField("API endpoint", apiEndpoint, false)
-        val prowlarrField = editField("Prowlarr API key for indexer search", prowlarrApiKey, true)
         content.addView(endpointField, fieldParams())
-        content.addView(prowlarrField, fieldParams())
         val buttons = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -1205,7 +1297,6 @@ class MainActivity : Activity() {
         buttons.addView(button("Save") {
             val previousEndpoint = apiEndpoint
             apiEndpoint = endpointField.text.toString().trim()
-            prowlarrApiKey = prowlarrField.text.toString().trim()
             if (previousEndpoint != apiEndpoint) {
                 clearArtworkState()
             }
@@ -1214,7 +1305,6 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { rightMargin = dp(4) })
         buttons.addView(button("Test", primary = false) {
             apiEndpoint = endpointField.text.toString().trim()
-            prowlarrApiKey = prowlarrField.text.toString().trim()
             testConnection()
         }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { leftMargin = dp(4) })
         content.addView(buttons, matchWrapParams())
@@ -1226,6 +1316,26 @@ class MainActivity : Activity() {
         })
 
         renderAccountSection()
+
+        content.addView(sectionTitle("My Libraries").withHorizontalPagePadding())
+        content.addView(messageCard("Personal libraries are curated subsets of the shared catalog. Add tracks from the track menu (≡)."))
+        content.addView(button("Create library", primary = false) {
+            showCreateLibraryDialog()
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply { topMargin = dp(6) })
+        libraries.forEach { library ->
+            val libRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+                background = rounded(surfaceColor, dp(16), strokeColor, 1)
+            }
+            val meta = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            meta.addView(label(library.name, 15f, textColor, Typeface.BOLD).singleLineEnd(), matchWrapParams())
+            meta.addView(label("${library.trackCount} tracks", 12f, mutedColor, Typeface.NORMAL), matchWrapParams())
+            libRow.addView(meta, weightParams(1f))
+            libRow.addView(iconText("🗑", mutedColor) { deleteLibrary(library.id) }, LinearLayout.LayoutParams(dp(36), dp(36)))
+            content.addView(libRow.withCardMargin())
+        }
 
         content.addView(sectionTitle("Playback Quality").withHorizontalPagePadding())
         val qualityRow = LinearLayout(this).apply {
@@ -1504,17 +1614,20 @@ class MainActivity : Activity() {
         return row.withCardMargin()
     }
 
-    private fun torrentRow(torrent: TorrentResult): View {
+    private fun catalogRow(item: CatalogItem): View {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(13), dp(14), dp(13))
             background = rounded(surfaceColor, dp(18), strokeColor, 1)
         }
-        row.addView(label(torrent.name, 16f, textColor, Typeface.BOLD).singleLineEnd(), matchWrapParams())
-        val size = torrent.sizeBytes?.let { formatBytes(it) } ?: torrent.sizeLabel ?: "unknown size"
-        val peers = "Seeders ${torrent.seeders ?: "0"} · Leechers ${torrent.leechers ?: "0"}"
-        row.addView(label("${torrent.source.raw} · $size · $peers", 13f, mutedColor, Typeface.NORMAL).singleLineEnd(), matchWrapParams())
-        row.addView(button("Import") { importTorrent(torrent) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)).apply {
+        row.addView(label(item.title, 16f, textColor, Typeface.BOLD).singleLineEnd(), matchWrapParams())
+        if (item.subtitle.isNotBlank()) {
+            row.addView(label(item.subtitle, 13f, mutedColor, Typeface.NORMAL).singleLineEnd(), matchWrapParams())
+        }
+        val added = addedCatalogIds.contains(item.id)
+        row.addView(button(if (added) "Added" else "Add") {
+            if (!added) addToCatalog(item)
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)).apply {
             topMargin = dp(10)
         })
         return row.withCardMargin()
@@ -1565,7 +1678,7 @@ class MainActivity : Activity() {
         )
     }
 
-    private fun searchSources() {
+    private fun searchCatalog() {
         val query = searchInput.text.toString().trim()
         if (!canUseApi()) {
             statusMessage = "Set the API endpoint and log in in Settings."
@@ -1573,58 +1686,113 @@ class MainActivity : Activity() {
             return
         }
         if (query.isEmpty()) {
-            torrents = emptyList()
+            catalogItems = emptyList()
             render()
             return
         }
         runIo(
             task = {
                 val encoded = encodeQuery(query)
-                val headers = if (searchMode == SearchMode.Indexers && prowlarrApiKey.isNotBlank()) {
-                    mapOf("X-Prowlarr-Api-Key" to prowlarrApiKey)
-                } else {
-                    emptyMap()
-                }
-                val path = if (searchMode == SearchMode.Indexers) {
-                    "/sources/indexers/search?q=$encoded"
-                } else {
-                    "/sources/search?q=$encoded"
-                }
-                val response = request(path, extraHeaders = headers)
+                val response = request("/catalog/search?kind=${catalogKind.raw}&q=$encoded")
                 val items = JSONObject(response).optJSONArray("items") ?: JSONArray()
-                parseTorrents(items).sortedByDescending { it.seeders?.toIntOrNull() ?: 0 }
+                parseCatalogItems(items)
             },
             success = { results ->
-                torrents = results
-                statusMessage = "Found ${results.size} source results."
+                catalogItems = results
+                statusMessage = "Found ${results.size} catalog results."
                 render()
             }
         )
     }
 
-    private fun importTorrent(torrent: TorrentResult) {
+    private fun addToCatalog(item: CatalogItem) {
         runIo(
             showLoading = false,
             task = {
-                if (torrent.source == TorrentSource.Indexer) {
-                    val infoHash = torrent.infoHash ?: throw ApiException("Indexer result is missing an info hash.")
-                    val magnetLink = torrent.magnetLink ?: throw ApiException("Indexer result is missing a magnet link.")
-                    val body = JSONObject()
-                        .put("name", torrent.name)
-                        .put("torrent_id", torrent.torrentId)
-                        .put("info_hash", infoHash)
-                        .put("magnet_link", magnetLink)
-                        .put("uploader", torrent.uploader)
-                        .put("source_url", torrent.sourceUrl)
-                        .toString()
-                    request(torrent.source.importPath, method = "POST", body = body)
-                } else {
-                    request("${torrent.source.importPath}/${encodePath(torrent.torrentId)}", method = "POST")
-                }
+                val body = JSONObject()
+                    .put("kind", item.kind)
+                    .put("foreign_id", item.foreignId)
+                    .put("title", item.title)
+                    .put("artist", item.artist)
+                    .put("artist_foreign_id", item.artistForeignId)
+                    .toString()
+                val response = request("/catalog/add", method = "POST", body = body)
+                parseCatalogRequests(JSONObject(response).optJSONArray("items") ?: JSONArray())
+            },
+            success = { requests ->
+                catalogRequests = requests
+                addedCatalogIds = addedCatalogIds + item.id
+                statusMessage = "Requested: ${item.title}"
+                render()
+            }
+        )
+    }
+
+    private fun loadCatalogRequests() {
+        if (!canUseApi()) return
+        runIo(
+            showLoading = false,
+            task = {
+                val response = request("/catalog/requests")
+                parseCatalogRequests(JSONObject(response).optJSONArray("items") ?: JSONArray())
+            },
+            success = { requests ->
+                catalogRequests = requests
+                render()
+            }
+        )
+    }
+
+    private fun loadLibraries() {
+        if (!canUseApi()) return
+        runIo(
+            showLoading = false,
+            task = {
+                val response = request("/libraries?limit=100")
+                parseLibraries(JSONObject(response).optJSONArray("items") ?: JSONArray())
+            },
+            success = { result ->
+                libraries = result
+                render()
+            }
+        )
+    }
+
+    private fun createLibrary(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty() || !canUseApi()) return
+        runIo(
+            task = {
+                val body = JSONObject().put("name", trimmed).toString()
+                request("/libraries", method = "POST", body = body)
             },
             success = {
-                statusMessage = "Import queued: ${torrent.name}"
-                render()
+                statusMessage = "Library created: $trimmed"
+                loadLibraries()
+            }
+        )
+    }
+
+    private fun addTrackToLibrary(track: ApiTrack, libraryId: String) {
+        runIo(
+            showLoading = false,
+            task = {
+                val body = JSONObject().put("track_id", track.id).toString()
+                request("/libraries/${encodePath(libraryId)}/tracks", method = "POST", body = body)
+            },
+            success = {
+                statusMessage = "Added ${track.title} to library."
+                loadLibraries()
+            }
+        )
+    }
+
+    private fun deleteLibrary(libraryId: String) {
+        runIo(
+            task = { request("/libraries/${encodePath(libraryId)}", method = "DELETE") },
+            success = {
+                statusMessage = "Library deleted."
+                loadLibraries()
             }
         )
     }
@@ -2389,24 +2557,47 @@ class MainActivity : Activity() {
             .put("created_at", track.createdAt)
     }
 
-    private fun parseTorrents(items: JSONArray): List<TorrentResult> {
-        val parsed = mutableListOf<TorrentResult>()
+    private fun parseCatalogItems(items: JSONArray): List<CatalogItem> {
+        val parsed = mutableListOf<CatalogItem>()
         for (index in 0 until items.length()) {
             val item = items.optJSONObject(index) ?: continue
-            val name = item.optCleanString("name") ?: continue
-            val torrentId = item.optCleanString("torrent_id") ?: continue
-            parsed += TorrentResult(
-                name = name,
-                torrentId = torrentId,
-                source = TorrentSource.from(item.optCleanString("source")),
-                infoHash = item.optCleanString("info_hash"),
-                magnetLink = item.optCleanString("magnet_link"),
-                sourceUrl = item.optCleanString("source_url"),
-                seeders = item.optCleanString("seeders"),
-                leechers = item.optCleanString("leechers"),
-                sizeBytes = item.optNullableLong("size_bytes"),
-                sizeLabel = item.optCleanString("size"),
-                uploader = item.optCleanString("uploader")
+            val foreignId = item.optCleanString("foreign_id") ?: continue
+            parsed += CatalogItem(
+                kind = item.optCleanString("kind") ?: "artist",
+                foreignId = foreignId,
+                title = item.optCleanString("title") ?: "Unknown",
+                artist = item.optCleanString("artist"),
+                artistForeignId = item.optCleanString("artist_foreign_id"),
+                disambiguation = item.optCleanString("disambiguation"),
+                year = item.optInt("year", -1).takeIf { it > 0 }
+            )
+        }
+        return parsed
+    }
+
+    private fun parseCatalogRequests(items: JSONArray): List<CatalogRequestItem> {
+        val parsed = mutableListOf<CatalogRequestItem>()
+        for (index in 0 until items.length()) {
+            val item = items.optJSONObject(index) ?: continue
+            parsed += CatalogRequestItem(
+                id = item.optCleanString("id") ?: continue,
+                kind = item.optCleanString("kind") ?: "",
+                foreignId = item.optCleanString("foreign_id") ?: "",
+                title = item.optCleanString("title") ?: "Unknown",
+                status = item.optCleanString("status") ?: "requested"
+            )
+        }
+        return parsed
+    }
+
+    private fun parseLibraries(items: JSONArray): List<LibrarySummary> {
+        val parsed = mutableListOf<LibrarySummary>()
+        for (index in 0 until items.length()) {
+            val item = items.optJSONObject(index) ?: continue
+            parsed += LibrarySummary(
+                id = item.optCleanString("id") ?: continue,
+                name = item.optCleanString("name") ?: "Library",
+                trackCount = item.optInt("track_count", 0)
             )
         }
         return parsed

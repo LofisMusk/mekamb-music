@@ -28,9 +28,6 @@ from app.recommendations.gemini import (
     GeminiRecommendationClient,
     GeminiRecommendationUnavailable,
 )
-from app.sources.indexers import MusicIndexerProvider
-from app.sources.personal_1337x import Personal1337xProvider
-from app.sources.piratebay import PirateBayProvider
 from app.sources.search import UnifiedTorrentSearchItem, music_query_variants
 
 logger = logging.getLogger(__name__)
@@ -88,17 +85,11 @@ class RecommendationEngine:
         self,
         *,
         session: AsyncSession,
-        piratebay: PirateBayProvider,
-        personal_1337x: Personal1337xProvider,
-        indexer: MusicIndexerProvider,
         api_key_id: str = DEFAULT_API_KEY_ID,
         gemini_client: GeminiRecommendationClient | None = None,
         redis=None,
     ) -> None:
         self.session = session
-        self.piratebay = piratebay
-        self.personal_1337x = personal_1337x
-        self.indexer = indexer
         self.api_key_id = api_key_id
         self.gemini_client = gemini_client
         self.redis = redis
@@ -556,29 +547,10 @@ class RecommendationEngine:
         *,
         sources: list[str],
     ) -> list[UnifiedTorrentSearchItem]:
-        normalized_sources = {source.strip().lower() for source in sources}
-        results: list[UnifiedTorrentSearchItem] = []
-        if "indexer" in normalized_sources:
-            try:
-                results.extend(_from_indexer(item) for item in await self.indexer.search(query))
-            except Exception as exc:
-                logger.warning("Recommendation indexer search failed for %r: %s", query, exc)
-        if "piratebay" in normalized_sources:
-            try:
-                results.extend(_from_piratebay(item) for item in await self.piratebay.search(query))
-            except Exception as exc:
-                logger.warning("Recommendation Pirate Bay search failed for %r: %s", query, exc)
-        if "1337x" in normalized_sources:
-            try:
-                results.extend(
-                    _from_1337x(item)
-                    for item in await self.personal_1337x.search(
-                        query, page=1, sort_by="seeders", redis=self.redis
-                    )
-                )
-            except Exception as exc:
-                logger.warning("Recommendation 1337x search failed for %r: %s", query, exc)
-        return results
+        # External acquisition now happens through Lidarr (see /catalog), so the
+        # recommendation engine no longer searches torrent sources itself. Local,
+        # collaborative, and audio-feature recommendations are unaffected.
+        return []
 
     async def _library_fingerprint(self) -> set[frozenset[str]]:
         tracks = await self.session.scalars(

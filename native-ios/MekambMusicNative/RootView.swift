@@ -58,20 +58,26 @@ struct RootView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task { await app.refreshLibrary() }
+        .task {
+            await app.refreshLibrary()
+            await app.loadLibraries()
+        }
         .onChange(of: app.searchText) { _, _ in
             guard app.searchMode.searchesRemoteSources else { return }
             Task {
                 try? await Task.sleep(nanoseconds: 350_000_000)
-                await app.searchTorrents()
+                await app.searchCatalog()
             }
         }
         .onChange(of: app.searchMode) { _, mode in
             if mode.searchesRemoteSources {
                 app.selectedAlbumId = nil
-                app.torrents = []
-                Task { await app.searchTorrents() }
+                app.catalogItems = []
+                Task { await app.searchCatalog() }
             }
+        }
+        .onChange(of: app.catalogKind) { _, _ in
+            if app.searchMode.searchesRemoteSources { Task { await app.searchCatalog() } }
         }
         .onChange(of: app.selectedTab) { _, tab in
             if tab != .albums { app.selectedAlbumId = nil }
@@ -105,12 +111,12 @@ struct RootView: View {
                         .submitLabel(.search)
                         .onSubmit {
                             dismissSearch()
-                            if app.searchMode.searchesRemoteSources { Task { await app.searchTorrents() } }
+                            if app.searchMode.searchesRemoteSources { Task { await app.searchCatalog() } }
                         }
                     if !app.searchText.isEmpty {
                         Button {
                             app.searchText = ""
-                            app.torrents = []
+                            app.catalogItems = []
                         } label: {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundStyle(.secondary)
@@ -143,7 +149,7 @@ struct RootView: View {
     @ViewBuilder
     private var content: some View {
         if app.searchMode.searchesRemoteSources {
-            TorrentSearchView()
+            CatalogSearchView()
                 .environmentObject(app)
         } else {
             switch app.selectedTab {
@@ -202,10 +208,8 @@ struct RootView: View {
 
     private var searchPlaceholder: String {
         switch app.searchMode {
-        case .torrent:
-            return "Search torrents..."
-        case .indexer:
-            return "Search indexers..."
+        case .catalog:
+            return app.catalogKind == .artist ? "Add an artist..." : "Add an album..."
         case .library:
             if app.selectedTab == .albums { return "Search albums..." }
             if app.selectedTab == .playlists { return "Search playlists..." }
@@ -1121,6 +1125,19 @@ struct TrackRowNative: View {
                             Label("Add to Playlist", systemImage: "text.badge.plus")
                         }
                     }
+                    if !app.libraries.isEmpty {
+                        Menu {
+                            ForEach(app.libraries) { library in
+                                Button {
+                                    Task { await app.addTrack(track.id, toLibrary: library.id) }
+                                } label: {
+                                    Label(library.name, systemImage: "books.vertical")
+                                }
+                            }
+                        } label: {
+                            Label("Add to Library", systemImage: "books.vertical")
+                        }
+                    }
                     if let playlist {
                         Button(role: .destructive) {
                             Task { await app.removeTrack(track, from: playlist) }
@@ -1198,128 +1215,218 @@ struct TrackRowNative: View {
     }
 }
 
-struct TorrentSearchView: View {
+/// The "Add Music" screen: search Lidarr for an artist/album and request it be
+/// added to the shared catalog. Lidarr acquires it and the backend ingests it.
+struct CatalogSearchView: View {
     @EnvironmentObject private var app: AppState
 
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 10) {
                 HStack {
-                    Text(title)
+                    Text(app.searchText.isEmpty ? "Add Music" : "Results")
                         .font(.title2.bold())
                     Spacer()
-                    if app.isSearchingTorrents { ProgressView() }
+                    if app.isSearchingCatalog { ProgressView() }
                 }
                 .padding(.horizontal)
                 .padding(.top, 12)
 
+                Picker("Type", selection: $app.catalogKind) {
+                    ForEach(CatalogKind.allCases) { kind in
+                        Text(kind.label).tag(kind)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+
                 if app.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    ContentUnavailableView(emptyTitle, systemImage: "magnifyingglass", description: Text("Type an artist, album, or song above."))
-                        .foregroundStyle(.secondary)
-                        .padding(.top, 48)
-                } else if app.torrents.isEmpty && !app.isSearchingTorrents {
+                    ContentUnavailableView(
+                        "Grow the library",
+                        systemImage: "plus.magnifyingglass",
+                        description: Text("Search an artist or album; Lidarr fetches it into the shared catalog.")
+                    )
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 48)
+                } else if app.catalogItems.isEmpty && !app.isSearchingCatalog {
                     ContentUnavailableView("No results", systemImage: "tray", description: Text("Try a different query."))
                         .foregroundStyle(.secondary)
                         .padding(.top, 48)
                 } else {
-                    ForEach(app.torrents) { torrent in
-                        TorrentRowNative(torrent: torrent)
+                    ForEach(app.catalogItems) { item in
+                        CatalogRowNative(item: item)
                             .environmentObject(app)
                             .padding(.horizontal)
                     }
                 }
+
+                if !app.catalogRequests.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Recent requests")
+                            .font(.headline)
+                            .padding(.horizontal)
+                        ForEach(app.catalogRequests.prefix(12)) { req in
+                            HStack {
+                                Text(req.title).font(.subheadline).lineLimit(1)
+                                Spacer()
+                                Text(req.status.capitalized)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal)
+                        }
+                    }
+                    .padding(.top, 12)
+                }
             }
         }
-        .refreshable { await app.searchTorrents() }
-    }
-
-    private var title: String {
-        if app.searchMode == .indexer {
-            return app.searchText.isEmpty ? "Indexer Search" : "Indexer Results"
-        }
-        return app.searchText.isEmpty ? "Torrent Search" : "Torrent Results"
-    }
-
-    private var emptyTitle: String {
-        app.searchMode == .indexer ? "Search indexers" : "Search torrents"
+        .task { await app.loadCatalogRequests() }
+        .refreshable { await app.searchCatalog() }
     }
 }
 
-struct TorrentRowNative: View {
+struct CatalogRowNative: View {
     @EnvironmentObject private var app: AppState
-    @StateObject private var importController = TorrentImportController()
-    let torrent: TorrentResult
+    @State private var isAdding = false
+    let item: CatalogItem
+
+    private var isAdded: Bool { app.addedCatalogIds.contains(item.id) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(torrent.name)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
-                    Text("\(torrent.source.displayName) · \(torrent.uploader ?? "unknown") · \(torrent.sizeText) · S \(torrent.seeders ?? "0")")
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(item.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                if !item.subtitle.isEmpty {
+                    Text(item.subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
-                Spacer()
-                Button {
-                    Task { await importController.start(torrent: torrent, app: app) }
-                } label: {
-                    if importController.isRunning {
-                        ProgressView()
-                            .tint(.white)
-                    } else {
-                        Text(importController.progress?.isFailure == true ? "Retry" : "Import")
-                            .font(.caption.weight(.bold))
-                    }
+            }
+            Spacer()
+            Button {
+                isAdding = true
+                Task {
+                    await app.addToCatalog(item)
+                    isAdding = false
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(importController.isRunning)
+            } label: {
+                if isAdding {
+                    ProgressView().tint(.white)
+                } else if isAdded {
+                    Label("Added", systemImage: "checkmark")
+                        .font(.caption.weight(.bold))
+                } else {
+                    Text("Add").font(.caption.weight(.bold))
+                }
             }
-
-            if let progress = importController.progress {
-                TorrentImportProgressView(progress: progress)
-            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isAdding || isAdded)
         }
         .padding(12)
         .background(Color.white.opacity(0.06))
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .animation(.easeInOut(duration: 0.2), value: importController.progress)
-    }
-}
-
-struct TorrentImportProgressView: View {
-    let progress: TorrentImportProgressState
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                Text(progress.status)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(progress.isFailure ? .red : .secondary)
-                Spacer()
-                Text(progress.percentText)
-                    .font(.caption.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-
-            ProgressView(value: progress.clampedProgress)
-                .tint(progress.isFailure ? .red : .blue)
-                .controlSize(.regular)
-
-            Text(progress.details)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-        }
-        .padding(10)
-        .background(Color.black.opacity(0.18))
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
 /// Small "FLAC" / "AAC" pill shown next to the track that's playing.
+/// Lists the user's personal libraries (curated subsets of the shared catalog).
+struct LibrariesView: View {
+    @EnvironmentObject private var app: AppState
+    @State private var showCreate = false
+    @State private var newName = ""
+
+    var body: some View {
+        List {
+            if app.libraries.isEmpty {
+                ContentUnavailableView(
+                    "No libraries yet",
+                    systemImage: "books.vertical",
+                    description: Text("Create a library, then add tracks from the shared catalog.")
+                )
+            } else {
+                ForEach(app.libraries) { library in
+                    NavigationLink {
+                        LibraryDetailView(summary: library).environmentObject(app)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(library.name).font(.body.weight(.semibold))
+                            Text("\(library.trackCount) tracks")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .onDelete { indexSet in
+                    for index in indexSet {
+                        let id = app.libraries[index].id
+                        Task { await app.deleteLibrary(id) }
+                    }
+                }
+            }
+        }
+        .navigationTitle("My Libraries")
+        .toolbar {
+            Button {
+                newName = ""
+                showCreate = true
+            } label: {
+                Image(systemName: "plus")
+            }
+        }
+        .alert("New Library", isPresented: $showCreate) {
+            TextField("Name", text: $newName)
+            Button("Cancel", role: .cancel) {}
+            Button("Create") {
+                let name = newName
+                Task { await app.createLibrary(name: name) }
+            }
+        }
+        .task { await app.loadLibraries() }
+    }
+}
+
+/// Shows one personal library's tracks; play, add-to-queue (via the row menu),
+/// or swipe to remove from the library.
+struct LibraryDetailView: View {
+    @EnvironmentObject private var app: AppState
+    let summary: LibrarySummary
+    @State private var detail: LibraryDetail?
+
+    var body: some View {
+        List {
+            if let loaded = detail, !loaded.orderedTracks.isEmpty {
+                ForEach(loaded.orderedTracks) { track in
+                    TrackRowNative(track: track)
+                        .environmentObject(app)
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
+                        .swipeActions {
+                            Button(role: .destructive) {
+                                Task {
+                                    detail = await app.removeTrack(track.id, fromLibrary: summary.id)
+                                }
+                            } label: {
+                                Label("Remove", systemImage: "minus.circle")
+                            }
+                        }
+                }
+            } else {
+                ContentUnavailableView(
+                    "Empty library",
+                    systemImage: "music.note",
+                    description: Text("Add tracks from the shared catalog using the track menu.")
+                )
+            }
+        }
+        .navigationTitle(summary.name)
+        .task { detail = await app.libraryDetail(summary.id) }
+    }
+}
+
 struct CodecBadgeView: View {
     let text: String
 
@@ -1786,9 +1893,17 @@ struct QueueTrackRow: View {
 
 struct SettingsView: View {
     @EnvironmentObject private var app: AppState
+    @State private var showLibraries = false
 
     var body: some View {
         Form {
+            Section("Library") {
+                Button {
+                    showLibraries = true
+                } label: {
+                    Label("My Libraries", systemImage: "books.vertical")
+                }
+            }
             Section("Backend") {
                 TextField("192.168.1.50:8000", text: $app.apiEndpoint)
                     .textInputAutocapitalization(.never)
@@ -1896,6 +2011,17 @@ struct SettingsView: View {
         }
         .scrollContentBackground(.hidden)
         .background(Color.clear)
+        .sheet(isPresented: $showLibraries) {
+            NavigationStack {
+                LibrariesView()
+                    .environmentObject(app)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") { showLibraries = false }
+                        }
+                    }
+            }
+        }
     }
 }
 

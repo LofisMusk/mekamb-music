@@ -89,9 +89,6 @@ async def test_gemini_rate_limit_falls_back_to_python_ranking():
     )
     engine = RecommendationEngine(
         session=None,
-        piratebay=None,
-        personal_1337x=None,
-        indexer=None,
         gemini_client=RateLimitedGemini(),
     )
 
@@ -128,9 +125,6 @@ def _autoplay_engine(
 ) -> RecommendationEngine:
     engine = RecommendationEngine(
         session=AutoplayFakeSession(seed, candidates),
-        piratebay=None,
-        personal_1337x=None,
-        indexer=None,
     )
 
     async def fake_recent():

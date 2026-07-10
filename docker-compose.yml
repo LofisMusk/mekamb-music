@@ -14,13 +14,16 @@ services:
         condition: service_started
       minio-init:
         condition: service_completed_successfully
-      qbittorrent:
+      lidarr:
         condition: service_started
     ports:
       - "8000:8000"
     volumes:
       - quarantine:/data/quarantine
       - library:/data/library
+      # Lidarr's organized output, ingested into the library. Mounted at the same
+      # path Lidarr uses so webhook trackFile paths resolve on both sides.
+      - library-source:/data/library-source
     healthcheck:
       test:
         - CMD-SHELL
@@ -45,19 +48,21 @@ services:
         condition: service_started
       minio-init:
         condition: service_completed_successfully
-      qbittorrent:
+      lidarr:
         condition: service_started
     command: ["python", "-m", "app.workers.import_worker"]
     volumes:
       - quarantine:/data/quarantine
       - library:/data/library
+      - library-source:/data/library-source
 
   volume-init:
     image: alpine:3.20
-    command: ["sh", "-c", "chown -R 1000:1000 /data/quarantine /data/library"]
+    command: ["sh", "-c", "chown -R 1000:1000 /data/quarantine /data/library /data/library-source"]
     volumes:
       - quarantine:/data/quarantine
       - library:/data/library
+      - library-source:/data/library-source
 
   postgres:
     image: postgres:16-alpine
@@ -112,26 +117,42 @@ services:
       mc mb --ignore-existing local/$$S3_BUCKET;
       "
 
+  # Lidarr owns discovery/monitoring/downloading and writes organized albums into
+  # /data/library-source. Point its root folder at /data/library-source and set
+  # Connect → Webhook to http://api:8000/catalog/webhook?token=$LIDARR_WEBHOOK_TOKEN.
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:latest
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: Europe/Warsaw
+    ports:
+      - "8686:8686"
+    volumes:
+      - lidarr-config:/config
+      - library-source:/data/library-source
+      - downloads:/downloads
+    restart: unless-stopped
+
+  # qBittorrent is Lidarr's download client (the backend no longer talks to it).
   qbittorrent:
     image: lscr.io/linuxserver/qbittorrent:latest
-    depends_on:
-      qbittorrent-config-init:
-        condition: service_completed_successfully
     environment:
       PUID: 1000
       PGID: 1000
       TZ: Europe/Warsaw
       WEBUI_PORT: 8080
-      TORRENTING_PORT: ${TORRENT_LISTEN_PORT:-6881}
+      TORRENTING_PORT: 6881
     ports:
       - "8080:8080"
-      - "${TORRENT_LISTEN_PORT:-6881}:${TORRENT_LISTEN_PORT:-6881}"
-      - "${TORRENT_LISTEN_PORT:-6881}:${TORRENT_LISTEN_PORT:-6881}/udp"
+      - "6881:6881"
+      - "6881:6881/udp"
     volumes:
       - qbittorrent-config:/config
-      - quarantine:/downloads/incomplete
+      - downloads:/downloads
     restart: unless-stopped
 
+  # Prowlarr feeds indexers to Lidarr.
   prowlarr:
     image: lscr.io/linuxserver/prowlarr:latest
     environment:
@@ -144,20 +165,13 @@ services:
       - prowlarr-config:/config
     restart: unless-stopped
 
-  qbittorrent-config-init:
-    image: python:3.12-alpine
-    env_file: .env
-    environment:
-      WEBUI_PORT: 8080
-    command: ["python", "/app/scripts/qbittorrent_configure.py"]
-    volumes:
-      - qbittorrent-config:/config
-      - ./scripts/qbittorrent_configure.py:/app/scripts/qbittorrent_configure.py:ro
-
 volumes:
   postgres:
   minio:
   quarantine:
   library:
+  library-source:
+  downloads:
+  lidarr-config:
   qbittorrent-config:
   prowlarr-config:

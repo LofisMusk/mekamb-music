@@ -393,6 +393,100 @@ def _normalize_playlist_name(value: str) -> str:
     return name
 
 
+# ── Per-user libraries (curated subsets of the shared catalog) ────────────────
+class LibraryCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        return _normalize_library_name(value)
+
+
+class LibraryUpdateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        return _normalize_library_name(value)
+
+
+class LibraryTrackAddRequest(BaseModel):
+    track_id: UUID
+
+
+class LibrarySummaryItemResponse(BaseModel):
+    id: UUID
+    name: str
+    track_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class LibraryTrackItemResponse(BaseModel):
+    position: int
+    added_at: datetime
+    track: TrackResponse
+
+
+class LibraryDetailResponse(BaseModel):
+    id: UUID
+    name: str
+    tracks: list[LibraryTrackItemResponse]
+    created_at: datetime
+    updated_at: datetime
+
+
+class LibraryListResponse(PageBase):
+    items: list[LibrarySummaryItemResponse]
+
+
+def _normalize_library_name(value: str) -> str:
+    name = value.strip()
+    if not name:
+        raise ValueError("Library name cannot be blank.")
+    return name
+
+
+# ── Catalog (self-service Lidarr acquisition) ─────────────────────────────────
+class CatalogSearchItemResponse(BaseModel):
+    kind: str
+    foreign_id: str
+    title: str
+    artist: str | None = None
+    artist_foreign_id: str | None = None
+    disambiguation: str | None = None
+    year: int | None = None
+
+
+class CatalogSearchResponse(BaseModel):
+    items: list[CatalogSearchItemResponse]
+    kind: str
+    query: str
+
+
+class CatalogAddRequest(BaseModel):
+    kind: str = Field(pattern="^(artist|album)$")
+    foreign_id: str = Field(min_length=1, max_length=128)
+    title: str = Field(min_length=1, max_length=512)
+    artist: str | None = Field(default=None, max_length=512)
+    artist_foreign_id: str | None = Field(default=None, max_length=128)
+
+
+class CatalogRequestResponse(BaseModel):
+    id: UUID
+    kind: str
+    foreign_id: str
+    title: str
+    status: str
+    created_at: datetime
+
+
+class CatalogRequestListResponse(BaseModel):
+    items: list[CatalogRequestResponse]
+
+
 class ArtistSummaryResponse(BaseModel):
     name: str
     track_count: int

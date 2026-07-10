@@ -1,8 +1,12 @@
 # Mekamb Music Backend
 
-Private FastAPI backend for a Spotify-like music library. It searches music
-torrents from 1337x with `py1337x` and Pirate Bay through the configured API,
-then imports completed audio files into a persistent local library.
+Private FastAPI backend for a Spotify-like music library. A shared catalog is
+grown through **Lidarr**: any approved user requests an artist/album via
+`/catalog`, Lidarr (with its own Prowlarr + download client) acquires and
+organizes it, and the backend ingests the finished album into a persistent local
+library through its quarantine → validation → storage pipeline. Each user can
+also build personal **libraries** — named subsets of the shared catalog. Clients
+stream everything from this backend.
 
 ## Local Setup
 
@@ -81,8 +85,8 @@ Compose waits for Postgres and Redis healthchecks before starting the app.
 MinIO readiness is handled by `minio-init`, which waits for MinIO and creates
 the configured bucket before API/worker containers continue.
 Use `/health` for a simple process liveness check and `/health/ready` when a
-deploy target should verify database, auth/source configuration, and sandbox
-directories, Redis, and qBittorrent before routing traffic.
+deploy target should verify database, auth configuration, sandbox directories,
+Redis, and (when `LIDARR_ENABLED=true`) Lidarr reachability before routing traffic.
 Imports are stored in Postgres and also publish a Redis queue event so the
 worker wakes up quickly; the worker still periodically scans active imports as a
 fallback.
@@ -106,19 +110,23 @@ python -m app.api.openapi_export openapi.json
 
 - `GET /health`
 - `GET /health/ready`
-- `GET /sources/search?q=...`
-- `GET /sources/indexers/search?q=...`
-- `GET /sources/1337x/search?q=...`
-- `GET /sources/piratebay/search?q=...`
-- `POST /imports/1337x/{torrent_id}`
-- `POST /imports/indexer`
-- `POST /imports/piratebay/{torrent_id}`
+- `GET /catalog/search?kind=artist|album&q=...`
+- `POST /catalog/add`
+- `GET /catalog/requests`
+- `POST /catalog/webhook` (called by Lidarr, shared-secret token)
 - `GET /imports?status=queued&limit=50&offset=0`
 - `GET /imports/{id}`
 - `GET /imports/{id}/tracks?limit=50&offset=0`
 - `POST /imports/{id}/cancel?delete_files=true`
 - `POST /imports/{id}/retry?delete_files=true`
-- `GET /downloads/{id}`
+- `GET /libraries?limit=50&offset=0`
+- `POST /libraries`
+- `GET /libraries/{id}`
+- `GET /libraries/{id}/tracks`
+- `PATCH /libraries/{id}`
+- `DELETE /libraries/{id}`
+- `POST /libraries/{id}/tracks`
+- `DELETE /libraries/{id}/tracks/{track_id}`
 - `GET /library/summary`
 - `GET /sync/actions?since=...&include_applied=true&limit=200`
 - `POST /sync/actions`
@@ -164,17 +172,13 @@ personalized recommendations, playback state, playlists, and sync actions.
 
 ## Recommendations
 
-`/recommendations/tracks/{track_id}` returns Spotify-like recommendations in two
-layers: local similar tracks already in the library and external candidates from
-configured music sources. The local score uses artist, album, title token overlap,
-duration proximity, likes, and recent playback seeds. `/recommendations/library`
-builds a broader seed set from liked tracks, recent plays, and latest imports.
-
-`POST /recommendations/.../import-missing` imports top-ranked missing external
-candidates through the same import pipeline as manual searches: qBittorrent,
-quarantine, audio validation, and library storage. Defaults are controlled by
-`RECOMMENDATION_SOURCES`, `RECOMMENDATION_AUTO_IMPORT_LIMIT`, and
-`RECOMMENDATION_MIN_SEEDERS`.
+`/recommendations/tracks/{track_id}` returns Spotify-like recommendations from
+tracks already in the shared catalog. The score uses artist, album, title token
+overlap, duration proximity, likes, recent playback seeds, and cross-user
+collaborative filtering. `/recommendations/library` builds a broader seed set
+from liked tracks, recent plays, and latest imports. Recommendations no longer
+fetch external torrent candidates; to add something missing to the catalog, use
+`POST /catalog/add` and let Lidarr acquire it.
 
 ## Instance Sync
 
@@ -207,59 +211,48 @@ storage.
 
 ## Safety Model
 
-- `/sources/search` runs a unified music search across configured torrent sources,
-  tries normalized artist/title query variants, deduplicates results, and keeps
-  working when one source is temporarily blocked/unavailable.
-- `/sources/indexers/search` queries configured Torznab/Prowlarr music indexers
-  and returns importable magnet-backed results. The app still imports through this
-  backend, qBittorrent, and the quarantine/library pipeline.
-- 1337x searches are limited to Music category results and sorted by seeders by default.
-- Import resolves the torrent with `info()` before enqueueing it.
-- qBittorrent only receives the quarantine volume, never the library volume.
-- The worker waits until qBittorrent reports the torrent as complete, then imports
-  only allowed audio extensions from quarantine.
-- If the completed torrent has no supported audio files or its quarantine path is
-  missing/invalid, the import is marked `failed` instead of staying active.
-- Before importing, the worker verifies that qBittorrent reports the expected
-  `info_hash` and the exact per-import download path.
+- Acquisition is delegated to Lidarr; the backend never talks to a download
+  client directly. `POST /catalog/add` (any approved user) tells Lidarr to
+  monitor + search for an artist/album.
+- When Lidarr finishes importing an album it calls `POST /catalog/webhook`
+  (verified by the shared `LIDARR_WEBHOOK_TOKEN`). The backend copies/hardlinks
+  the finished album from Lidarr's root folder into a per-import quarantine
+  directory and queues an ingest job (`source=lidarr`).
+- The worker imports only allowed audio extensions from quarantine. If the folder
+  has no supported audio files or its quarantine path is missing/invalid, the
+  import is marked `failed` instead of staying active.
+- Quarantine paths are sandbox-checked: they must live under `QUARANTINE_ROOT` and
+  never inside `LIBRARY_ROOT`. Cleanup refuses any path outside the quarantine root.
 - Redis is only a wake-up signal for the worker; Postgres remains the source of
   truth for import state.
-- After a successful import, the worker removes the completed torrent and cleans
-  its quarantine directory by default. Set `REMOVE_TORRENT_AFTER_IMPORT=false` or
-  `CLEANUP_QUARANTINE_AFTER_IMPORT=false` if you want to inspect downloaded files.
+- After a successful import the worker cleans the quarantine directory by default.
+  Set `CLEANUP_QUARANTINE_AFTER_IMPORT=false` to inspect ingested files.
 - Original files are preserved; FLAC/ALAC stay lossless and MP3 stays MP3.
-- The v1 1337x API surface intentionally has no trending/top/browse endpoints.
-- Pirate Bay imports use the configured category but do not require a title marker.
 
 ## Configuration Notes
 
+- `LIDARR_URL` / `LIDARR_API_KEY` point the backend at Lidarr for artist/album
+  lookup and add (`X-Api-Key`). `LIDARR_ENABLED=true` makes `/health/ready` verify
+  Lidarr is reachable.
+- `LIDARR_ROOT_FOLDER` is Lidarr's organized-output path. It must be mounted at the
+  **same path** in both the Lidarr container and the API/worker containers so the
+  webhook's track-file paths resolve on the backend side.
+- `LIDARR_QUALITY_PROFILE_ID` / `LIDARR_METADATA_PROFILE_ID` are the Lidarr profile
+  ids used when adding an artist/album.
+- `LIDARR_WEBHOOK_TOKEN` is the shared secret; configure Lidarr's Connect → Webhook
+  as `http://api:8000/catalog/webhook?token=<token>` on the import events.
+- `LIDARR_INGEST_STRATEGY` is `copy` or `hardlink` (hardlink avoids duplicating
+  large lossless files when the root folder and quarantine share a filesystem).
 - `QUARANTINE_ROOT` is the path seen by API/worker containers.
-- `TORRENT_DOWNLOAD_ROOT` is the path sent to qBittorrent over RPC.
-- `MUSIC_INDEXER_PROWLARR_URL` points at the Prowlarr service, for example
-  `http://prowlarr:9696`; the backend queries `/api/v1/search` across configured
-  Prowlarr indexers.
-- `MUSIC_INDEXER_TORZNAB_URLS` can contain one or more raw Torznab/Prowlarr URLs,
-  separated by commas or newlines, if you prefer per-indexer URLs.
-- `MUSIC_INDEXER_API_KEY` is used as Prowlarr's `X-Api-Key` header and as
-  `apikey` for raw Torznab URLs.
-- `MUSIC_INDEXER_CATEGORIES` defaults to `3000` for audio/music Torznab searches.
-- `RECOMMENDATION_SOURCES` is a comma-separated list used by recommendation
-  search/import, defaulting to `indexer`. Set `indexer,1337x,piratebay` only if
-  those sources are intentionally allowed for automatic recommendation imports.
-- `RECOMMENDATION_AUTO_IMPORT_LIMIT` and `RECOMMENDATION_MIN_SEEDERS` control how
-  many missing recommendations can be queued by one request and the minimum
-  seeders needed before an external candidate is imported.
-- In Docker Compose both paths point to the same named volume, mounted at different
-  container paths, so qBittorrent can write downloads while the worker scans them.
 - `LIBRARY_ROOT` must never point inside quarantine, and quarantine must never
   point inside the library.
 - `STORAGE_BACKEND=local` keeps only the streamable local cache.
 - `STORAGE_BACKEND=s3` keeps the same local cache for Range streaming and also
   mirrors imported originals into the configured S3/MinIO bucket.
-- `TORRENT_LISTEN_PORT` is used by the app, qBittorrent, and Docker's TCP/UDP
-  port mappings. On a Linux server, also open this port for both TCP and UDP in
-  the host firewall and any VPS/cloud security group; otherwise torrents may stay
-  stalled even when the WebUI works.
-- The API, worker, and qBittorrent containers share the quarantine volume as
+- Lidarr's own torrenting (its download client's listen port, indexers, etc.) is
+  configured inside Lidarr/qBittorrent, not the backend. On a Linux server, open
+  the download client's TCP/UDP port in the host firewall and any VPS/cloud
+  security group so grabs don't stall.
+- The API, worker, and Lidarr containers share the `library-source` volume as
   UID/GID `1000`. The `volume-init` service fixes named-volume ownership before
-  the app starts so qBittorrent can write into per-import download directories.
+  the app starts so the worker can read Lidarr's organized albums.

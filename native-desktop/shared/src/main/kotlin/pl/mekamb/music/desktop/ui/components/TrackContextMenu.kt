@@ -44,6 +44,7 @@ fun TrackContextMenuItems(
     val isLiked = app.likedTrackIds.collectAsState().value.contains(track.id)
     val isOffline = app.downloads.offlineTrackIds.collectAsState().value.contains(track.id)
     var showPlaylistSubmenu by remember { mutableStateOf(false) }
+    var showLibrarySubmenu by remember { mutableStateOf(false) }
 
     DropdownMenuItem(
         text = { Text("Play") },
@@ -90,6 +91,33 @@ fun TrackContextMenuItems(
                             app.refreshLibrary()
                         }
                         showPlaylistSubmenu = false
+                        onDismiss()
+                    },
+                )
+            }
+        }
+    }
+    Box {
+        DropdownMenuItem(
+            text = { Text("Add to library") },
+            leadingIcon = { Icon(Icons.Filled.PlaylistAdd, contentDescription = null) },
+            trailingIcon = { Icon(Icons.Filled.ChevronRight, contentDescription = null) },
+            onClick = { showLibrarySubmenu = true },
+        )
+        val libraries = app.libraries.collectAsState().value
+        DropdownMenu(expanded = showLibrarySubmenu, onDismissRequest = { showLibrarySubmenu = false }) {
+            if (libraries.isEmpty()) {
+                DropdownMenuItem(text = { Text("No libraries yet") }, onClick = {}, enabled = false)
+            }
+            libraries.forEach { library ->
+                DropdownMenuItem(
+                    text = { Text(library.name) },
+                    onClick = {
+                        scope.launch {
+                            app.api.addTrackToLibrary(library.id, track.id)
+                            app.loadLibraries()
+                        }
+                        showLibrarySubmenu = false
                         onDismiss()
                     },
                 )

@@ -17,6 +17,7 @@ import pl.mekamb.music.desktop.api.ApiException
 import pl.mekamb.music.desktop.api.AuthRegisterResponse
 import pl.mekamb.music.desktop.api.AuthUser
 import pl.mekamb.music.desktop.api.ClaimTokenRequest
+import pl.mekamb.music.desktop.api.LibrarySummary
 import pl.mekamb.music.desktop.api.LoginRequest
 import pl.mekamb.music.desktop.api.MekambApi
 import pl.mekamb.music.desktop.api.PlaylistSummary
@@ -65,6 +66,9 @@ class AppViewModel {
     private val _playlists = MutableStateFlow<List<PlaylistSummary>>(emptyList())
     val playlists: StateFlow<List<PlaylistSummary>> = _playlists
 
+    private val _libraries = MutableStateFlow<List<LibrarySummary>>(emptyList())
+    val libraries: StateFlow<List<LibrarySummary>> = _libraries
+
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Unconfigured)
     val connectionState: StateFlow<ConnectionState> = _connectionState
 
@@ -95,9 +99,11 @@ class AppViewModel {
                 val loadedTracks = withContext(Dispatchers.IO) { loadAllTracks() }
                 val liked = withContext(Dispatchers.IO) { loadLikedIds() }
                 val lists = withContext(Dispatchers.IO) { api.listPlaylists(limit = 200).items }
+                val libs = withContext(Dispatchers.IO) { runCatching { api.listLibraries(limit = 200).items }.getOrDefault(emptyList()) }
                 _tracks.value = loadedTracks
                 _likedTrackIds.value = liked
                 _playlists.value = lists
+                _libraries.value = libs
                 _connectionState.value = ConnectionState.Connected
             } catch (failure: Exception) {
                 _connectionState.value = ConnectionState.Error(
@@ -110,6 +116,16 @@ class AppViewModel {
             } finally {
                 _libraryLoading.value = false
             }
+        }
+    }
+
+    fun loadLibraries() {
+        if (!isConfigured()) return
+        scope.launch {
+            val libs = withContext(Dispatchers.IO) {
+                runCatching { api.listLibraries(limit = 200).items }.getOrDefault(emptyList())
+            }
+            _libraries.value = libs
         }
     }
 

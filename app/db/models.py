@@ -23,7 +23,7 @@ class ImportJob(Base):
     __table_args__ = (UniqueConstraint("info_hash", name="uq_import_jobs_info_hash"),)
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    source: Mapped[str] = mapped_column(String(64), default="personal_1337x", nullable=False)
+    source: Mapped[str] = mapped_column(String(64), default="lidarr", nullable=False)
     torrent_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     info_hash: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     magnet_link: Mapped[str] = mapped_column(Text, nullable=False)
@@ -364,3 +364,73 @@ class UserSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class UserLibrary(Base):
+    """A user's personal library — a named, curated subset of the shared
+    catalog. Scoped by ``api_key_id`` exactly like playlists, so each user only
+    ever sees and mutates their own libraries."""
+
+    __tablename__ = "user_libraries"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    api_key_id: Mapped[str] = mapped_column(
+        String(64),
+        default=DEFAULT_API_KEY_ID,
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class UserLibraryTrack(Base):
+    __tablename__ = "user_library_tracks"
+    __table_args__ = (
+        UniqueConstraint("library_id", "track_id", name="uq_user_library_tracks_track"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    library_id: Mapped[UUID] = mapped_column(
+        ForeignKey("user_libraries.id"),
+        nullable=False,
+        index=True,
+    )
+    track_id: Mapped[UUID] = mapped_column(ForeignKey("tracks.id"), nullable=False, index=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CatalogRequest(Base):
+    """An audit row for a self-service "add this to the shared catalog" request.
+    Records who asked Lidarr to acquire which artist/album so requests are
+    de-duplicated and users can see the status of what they added."""
+
+    __tablename__ = "catalog_requests"
+    __table_args__ = (
+        UniqueConstraint("kind", "foreign_id", name="uq_catalog_requests_kind_foreign_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    api_key_id: Mapped[str] = mapped_column(
+        String(64),
+        default=DEFAULT_API_KEY_ID,
+        nullable=False,
+        index=True,
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)  # "artist" | "album"
+    foreign_id: Mapped[str] = mapped_column(String(128), nullable=False)  # MusicBrainz id from Lidarr
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="requested", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": str(self.id),
+            "kind": self.kind,
+            "foreign_id": self.foreign_id,
+            "title": self.title,
+            "status": self.status,
+            "created_at": self.created_at.isoformat(),
+        }

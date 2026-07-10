@@ -13,7 +13,6 @@ from app.core.config import settings
 from app.core.runtime import prepare_runtime
 from app.db.models import ImportJob, Track, utcnow
 from app.db.session import AsyncSessionLocal, init_db
-from app.downloads.qbittorrent import QBittorrentDownloader
 from app.imports.domain import ImportStatus
 from app.imports.queue import RedisImportQueue
 from app.library.audio import (
@@ -27,10 +26,6 @@ from app.storage.library import LibraryStorage, build_library_storage
 logger = logging.getLogger(__name__)
 
 _SENTINEL = Path("/tmp/worker-alive")
-
-
-class TorrentStatusMismatch(RuntimeError):
-    pass
 
 
 class QuarantineImportViolation(RuntimeError):
@@ -64,56 +59,18 @@ async def run_forever() -> None:
 
 async def process_pending() -> None:
     storage = build_library_storage(settings)
-    torrent_client = QBittorrentDownloader.from_settings(settings)
     async with AsyncSessionLocal() as session:
         jobs = await session.scalars(
             select(ImportJob).where(ImportJob.status.in_(ImportStatus.active()))
         )
         for job in jobs:
-            await process_downloaded_job_safely(job, session, storage, torrent_client)
+            # Lidarr already downloaded + organized the album into quarantine, so
+            # every active job is ready to ingest straight away.
+            await process_job_safely(job, session, storage)
             await session.commit()
             if job.status == ImportStatus.IMPORTED.value:
-                await cleanup_completed_import(job, torrent_client)
+                await cleanup_completed_import(job)
                 await session.commit()
-
-
-async def process_downloaded_job_safely(
-    job: ImportJob,
-    session,
-    storage: LibraryStorage,
-    torrent_client,
-) -> None:
-    try:
-        torrent_status = await torrent_client.status_by_label(f"mekamb-music:{job.id}")
-    except Exception as exc:
-        job.error_message = f"Could not read torrent client status: {exc}"
-        job.updated_at = utcnow()
-        return
-
-    if torrent_status is None:
-        job.status = ImportStatus.QUEUED.value
-        job.error_message = "Torrent is not visible in qBittorrent yet."
-        job.updated_at = utcnow()
-        return
-
-    if not torrent_status.is_complete:
-        job.status = ImportStatus.DOWNLOADING.value
-        job.error_message = None
-        job.updated_at = utcnow()
-        return
-
-    try:
-        validate_torrent_status_for_job(job, torrent_status)
-    except TorrentStatusMismatch as exc:
-        job.status = ImportStatus.FAILED.value
-        job.error_message = str(exc)
-        job.updated_at = utcnow()
-        return
-
-    job.status = ImportStatus.READY_TO_IMPORT.value
-    job.error_message = None
-    job.updated_at = utcnow()
-    await process_job_safely(job, session, storage)
 
 
 async def process_job_safely(job: ImportJob, session, storage: LibraryStorage) -> None:
@@ -182,7 +139,7 @@ def _import_cover(
     cover_file = find_cover_image(quarantine_path)
     if cover_file is not None:
         ext = cover_file.suffix.lower() or ".jpg"
-        cover_key = f"{info_hash.lower()}/cover{ext}"
+        cover_key = f"{_key_namespace(info_hash)}/cover{ext}"
         storage.put_file(cover_file, cover_key)
         return cover_key
 
@@ -197,7 +154,7 @@ def _import_cover(
         if ext in (".jpe", ".jpeg"):
             ext = ".jpg"
 
-        cover_key = f"{info_hash.lower()}/cover{ext}"
+        cover_key = f"{_key_namespace(info_hash)}/cover{ext}"
         tmp = path.parent / f"_cover_tmp{ext}"
         try:
             tmp.write_bytes(data)
@@ -210,24 +167,13 @@ def _import_cover(
     return None
 
 
-async def cleanup_completed_import(job: ImportJob, torrent_client) -> None:
-    errors: list[str] = []
-    can_clean_quarantine = True
-    if settings.remove_torrent_after_import:
-        try:
-            await torrent_client.delete_by_label(f"mekamb-music:{job.id}", delete_files=True)
-        except Exception as exc:
-            can_clean_quarantine = False
-            errors.append(f"Could not remove torrent from qBittorrent: {exc}")
-
-    if settings.cleanup_quarantine_after_import and can_clean_quarantine:
-        try:
-            remove_quarantine_path(job.quarantine_path)
-        except Exception as exc:
-            errors.append(f"Could not clean quarantine path: {exc}")
-
-    if errors:
-        job.error_message = "; ".join(errors)
+async def cleanup_completed_import(job: ImportJob) -> None:
+    if not settings.cleanup_quarantine_after_import:
+        return
+    try:
+        remove_quarantine_path(job.quarantine_path)
+    except Exception as exc:
+        job.error_message = f"Could not clean quarantine path: {exc}"
         job.updated_at = utcnow()
         logger.warning("Import %s finished with cleanup warnings: %s", job.id, job.error_message)
 
@@ -259,25 +205,12 @@ def resolve_quarantine_path(quarantine_path: str, *, action: str = "use") -> Pat
 
 def _storage_key(info_hash: str, source: Path) -> str:
     digest = hashlib.sha256(source.read_bytes()).hexdigest()[:16]
-    return f"{info_hash.lower()}/{digest}-{source.name}"
+    return f"{_key_namespace(info_hash)}/{digest}-{source.name}"
 
 
-def validate_torrent_status_for_job(job: ImportJob, torrent_status) -> None:
-    expected_hash = job.info_hash.lower()
-    actual_hash = torrent_status.info_hash.lower()
-    if actual_hash != expected_hash:
-        raise TorrentStatusMismatch(
-            f"Torrent info_hash {torrent_status.info_hash!r} "
-            f"does not match import {job.info_hash!r}."
-        )
-
-    expected_save_path = (settings.torrent_download_root / str(job.id)).as_posix().rstrip("/")
-    actual_save_path = Path(torrent_status.save_path).as_posix().rstrip("/")
-    if actual_save_path != expected_save_path:
-        raise TorrentStatusMismatch(
-            f"Torrent save_path {torrent_status.save_path!r} "
-            f"does not match expected {expected_save_path!r}."
-        )
+def _key_namespace(info_hash: str) -> str:
+    # Lidarr keys look like "lidarr:123"; keep them filesystem-safe as a prefix.
+    return "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in info_hash.lower())
 
 
 if __name__ == "__main__":

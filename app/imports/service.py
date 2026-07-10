@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from shutil import rmtree
+from shutil import copy2, copytree, rmtree
 from typing import Protocol
 from uuid import UUID, uuid4
 
 from app.imports.domain import ImportRecord, ImportRepository, ImportStatus
-from app.sources.indexers import MusicIndexerImportCandidate
-from app.sources.personal_1337x import Personal1337xImportCandidate
-from app.sources.piratebay import PirateBayImportCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -28,14 +26,6 @@ class ImportNotRetryable(RuntimeError):
     pass
 
 
-class TorrentDownloader(Protocol):
-    async def enqueue(self, *, magnet_link: str, download_path: Path, label: str) -> None:
-        ...
-
-    async def delete_by_label(self, label: str, *, delete_files: bool) -> bool:
-        ...
-
-
 class ImportEventPublisher(Protocol):
     async def notify_import_changed(self, import_id: UUID) -> None:
         ...
@@ -46,19 +36,10 @@ class NoopImportEventPublisher:
         return None
 
 
-class TorrentImportCandidate(Protocol):
-    torrent_id: str
-    info_hash: str
-    magnet_link: str
-    uploader: str
-    source_url: str
-
-
 @dataclass(frozen=True)
 class QuarantinePlan:
     import_id: UUID
     host_path: Path
-    torrent_path: Path
 
 
 class QuarantinePlanner:
@@ -66,11 +47,9 @@ class QuarantinePlanner:
         self,
         *,
         quarantine_root: Path,
-        torrent_download_root: Path,
         library_root: Path,
     ) -> None:
         self.quarantine_root = quarantine_root
-        self.torrent_download_root = torrent_download_root
         self.library_root = library_root
 
     def plan(self, import_id: UUID) -> QuarantinePlan:
@@ -83,22 +62,25 @@ class QuarantinePlanner:
         if host_root not in host_path.parents:
             raise SandboxViolation("Quarantine path escaped the configured quarantine root.")
 
-        torrent_path = self.torrent_download_root / str(import_id)
-        return QuarantinePlan(import_id=import_id, host_path=host_path, torrent_path=torrent_path)
+        return QuarantinePlan(import_id=import_id, host_path=host_path)
 
 
 class ImportService:
+    """Owns ingest job records. Downloading/organizing is done by Lidarr; this
+    service materializes Lidarr's finished album into quarantine and hands it to
+    the worker, which runs the existing audio-validation → library pipeline."""
+
     def __init__(
         self,
         *,
         repository: ImportRepository,
-        downloader: TorrentDownloader,
         planner: QuarantinePlanner,
+        ingest_strategy: str = "copy",
         event_publisher: ImportEventPublisher | None = None,
     ) -> None:
         self.repository = repository
-        self.downloader = downloader
         self.planner = planner
+        self.ingest_strategy = ingest_strategy
         self.event_publisher = event_publisher or NoopImportEventPublisher()
 
     @classmethod
@@ -107,73 +89,60 @@ class ImportService:
         settings: object,
         *,
         repository: ImportRepository,
-        downloader: TorrentDownloader,
         event_publisher: ImportEventPublisher | None = None,
     ) -> "ImportService":
         planner = QuarantinePlanner(
             quarantine_root=getattr(settings, "quarantine_root"),
-            torrent_download_root=getattr(settings, "torrent_download_root"),
             library_root=getattr(settings, "library_root"),
         )
         return cls(
             repository=repository,
-            downloader=downloader,
             planner=planner,
+            ingest_strategy=getattr(settings, "lidarr_ingest_strategy", "copy"),
             event_publisher=event_publisher,
         )
 
-    async def create_1337x_import(self, candidate: Personal1337xImportCandidate) -> ImportRecord:
-        return await self._create_torrent_import(candidate, source="personal_1337x")
-
-    async def create_piratebay_import(self, candidate: PirateBayImportCandidate) -> ImportRecord:
-        return await self._create_torrent_import(candidate, source="piratebay")
-
-    async def create_indexer_import(self, candidate: MusicIndexerImportCandidate) -> ImportRecord:
-        return await self._create_torrent_import(candidate, source="indexer")
-
-    async def create_synced_torrent_import(
+    async def create_lidarr_import(
         self,
-        candidate: TorrentImportCandidate,
         *,
-        source: str,
+        source_dir: Path,
+        foreign_key: str,
+        name: str,
+        source_url: str = "lidarr",
     ) -> ImportRecord:
-        return await self._create_torrent_import(candidate, source=source)
+        """Materialize a Lidarr-imported album folder into quarantine and queue
+        it for ingest. ``foreign_key`` (e.g. the Lidarr album/release id) doubles
+        as the storage-key namespace, replacing a torrent info_hash."""
+        source_dir = Path(source_dir)
+        if not source_dir.exists() or not source_dir.is_dir():
+            raise InvalidImportCandidate(f"Lidarr import path {source_dir} is not a directory.")
+        info_hash = _normalize_key(foreign_key)
+        if not info_hash:
+            raise InvalidImportCandidate("Lidarr import is missing an identifier.")
 
-    async def _create_torrent_import(
-        self,
-        candidate: TorrentImportCandidate,
-        *,
-        source: str,
-    ) -> ImportRecord:
-        self._validate_candidate(candidate)
-
-        existing = await self.repository.get_by_info_hash(candidate.info_hash)
+        existing = await self.repository.get_by_info_hash(info_hash)
         if existing is not None:
             return existing
 
         import_id = uuid4()
         quarantine = self.planner.plan(import_id)
         quarantine.host_path.mkdir(parents=True, exist_ok=True)
+        _materialize(source_dir, quarantine.host_path, strategy=self.ingest_strategy)
 
         now = datetime.now(UTC)
         record = ImportRecord(
             id=import_id,
-            source=source,
-            torrent_id=candidate.torrent_id,
-            info_hash=candidate.info_hash,
-            magnet_link=candidate.magnet_link,
-            uploader=candidate.uploader,
-            source_url=candidate.source_url,
-            status=ImportStatus.QUEUED.value,
+            source="lidarr",
+            torrent_id=info_hash,
+            info_hash=info_hash,
+            magnet_link="",
+            uploader="lidarr",
+            source_url=source_url or "lidarr",
+            status=ImportStatus.READY_TO_IMPORT.value,
             quarantine_path=str(quarantine.host_path),
             error_message=None,
             created_at=now,
             updated_at=now,
-        )
-        await self.downloader.enqueue(
-            magnet_link=candidate.magnet_link,
-            download_path=quarantine.torrent_path,
-            label=f"mekamb-music:{import_id}",
         )
         record = await self.repository.add(record)
         await self._notify_import_changed(record.id)
@@ -184,47 +153,30 @@ class ImportService:
 
     async def cancel_import(self, import_id: UUID, *, delete_files: bool = True) -> ImportRecord:
         record = await self.repository.get(import_id)
-        removed_from_client = await self.downloader.delete_by_label(
-            f"mekamb-music:{import_id}",
-            delete_files=delete_files,
-        )
         if delete_files:
             self._remove_quarantine_path(record.quarantine_path)
 
-        now = datetime.now(UTC)
         record.status = ImportStatus.CANCELED.value
-        record.error_message = (
-            None if removed_from_client else "Torrent was not visible in qBittorrent."
-        )
-        record.updated_at = now
+        record.error_message = None
+        record.updated_at = datetime.now(UTC)
         record = await self.repository.update(record)
         await self._notify_import_changed(record.id)
         return record
 
-    async def retry_import(self, import_id: UUID, *, delete_files: bool = True) -> ImportRecord:
+    async def retry_import(self, import_id: UUID, *, delete_files: bool = False) -> ImportRecord:
         record = await self.repository.get(import_id)
         if record.status in ImportStatus.active():
             raise ImportNotRetryable("Import is already active.")
         if record.status == ImportStatus.IMPORTED.value:
             raise ImportNotRetryable("Imported records cannot be retried.")
 
-        await self.downloader.delete_by_label(
-            f"mekamb-music:{import_id}",
-            delete_files=delete_files,
-        )
-        quarantine = self.planner.plan(import_id)
-        if delete_files:
-            self._remove_quarantine_path(str(quarantine.host_path))
-        quarantine.host_path.mkdir(parents=True, exist_ok=True)
+        quarantine_path = Path(record.quarantine_path)
+        if not quarantine_path.exists():
+            raise ImportNotRetryable(
+                "Quarantine files are gone; re-add the artist/album through the catalog."
+            )
 
-        await self.downloader.enqueue(
-            magnet_link=record.magnet_link,
-            download_path=quarantine.torrent_path,
-            label=f"mekamb-music:{import_id}",
-        )
-
-        record.status = ImportStatus.QUEUED.value
-        record.quarantine_path = str(quarantine.host_path)
+        record.status = ImportStatus.READY_TO_IMPORT.value
         record.error_message = None
         record.updated_at = datetime.now(UTC)
         record = await self.repository.update(record)
@@ -240,16 +192,6 @@ class ImportService:
     ) -> list[ImportRecord]:
         return await self.repository.list(status=status, limit=limit, offset=offset)
 
-    def _validate_candidate(self, candidate: Personal1337xImportCandidate) -> None:
-        if not candidate.magnet_link:
-            raise InvalidImportCandidate("Import candidate has no magnet link.")
-        if not candidate.info_hash:
-            raise InvalidImportCandidate("Import candidate has no info hash.")
-        if not candidate.uploader:
-            raise InvalidImportCandidate("Import candidate has no uploader.")
-        if not candidate.source_url:
-            raise InvalidImportCandidate("Import candidate has no source URL.")
-
     def _remove_quarantine_path(self, quarantine_path: str) -> None:
         path = Path(quarantine_path).resolve()
         root = self.planner.quarantine_root.resolve()
@@ -263,3 +205,29 @@ class ImportService:
             await self.event_publisher.notify_import_changed(import_id)
         except Exception as exc:
             logger.warning("Could not publish import event for %s: %s", import_id, exc)
+
+
+def _normalize_key(value: str) -> str:
+    return "".join(ch for ch in str(value).strip() if ch.isalnum() or ch in "-_:.").strip()
+
+
+def _materialize(source_dir: Path, dest_dir: Path, *, strategy: str) -> None:
+    """Copy (or hardlink) the album files from Lidarr's output into quarantine.
+    Hardlinking avoids duplicating large lossless files when both roots live on
+    the same filesystem; it falls back to a copy across devices."""
+    for root, _dirs, files in os.walk(source_dir):
+        rel_root = Path(root).relative_to(source_dir)
+        target_root = dest_dir / rel_root
+        target_root.mkdir(parents=True, exist_ok=True)
+        for filename in files:
+            src = Path(root) / filename
+            dst = target_root / filename
+            if dst.exists():
+                continue
+            if strategy == "hardlink":
+                try:
+                    os.link(src, dst)
+                    continue
+                except OSError:
+                    pass
+            copy2(src, dst)

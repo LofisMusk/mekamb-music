@@ -408,6 +408,85 @@ data class RegisterRequest(
     val password: String,
 )
 
+// ── Catalog (self-service Lidarr acquisition) ───────────────────────────────
+
+@Serializable
+data class CatalogItem(
+    val kind: String,
+    @SerialName("foreign_id") val foreignId: String,
+    val title: String,
+    val artist: String? = null,
+    @SerialName("artist_foreign_id") val artistForeignId: String? = null,
+    val disambiguation: String? = null,
+    val year: Int? = null,
+) {
+    val subtitle: String
+        get() = listOfNotNull(
+            artist?.takeIf { it.isNotBlank() },
+            year?.toString(),
+            disambiguation?.takeIf { it.isNotBlank() },
+        ).joinToString(" · ")
+}
+
+@Serializable
+data class CatalogSearchResponse(
+    val items: List<CatalogItem> = emptyList(),
+    val kind: String = "artist",
+    val query: String = "",
+)
+
+@Serializable
+data class CatalogAddRequest(
+    val kind: String,
+    @SerialName("foreign_id") val foreignId: String,
+    val title: String,
+    val artist: String? = null,
+    @SerialName("artist_foreign_id") val artistForeignId: String? = null,
+)
+
+@Serializable
+data class CatalogRequestItem(
+    val id: String,
+    val kind: String,
+    @SerialName("foreign_id") val foreignId: String,
+    val title: String,
+    val status: String,
+)
+
+@Serializable
+data class CatalogRequestListResponse(val items: List<CatalogRequestItem> = emptyList())
+
+// ── Per-user libraries (curated subsets of the shared catalog) ───────────────
+
+@Serializable
+data class LibrarySummary(
+    val id: String,
+    val name: String,
+    @SerialName("track_count") val trackCount: Int = 0,
+)
+
+@Serializable
+data class LibraryListResponse(val items: List<LibrarySummary> = emptyList())
+
+@Serializable
+data class LibraryTrackEntry(
+    val position: Int = 0,
+    val track: Track,
+)
+
+@Serializable
+data class LibraryDetail(
+    val id: String,
+    val name: String,
+    val tracks: List<LibraryTrackEntry> = emptyList(),
+)
+
+@Serializable
+data class LibraryCreateRequest(val name: String)
+
+@Serializable
+data class LibraryTrackAddRequest(@SerialName("track_id") val trackId: String)
+
 // ── GitHub releases (auto-updater) ──────────────────────────────────────────
 
 @Serializable

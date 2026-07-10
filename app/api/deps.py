@@ -5,21 +5,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.service import identity_for, resolve_session_token
+from app.catalog.lidarr_client import LidarrClient
 from app.core.auth import ApiKeyIdentity, match_bearer_token
 from app.core.config import settings
 from app.db.models import User
 from app.db.session import get_session
-from app.downloads.qbittorrent import QBittorrentDownloader
-from app.downloads.service import DownloadService
 from app.imports.domain import ImportRepository
 from app.imports.queue import RedisImportQueue
 from app.imports.repository import SqlAlchemyImportRepository
 from app.imports.service import ImportEventPublisher, ImportService
+from app.libraries.repository import SqlAlchemyLibraryRepository
+from app.libraries.service import LibraryService
 from app.playlists.repository import SqlAlchemyPlaylistRepository
 from app.playlists.service import PlaylistService
-from app.sources.indexers import MusicIndexerProvider
-from app.sources.personal_1337x import Personal1337xProvider
-from app.sources.piratebay import PirateBayProvider
 
 
 async def db_session() -> AsyncIterator[AsyncSession]:
@@ -111,24 +109,12 @@ async def require_admin(user: User = Depends(require_user)) -> User:
     return user
 
 
-def personal_1337x_provider() -> Personal1337xProvider:
-    return Personal1337xProvider.from_settings(settings)
-
-
-def piratebay_provider() -> PirateBayProvider:
-    return PirateBayProvider.from_settings(settings)
-
-
-def music_indexer_provider() -> MusicIndexerProvider:
-    return MusicIndexerProvider.from_settings(settings)
+def lidarr_client() -> LidarrClient:
+    return LidarrClient.from_settings(settings)
 
 
 def redis_client() -> Redis:
     return RedisImportQueue.from_settings(settings).client
-
-
-def torrent_downloader() -> QBittorrentDownloader:
-    return QBittorrentDownloader.from_settings(settings)
 
 
 def import_repository(session: AsyncSession = Depends(db_session)) -> ImportRepository:
@@ -145,22 +131,13 @@ async def import_event_publisher() -> AsyncIterator[ImportEventPublisher]:
 
 def import_service(
     repository: ImportRepository = Depends(import_repository),
-    downloader: QBittorrentDownloader = Depends(torrent_downloader),
     event_publisher: ImportEventPublisher = Depends(import_event_publisher),
 ) -> ImportService:
     return ImportService.from_settings(
         settings,
         repository=repository,
-        downloader=downloader,
         event_publisher=event_publisher,
     )
-
-
-def download_service(
-    repository: ImportRepository = Depends(import_repository),
-    downloader: QBittorrentDownloader = Depends(torrent_downloader),
-) -> DownloadService:
-    return DownloadService(repository=repository, torrent_client=downloader)
 
 
 def playlist_service(
@@ -168,3 +145,10 @@ def playlist_service(
     api_key: ApiKeyIdentity = Depends(require_token),
 ) -> PlaylistService:
     return PlaylistService(repository=SqlAlchemyPlaylistRepository(session, api_key_id=api_key.id))
+
+
+def library_service(
+    session: AsyncSession = Depends(db_session),
+    api_key: ApiKeyIdentity = Depends(require_token),
+) -> LibraryService:
+    return LibraryService(repository=SqlAlchemyLibraryRepository(session, api_key_id=api_key.id))

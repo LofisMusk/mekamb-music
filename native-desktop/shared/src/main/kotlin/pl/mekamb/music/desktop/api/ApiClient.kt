@@ -290,18 +290,54 @@ class MekambApi(
     suspend fun removeTrackFromPlaylist(playlistId: String, trackId: String): PlaylistDetail =
         client.delete(url("/playlists/$playlistId/tracks/$trackId")) { auth() }.expect()
 
-    // ── Sources (torrent / indexer search) ──────────────────────────────
+    // ── Catalog (self-service Lidarr acquisition) ───────────────────────
 
-    suspend fun unifiedSearch(query: String): SourceSearchResponse =
-        client.get(url("/sources/search?q=${query.encodeURLParameter()}")) { auth() }.expect()
+    suspend fun catalogSearch(query: String, kind: String = "artist"): CatalogSearchResponse =
+        client.get(url("/catalog/search?kind=$kind&q=${query.encodeURLParameter()}")) { auth() }.expect()
 
-    suspend fun indexerSearch(query: String, prowlarrApiKey: String? = null): SourceSearchResponse =
-        client.get(url("/sources/indexers/search?q=${query.encodeURLParameter()}")) {
+    suspend fun catalogAdd(request: CatalogAddRequest): CatalogRequestListResponse =
+        client.post(url("/catalog/add")) {
             auth()
-            prowlarrApiKey?.takeIf { it.isNotBlank() }?.let { header("X-Prowlarr-Api-Key", it) }
+            contentType(ContentType.Application.Json)
+            setBody(request)
         }.expect()
 
-    // ── Imports & downloads ─────────────────────────────────────────────
+    suspend fun catalogRequests(): CatalogRequestListResponse =
+        client.get(url("/catalog/requests")) { auth() }.expect()
+
+    // ── Per-user libraries ──────────────────────────────────────────────
+
+    suspend fun listLibraries(limit: Int = 100, offset: Int = 0): LibraryListResponse =
+        client.get(url("/libraries")) {
+            auth()
+            parameter("limit", limit)
+            parameter("offset", offset)
+        }.expect()
+
+    suspend fun createLibrary(name: String): LibraryDetail =
+        client.post(url("/libraries")) {
+            auth()
+            contentType(ContentType.Application.Json)
+            setBody(LibraryCreateRequest(name))
+        }.expect()
+
+    suspend fun getLibrary(libraryId: String): LibraryDetail =
+        client.get(url("/libraries/$libraryId")) { auth() }.expect()
+
+    suspend fun addTrackToLibrary(libraryId: String, trackId: String): LibraryDetail =
+        client.post(url("/libraries/$libraryId/tracks")) {
+            auth()
+            contentType(ContentType.Application.Json)
+            setBody(LibraryTrackAddRequest(trackId))
+        }.expect()
+
+    suspend fun removeTrackFromLibrary(libraryId: String, trackId: String): LibraryDetail =
+        client.delete(url("/libraries/$libraryId/tracks/$trackId")) { auth() }.expect()
+
+    suspend fun deleteLibrary(libraryId: String) =
+        client.delete(url("/libraries/$libraryId")) { auth() }.expectOk()
+
+    // ── Imports ─────────────────────────────────────────────────────────
 
     suspend fun listImports(status: String? = null, limit: Int = 50, offset: Int = 0): ImportListResponse =
         client.get(url("/imports")) {
@@ -309,19 +345,6 @@ class MekambApi(
             parameter("limit", limit)
             parameter("offset", offset)
             status?.takeIf { it.isNotBlank() }?.let { parameter("status", it) }
-        }.expect()
-
-    suspend fun import1337x(torrentId: String): ImportRecord =
-        client.post(url("/imports/1337x/${torrentId.encodeURLParameter()}")) { auth() }.expect()
-
-    suspend fun importPirateBay(torrentId: String): ImportRecord =
-        client.post(url("/imports/piratebay/${torrentId.encodeURLParameter()}")) { auth() }.expect()
-
-    suspend fun importIndexer(request: IndexerImportRequest): ImportRecord =
-        client.post(url("/imports/indexer")) {
-            auth()
-            contentType(ContentType.Application.Json)
-            setBody(request)
         }.expect()
 
     suspend fun getImport(importId: String): ImportRecord =
@@ -338,9 +361,6 @@ class MekambApi(
             auth()
             parameter("delete_files", deleteFiles)
         }.expect()
-
-    suspend fun downloadStatus(importId: String): DownloadStatusResponse =
-        client.get(url("/downloads/$importId")) { auth() }.expect()
 
     // ── Recommendations ─────────────────────────────────────────────────
 

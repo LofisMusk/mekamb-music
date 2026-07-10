@@ -389,12 +389,120 @@ struct IndexerImportPayload: Encodable {
 
 enum SearchMode: String, CaseIterable, Identifiable {
     case library = "Library"
-    case torrent = "Torrent"
-    case indexer = "Indexers"
+    case catalog = "Add Music"
     var id: String { rawValue }
 
+    /// True when the mode queries the server (the Lidarr-backed catalog) rather
+    /// than filtering the already-loaded library in memory.
     var searchesRemoteSources: Bool {
-        self == .torrent || self == .indexer
+        self == .catalog
+    }
+}
+
+// ── Catalog (self-service Lidarr acquisition) ────────────────────────────────
+enum CatalogKind: String, Codable, CaseIterable, Identifiable {
+    case artist
+    case album
+    var id: String { rawValue }
+    var label: String { self == .artist ? "Artists" : "Albums" }
+}
+
+struct CatalogItem: Identifiable, Codable, Hashable {
+    let kind: String
+    let foreignId: String
+    let title: String
+    let artist: String?
+    let artistForeignId: String?
+    let disambiguation: String?
+    let year: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case foreignId = "foreign_id"
+        case title
+        case artist
+        case artistForeignId = "artist_foreign_id"
+        case disambiguation
+        case year
+    }
+
+    var id: String { "\(kind):\(foreignId)" }
+    var subtitle: String {
+        var parts: [String] = []
+        if let artist, !artist.isEmpty { parts.append(artist) }
+        if let year { parts.append(String(year)) }
+        if let disambiguation, !disambiguation.isEmpty { parts.append(disambiguation) }
+        return parts.joined(separator: " · ")
+    }
+}
+
+struct CatalogSearchResponse: Codable {
+    let items: [CatalogItem]
+    let kind: String
+    let query: String
+}
+
+struct CatalogAddRequestBody: Encodable {
+    let kind: String
+    let foreignId: String
+    let title: String
+    let artist: String?
+    let artistForeignId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case foreignId = "foreign_id"
+        case title
+        case artist
+        case artistForeignId = "artist_foreign_id"
+    }
+}
+
+struct CatalogRequestItem: Identifiable, Codable, Hashable {
+    let id: String
+    let kind: String
+    let foreignId: String
+    let title: String
+    let status: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case foreignId = "foreign_id"
+        case title
+        case status
+    }
+}
+
+struct CatalogRequestListResponse: Codable { let items: [CatalogRequestItem] }
+
+// ── Per-user libraries (curated subsets of the shared catalog) ───────────────
+struct LibrarySummary: Identifiable, Codable, Hashable {
+    let id: String
+    let name: String
+    let trackCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case trackCount = "track_count"
+    }
+}
+
+struct LibraryListResponse: Codable { let items: [LibrarySummary] }
+
+struct LibraryTrackEntry: Codable, Hashable {
+    let position: Int
+    let track: ApiTrack
+}
+
+struct LibraryDetail: Identifiable, Codable, Hashable {
+    let id: String
+    let name: String
+    let tracks: [LibraryTrackEntry]
+
+    var orderedTracks: [ApiTrack] {
+        tracks.sorted { $0.position < $1.position }.map(\.track)
     }
 }
 
@@ -490,16 +598,20 @@ final class AppState: ObservableObject {
     func resetSearch() {
         searchText = ""
         searchMode = .library
-        torrents = []
+        catalogItems = []
     }
     @Published var tracks: [ApiTrack] = []
     @Published var likedTrackIds: Set<String> = []
-    @Published var torrents: [TorrentResult] = []
+    @Published var catalogItems: [CatalogItem] = []
+    @Published var catalogKind: CatalogKind = .artist
+    @Published var catalogRequests: [CatalogRequestItem] = []
+    @Published var addedCatalogIds: Set<String> = []
+    @Published var libraries: [LibrarySummary] = []
     @Published var albumCovers: [String: UIImage] = [:]
     @Published var selectedAlbumId: String?
     @Published var selectedPlaylistId: String?
     @Published var isLoading = false
-    @Published var isSearchingTorrents = false
+    @Published var isSearchingCatalog = false
     @Published var isTestingConnection = false
     @Published var isAuthenticating = false
     /// Outcome of the last login/migrate/register/logout attempt, shown in Settings.
@@ -1092,54 +1204,140 @@ final class AppState: ObservableObject {
         }
     }
 
-    func searchTorrents() async {
+    // ── Catalog: request that Lidarr acquire an artist/album ─────────────────
+    func searchCatalog() async {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canUseApi, !query.isEmpty else {
-            torrents = []
+            catalogItems = []
             return
         }
-        isSearchingTorrents = true
+        isSearchingCatalog = true
         errorMessage = nil
         do {
             let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-            let items: [TorrentResult]
-            if searchMode == .indexer {
-                let response: TorrentSearchResponse = try await request(
-                    "/sources/indexers/search?q=\(encoded)",
-                    extraHeaders: indexerSearchHeaders()
-                )
-                items = response.items
-            } else {
-                do {
-                    let response: TorrentSearchResponse = try await request("/sources/search?q=\(encoded)")
-                    items = response.items
-                } catch {
-                    guard isNotFound(error) else { throw error }
-                    items = try await searchLegacyTorrentSources(encodedQuery: encoded)
-                }
-            }
-            torrents = items.sorted { left, right in
-                Int(left.seeders ?? "0") ?? 0 > Int(right.seeders ?? "0") ?? 0
-            }
+            let response: CatalogSearchResponse = try await request(
+                "/catalog/search?kind=\(catalogKind.rawValue)&q=\(encoded)"
+            )
+            catalogItems = response.items
         } catch {
             if !isCancellation(error) {
                 errorMessage = clean(error)
-                torrents = []
+                catalogItems = []
             }
         }
-        isSearchingTorrents = false
+        isSearchingCatalog = false
     }
 
-    func importTorrent(_ torrent: TorrentResult) async {
+    func addToCatalog(_ item: CatalogItem) async {
         errorMessage = nil
         do {
-            if torrent.source == .indexer {
-                let body = try indexerImportBody(for: torrent)
-                let _: EmptyResponse = try await request(torrent.source.importPath, method: "POST", body: body)
-            } else {
-                let encodedId = encodePathComponent(torrent.torrentId)
-                let _: EmptyResponse = try await request("\(torrent.source.importPath)/\(encodedId)", method: "POST")
-            }
+            let body = CatalogAddRequestBody(
+                kind: item.kind,
+                foreignId: item.foreignId,
+                title: item.title,
+                artist: item.artist,
+                artistForeignId: item.artistForeignId
+            )
+            let response: CatalogRequestListResponse = try await request(
+                "/catalog/add", method: "POST", body: try JSONEncoder().encode(body)
+            )
+            catalogRequests = response.items
+            addedCatalogIds.insert(item.id)
+        } catch {
+            if !isCancellation(error) { errorMessage = clean(error) }
+        }
+    }
+
+    func loadCatalogRequests() async {
+        guard canUseApi else { return }
+        do {
+            let response: CatalogRequestListResponse = try await request("/catalog/requests")
+            catalogRequests = response.items
+        } catch {
+            if !isCancellation(error) { errorMessage = clean(error) }
+        }
+    }
+
+    // ── Per-user libraries ───────────────────────────────────────────────────
+    func loadLibraries() async {
+        guard canUseApi else { return }
+        do {
+            let response: LibraryListResponse = try await request("/libraries?limit=100")
+            libraries = response.items
+        } catch {
+            if !isCancellation(error) { errorMessage = clean(error) }
+        }
+    }
+
+    @discardableResult
+    func createLibrary(name: String) async -> LibraryDetail? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canUseApi, !trimmed.isEmpty else { return nil }
+        do {
+            struct Body: Encodable { let name: String }
+            let detail: LibraryDetail = try await request(
+                "/libraries", method: "POST", body: try JSONEncoder().encode(Body(name: trimmed))
+            )
+            await loadLibraries()
+            return detail
+        } catch {
+            if !isCancellation(error) { errorMessage = clean(error) }
+            return nil
+        }
+    }
+
+    func libraryDetail(_ id: String) async -> LibraryDetail? {
+        guard canUseApi else { return nil }
+        do {
+            let encoded = encodePathComponent(id)
+            return try await request("/libraries/\(encoded)")
+        } catch {
+            if !isCancellation(error) { errorMessage = clean(error) }
+            return nil
+        }
+    }
+
+    @discardableResult
+    func addTrack(_ trackId: String, toLibrary libraryId: String) async -> LibraryDetail? {
+        guard canUseApi else { return nil }
+        do {
+            struct Body: Encodable { let track_id: String }
+            let encoded = encodePathComponent(libraryId)
+            let detail: LibraryDetail = try await request(
+                "/libraries/\(encoded)/tracks", method: "POST",
+                body: try JSONEncoder().encode(Body(track_id: trackId))
+            )
+            await loadLibraries()
+            return detail
+        } catch {
+            if !isCancellation(error) { errorMessage = clean(error) }
+            return nil
+        }
+    }
+
+    @discardableResult
+    func removeTrack(_ trackId: String, fromLibrary libraryId: String) async -> LibraryDetail? {
+        guard canUseApi else { return nil }
+        do {
+            let encodedLib = encodePathComponent(libraryId)
+            let encodedTrack = encodePathComponent(trackId)
+            let detail: LibraryDetail = try await request(
+                "/libraries/\(encodedLib)/tracks/\(encodedTrack)", method: "DELETE"
+            )
+            await loadLibraries()
+            return detail
+        } catch {
+            if !isCancellation(error) { errorMessage = clean(error) }
+            return nil
+        }
+    }
+
+    func deleteLibrary(_ id: String) async {
+        guard canUseApi else { return }
+        do {
+            let encoded = encodePathComponent(id)
+            let _: EmptyResponse = try await request("/libraries/\(encoded)", method: "DELETE")
+            await loadLibraries()
         } catch {
             if !isCancellation(error) { errorMessage = clean(error) }
         }

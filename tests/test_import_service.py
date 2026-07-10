@@ -6,7 +6,6 @@ from uuid import UUID, uuid4
 
 from app.imports.domain import ImportRecord
 from app.imports.service import ImportService, QuarantinePlanner, SandboxViolation
-from app.sources.personal_1337x import Personal1337xImportCandidate
 
 
 class FakeRepository:
@@ -37,114 +36,77 @@ class FakeRepository:
         return record
 
 
-class FakeDownloader:
-    def __init__(self):
-        self.calls = []
-        self.deletes = []
-        self.delete_result = True
+def _service(root: Path, repository: FakeRepository) -> ImportService:
+    return ImportService(
+        repository=repository,
+        planner=QuarantinePlanner(
+            quarantine_root=root / "quarantine",
+            library_root=root / "library",
+        ),
+    )
 
-    async def enqueue(self, *, magnet_link: str, download_path: Path, label: str) -> None:
-        self.calls.append((magnet_link, download_path, label))
 
-    async def delete_by_label(self, label: str, *, delete_files: bool) -> bool:
-        self.deletes.append((label, delete_files))
-        return self.delete_result
+def _album(root: Path) -> Path:
+    source = root / "lidarr" / "Artist" / "Album"
+    source.mkdir(parents=True)
+    (source / "01 - track.flac").write_bytes(b"audio")
+    return source
 
 
 class ImportServiceTests(unittest.IsolatedAsyncioTestCase):
-    def _candidate(self, *, info_hash: str = "ABC") -> Personal1337xImportCandidate:
-        return Personal1337xImportCandidate(
-            torrent_id="1",
-            info_hash=info_hash,
-            magnet_link=f"magnet:?xt=urn:btih:{info_hash}",
-            uploader="mekamb",
-            source_url="https://1337x.to/torrent/1/example/",
-            name="mine",
-            fetched_at=datetime.now(UTC),
-        )
-
-    async def test_import_uses_quarantine_not_library(self):
+    async def test_lidarr_import_materializes_into_quarantine(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repository = FakeRepository()
-            downloader = FakeDownloader()
-            service = ImportService(
-                repository=repository,
-                downloader=downloader,
-                planner=QuarantinePlanner(
-                    quarantine_root=root / "quarantine",
-                    torrent_download_root=Path("/downloads/incomplete"),
-                    library_root=root / "library",
-                ),
+            service = _service(root, repository)
+
+            record = await service.create_lidarr_import(
+                source_dir=_album(root),
+                foreign_key="lidarr:42",
+                name="Artist - Album",
             )
 
-            record = await service.create_1337x_import(self._candidate())
-
+            self.assertEqual(record.source, "lidarr")
             self.assertIn("quarantine", record.quarantine_path)
             self.assertNotIn("/library", record.quarantine_path)
-            self.assertEqual(len(downloader.calls), 1)
+            self.assertEqual(record.status, "ready_to_import")
+            copied = list(Path(record.quarantine_path).rglob("*.flac"))
+            self.assertEqual(len(copied), 1)
 
-    async def test_import_is_idempotent_by_info_hash(self):
+    async def test_lidarr_import_is_idempotent_by_foreign_key(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repository = FakeRepository()
-            downloader = FakeDownloader()
-            service = ImportService(
-                repository=repository,
-                downloader=downloader,
-                planner=QuarantinePlanner(
-                    quarantine_root=root / "quarantine",
-                    torrent_download_root=Path("/downloads/incomplete"),
-                    library_root=root / "library",
-                ),
+            service = _service(root, repository)
+
+            album = _album(root)
+            first = await service.create_lidarr_import(
+                source_dir=album, foreign_key="lidarr:42", name="a"
             )
-            existing = ImportRecord(
-                id=uuid4(),
-                source="personal_1337x",
-                torrent_id="old",
-                info_hash="ABC",
-                magnet_link="magnet:?xt=urn:btih:ABC",
-                uploader="mekamb",
-                source_url="https://1337x.to/torrent/old/example/",
-                status="queued",
-                quarantine_path=str(root / "quarantine" / "existing"),
-                error_message=None,
-                created_at=datetime.now(UTC),
-                updated_at=datetime.now(UTC),
+            second = await service.create_lidarr_import(
+                source_dir=album, foreign_key="lidarr:42", name="a"
             )
-            await repository.add(existing)
 
-            record = await service.create_1337x_import(self._candidate(info_hash="ABC"))
+            self.assertEqual(first.id, second.id)
+            self.assertEqual(len(repository.records), 1)
 
-            self.assertEqual(record.id, existing.id)
-            self.assertEqual(downloader.calls, [])
-
-    async def test_cancel_import_removes_torrent_and_quarantine_path(self):
+    async def test_cancel_import_removes_quarantine_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repository = FakeRepository()
-            downloader = FakeDownloader()
-            service = ImportService(
-                repository=repository,
-                downloader=downloader,
-                planner=QuarantinePlanner(
-                    quarantine_root=root / "quarantine",
-                    torrent_download_root=Path("/downloads/incomplete"),
-                    library_root=root / "library",
-                ),
-            )
+            service = _service(root, repository)
             quarantine_path = root / "quarantine" / "import-id"
             quarantine_path.mkdir(parents=True)
             (quarantine_path / "track.mp3").write_bytes(b"partial")
             record = ImportRecord(
                 id=uuid4(),
-                source="personal_1337x",
-                torrent_id="1",
-                info_hash="ABC",
-                magnet_link="magnet:?xt=urn:btih:ABC",
-                uploader="mekamb",
-                source_url="https://1337x.to/torrent/1/example/",
-                status="downloading",
+                source="lidarr",
+                torrent_id="lidarr:1",
+                info_hash="lidarr:1",
+                magnet_link="",
+                uploader="lidarr",
+                source_url="lidarr",
+                status="ready_to_import",
                 quarantine_path=str(quarantine_path),
                 error_message=None,
                 created_at=datetime.now(UTC),
@@ -155,34 +117,24 @@ class ImportServiceTests(unittest.IsolatedAsyncioTestCase):
             canceled = await service.cancel_import(record.id)
 
             self.assertEqual(canceled.status, "canceled")
-            self.assertEqual(downloader.deletes, [(f"mekamb-music:{record.id}", True)])
             self.assertFalse(quarantine_path.exists())
 
     async def test_cancel_import_refuses_cleanup_outside_quarantine(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repository = FakeRepository()
-            downloader = FakeDownloader()
-            service = ImportService(
-                repository=repository,
-                downloader=downloader,
-                planner=QuarantinePlanner(
-                    quarantine_root=root / "quarantine",
-                    torrent_download_root=Path("/downloads/incomplete"),
-                    library_root=root / "library",
-                ),
-            )
+            service = _service(root, repository)
             unsafe_path = root / "outside"
             unsafe_path.mkdir()
             record = ImportRecord(
                 id=uuid4(),
-                source="personal_1337x",
-                torrent_id="1",
-                info_hash="ABC",
-                magnet_link="magnet:?xt=urn:btih:ABC",
-                uploader="mekamb",
-                source_url="https://1337x.to/torrent/1/example/",
-                status="downloading",
+                source="lidarr",
+                torrent_id="lidarr:1",
+                info_hash="lidarr:1",
+                magnet_link="",
+                uploader="lidarr",
+                source_url="lidarr",
+                status="ready_to_import",
                 quarantine_path=str(unsafe_path),
                 error_message=None,
                 created_at=datetime.now(UTC),
@@ -200,12 +152,11 @@ class ImportServiceTests(unittest.IsolatedAsyncioTestCase):
             root = Path(tmp)
             planner = QuarantinePlanner(
                 quarantine_root=root / "library",
-                torrent_download_root=Path("/downloads/incomplete"),
                 library_root=root / "library",
             )
 
             with self.assertRaises(SandboxViolation):
-                planner.plan(__import__("uuid").uuid4())
+                planner.plan(uuid4())
 
 
 if __name__ == "__main__":

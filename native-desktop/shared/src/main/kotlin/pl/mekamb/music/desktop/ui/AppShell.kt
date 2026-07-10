@@ -22,14 +22,15 @@ import pl.mekamb.music.desktop.ui.components.UpdateFlowHost
 import pl.mekamb.music.desktop.ui.screens.AlbumDetailScreen
 import pl.mekamb.music.desktop.ui.screens.AlbumsScreen
 import pl.mekamb.music.desktop.ui.screens.HomeScreen
+import pl.mekamb.music.desktop.ui.screens.CatalogScreen
 import pl.mekamb.music.desktop.ui.screens.ImportsScreen
-import pl.mekamb.music.desktop.ui.screens.IndexerSearchScreen
+import pl.mekamb.music.desktop.ui.screens.LibrariesScreen
+import pl.mekamb.music.desktop.ui.screens.LibraryDetailScreen
 import pl.mekamb.music.desktop.ui.screens.LibraryScreen
 import pl.mekamb.music.desktop.ui.screens.LikedScreen
 import pl.mekamb.music.desktop.ui.screens.PlaylistDetailScreen
 import pl.mekamb.music.desktop.ui.screens.PlaylistsScreen
 import pl.mekamb.music.desktop.ui.screens.SettingsScreen
-import pl.mekamb.music.desktop.ui.screens.TorrentSearchScreen
 import pl.mekamb.music.desktop.vm.Screen
 
 // Breakpoints below which fixed-width side panels would otherwise squeeze the main content
@@ -66,8 +67,9 @@ fun AppShell() {
                             Screen.Playlists -> PlaylistsScreen()
                             is Screen.PlaylistDetail -> PlaylistDetailScreen(screen.playlistId)
                             Screen.Liked -> LikedScreen()
-                            Screen.TorrentSearch -> TorrentSearchScreen()
-                            Screen.IndexerSearch -> IndexerSearchScreen()
+                            Screen.Catalog -> CatalogScreen()
+                            Screen.Libraries -> LibrariesScreen()
+                            is Screen.LibraryDetail -> LibraryDetailScreen(screen.libraryId)
                             Screen.Imports -> ImportsScreen()
                             Screen.Settings -> SettingsScreen()
                         }

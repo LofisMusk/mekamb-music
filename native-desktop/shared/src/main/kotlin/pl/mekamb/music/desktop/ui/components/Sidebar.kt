@@ -70,8 +70,8 @@ private val TOP_NAV = listOf(
 )
 
 private val SOURCE_NAV = listOf(
-    NavEntry("Torrent Search", Icons.Filled.Search, Screen.TorrentSearch),
-    NavEntry("Indexer Search", Icons.Filled.Dns, Screen.IndexerSearch),
+    NavEntry("Add Music", Icons.Filled.Search, Screen.Catalog),
+    NavEntry("My Libraries", Icons.Filled.LibraryMusic, Screen.Libraries),
     NavEntry("Imports", Icons.Filled.CloudDownload, Screen.Imports),
 )
 

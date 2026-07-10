@@ -14,15 +14,19 @@ class Settings(BaseSettings):
     api_tokens: str = Field(default="")
     instance_id: str = "local"
 
-    personal_1337x_base_url: str = "https://1337x.to"
-    personal_1337x_base_urls: str = ""
-    personal_1337x_max_pages: int = 1
-    piratebay_api_base_url: str = "https://apibay.org"
-    piratebay_category: int = 100
-    music_indexer_prowlarr_url: str = ""
-    music_indexer_torznab_urls: str = ""
-    music_indexer_api_key: str = ""
-    music_indexer_categories: str = "3000"
+    # ── Lidarr (music acquisition + organization) ─────────────────────────────
+    # Lidarr owns discovery/monitoring/downloading (via its own Prowlarr +
+    # download client) and writes organized albums into its root folder. The
+    # backend proxies "add artist/album" requests to Lidarr and ingests the
+    # finished albums into its own quarantine → library → stream pipeline.
+    lidarr_enabled: bool = False
+    lidarr_url: str = ""  # e.g. http://lidarr:8686
+    lidarr_api_key: str = ""
+    lidarr_root_folder: str = ""  # Lidarr root folder path, also visible to the backend
+    lidarr_quality_profile_id: int = 1
+    lidarr_metadata_profile_id: int = 1
+    lidarr_webhook_token: str = ""  # shared secret verifying inbound Lidarr webhooks
+    lidarr_ingest_strategy: str = "copy"  # "copy" | "hardlink"
 
     database_url: str = "postgresql+asyncpg://music:music@localhost:5432/music"
     redis_url: str = "redis://localhost:6379/0"
@@ -37,14 +41,8 @@ class Settings(BaseSettings):
 
     quarantine_root: Path = Path("data/quarantine")
     library_root: Path = Path("data/library")
-    torrent_download_root: Path = Path("/downloads/incomplete")
-    torrent_rpc_url: str = "http://localhost:8080"
-    torrent_rpc_username: str = "admin"
-    torrent_rpc_password: str = "adminadmin"
-    torrent_listen_port: int = 6881
     import_worker_interval_seconds: int = 15
     cleanup_quarantine_after_import: bool = True
-    remove_torrent_after_import: bool = True
 
     # ── Cache TTL ────────────────────────────────────────────────────────────
     cache_ttl_days: int = 30
@@ -56,9 +54,6 @@ class Settings(BaseSettings):
     transcode_cache_root: Path = Path("data/transcode")
     transcode_aac_bitrate: str = "256k"
 
-    recommendation_sources: str = "indexer"
-    recommendation_auto_import_limit: int = 3
-    recommendation_min_seeders: int = 1
     recommendation_use_gemini: bool = True
     recommendation_gemini_candidate_limit: int = 24
     recommendation_scan_limit: int = 2000

@@ -15,7 +15,7 @@ async def collect_readiness(
     *,
     database_check: Callable[[], Awaitable[None]],
     redis_check: Callable[[], Awaitable[None]] | None = None,
-    torrent_client_check: Callable[[], Awaitable[None]] | None = None,
+    lidarr_check: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, object]:
     checks = [
         _check_api_token(settings),
@@ -24,7 +24,7 @@ async def collect_readiness(
         _check_directory("quarantine_root", getattr(settings, "quarantine_root")),
         _check_directory("library_root", getattr(settings, "library_root")),
         await _check_redis(redis_check),
-        await _check_torrent_client(torrent_client_check),
+        await _check_lidarr(lidarr_check),
         await _check_database(database_check),
     ]
     status = "ready" if all(check["status"] == "ok" for check in checks) else "not_ready"
@@ -89,16 +89,16 @@ async def _check_redis(redis_check: Callable[[], Awaitable[None]] | None) -> dic
     return _ok("redis")
 
 
-async def _check_torrent_client(
-    torrent_client_check: Callable[[], Awaitable[None]] | None,
+async def _check_lidarr(
+    lidarr_check: Callable[[], Awaitable[None]] | None,
 ) -> dict[str, str]:
-    if torrent_client_check is None:
-        return _ok("torrent_client")
+    if lidarr_check is None:
+        return _ok("lidarr")
     try:
-        await torrent_client_check()
+        await lidarr_check()
     except Exception as exc:
-        return _error("torrent_client", str(exc))
-    return _ok("torrent_client")
+        return _error("lidarr", str(exc))
+    return _ok("lidarr")
 
 
 def _ok(name: str) -> dict[str, str]:

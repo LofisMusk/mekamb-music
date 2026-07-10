@@ -14,7 +14,6 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -27,22 +26,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import pl.mekamb.music.desktop.api.DownloadStatusResponse
 import pl.mekamb.music.desktop.api.ImportRecord
 import pl.mekamb.music.desktop.ui.LocalApp
 import pl.mekamb.music.desktop.ui.components.EmptyState
 import pl.mekamb.music.desktop.ui.components.ScreenHeader
 import pl.mekamb.music.desktop.ui.theme.MekambColors
-import pl.mekamb.music.desktop.util.formatBytes
-import pl.mekamb.music.desktop.util.formatDuration
 
-private val TERMINAL_STATUSES = setOf("complete", "failed", "cancelled", "imported")
-private val ACTIVE_LIKE_STATUSES = setOf("pending", "downloading", "importing", "indexing")
+private val TERMINAL_STATUSES = setOf("complete", "failed", "cancelled", "canceled", "imported")
+private val ACTIVE_LIKE_STATUSES = setOf("queued", "pending", "downloading", "importing", "ready_to_import")
 
 @Composable
 fun ImportsScreen() {
@@ -50,7 +44,6 @@ fun ImportsScreen() {
     val scope = rememberCoroutineScope()
 
     var imports by remember { mutableStateOf<List<ImportRecord>>(emptyList()) }
-    var statuses by remember { mutableStateOf<Map<String, DownloadStatusResponse>>(emptyMap()) }
     var refreshedLibraryFor by remember { mutableStateOf(setOf<String>()) }
     var loaded by remember { mutableStateOf(false) }
 
@@ -61,22 +54,20 @@ fun ImportsScreen() {
 
     LaunchedEffect(Unit) { reload() }
 
-    LaunchedEffect(imports) {
+    // Lidarr ingest is quick; poll the import list while anything is still active
+    // and refresh the library when a new album finishes importing.
+    LaunchedEffect(Unit) {
         while (isActive) {
-            val active = imports.filter { it.status !in TERMINAL_STATUSES }
-            if (active.isNotEmpty()) {
-                val fetched = active.take(10).map { rec ->
-                    async { rec.id to runCatching { app.api.downloadStatus(rec.id) }.getOrNull() }
-                }.awaitAll().mapNotNull { (id, s) -> s?.let { id to it } }.toMap()
-                statuses = statuses + fetched
-                fetched.forEach { (id, status) ->
-                    if (status.importRecord.status in setOf("complete", "imported") && id !in refreshedLibraryFor) {
-                        refreshedLibraryFor = refreshedLibraryFor + id
-                        app.refreshLibrary()
-                    }
-                }
+            delay(2500)
+            val hadActive = imports.any { it.status !in TERMINAL_STATUSES }
+            reload()
+            imports.filter { it.status == "imported" && it.id !in refreshedLibraryFor }.forEach {
+                refreshedLibraryFor = refreshedLibraryFor + it.id
+                app.refreshLibrary()
             }
-            delay(1250)
+            if (!hadActive && imports.none { it.status !in TERMINAL_STATUSES }) {
+                // Nothing active; slow the loop by continuing (next delay handles pacing).
+            }
         }
     }
 
@@ -91,13 +82,12 @@ fun ImportsScreen() {
         )
 
         if (loaded && imports.isEmpty()) {
-            EmptyState("No imports yet")
+            EmptyState("No imports yet", "Albums acquired through the catalog appear here as they ingest.")
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(imports, key = { it.id }) { record ->
                     ImportCard(
                         record = record,
-                        status = statuses[record.id],
                         onCancel = { scope.launch { runCatching { app.api.cancelImport(record.id) }; reload() } },
                         onRetry = { scope.launch { runCatching { app.api.retryImport(record.id) }; reload() } },
                     )
@@ -110,14 +100,11 @@ fun ImportsScreen() {
 @Composable
 private fun ImportCard(
     record: ImportRecord,
-    status: DownloadStatusResponse?,
     onCancel: () -> Unit,
     onRetry: () -> Unit,
 ) {
-    val torrent = status?.torrent
-    val title = torrent?.name ?: record.torrentId ?: record.id
-    val effectiveStatus = status?.importRecord?.status ?: record.status
-    val chipColor = when (effectiveStatus) {
+    val title = record.torrentId ?: record.id
+    val chipColor = when (record.status) {
         "complete", "imported" -> MekambColors.Success
         "failed" -> MekambColors.Danger
         else -> MekambColors.Accent
@@ -135,7 +122,7 @@ private fun ImportCard(
                 Text(title, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
                 Surface(color = chipColor.copy(alpha = 0.2f), shape = RoundedCornerShape(4.dp)) {
                     Text(
-                        effectiveStatus,
+                        record.status,
                         style = MaterialTheme.typography.labelSmall,
                         color = chipColor,
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
@@ -143,29 +130,15 @@ private fun ImportCard(
                 }
             }
 
-            val progress = torrent?.progress
-            if (torrent != null && progress != null) {
-                LinearProgressIndicator(
-                    progress = { progress.toFloat() },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Text(
-                    "${formatBytes(torrent.downloadedBytes)} / ${formatBytes(torrent.sizeBytes)} · " +
-                        "${formatBytes(torrent.downloadSpeedBytes)}/s · ETA ${formatDuration(torrent.etaSeconds?.toDouble())}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MekambColors.Muted,
-                )
-            }
-
             record.errorMessage?.let { Text(it, color = MekambColors.Danger) }
 
-            val isActive = effectiveStatus in ACTIVE_LIKE_STATUSES
-            if (isActive || effectiveStatus == "failed") {
+            val isActive = record.status in ACTIVE_LIKE_STATUSES
+            if (isActive || record.status == "failed") {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (isActive) {
                         Button(onClick = onCancel) { Text("Cancel") }
                     }
-                    if (effectiveStatus == "failed") {
+                    if (record.status == "failed") {
                         Button(onClick = onRetry) { Text("Retry") }
                     }
                 }

@@ -11,12 +11,15 @@ def test_export_openapi_writes_schema_with_mobile_client_contract(tmp_path):
 
     assert exported == output
     assert payload["openapi"] == "3.1.0"
-    assert "/sources/1337x/search" in payload["paths"]
-    assert "/imports/1337x/{torrent_id}" in payload["paths"]
-    assert "/downloads/{import_id}" in payload["paths"]
+    assert "/catalog/search" in payload["paths"]
+    assert "/catalog/add" in payload["paths"]
+    assert "/libraries" in payload["paths"]
     assert "/tracks/{track_id}/stream" in payload["paths"]
-    assert "Source1337xSearchResponse" in payload["components"]["schemas"]
-    assert "DownloadStatusResponse" in payload["components"]["schemas"]
+    # Torrent search + downloads were replaced by Lidarr acquisition.
+    assert "/sources/1337x/search" not in payload["paths"]
+    assert "/downloads/{import_id}" not in payload["paths"]
+    assert "CatalogSearchResponse" in payload["components"]["schemas"]
+    assert "LibraryDetailResponse" in payload["components"]["schemas"]
     assert "TrackListResponse" in payload["components"]["schemas"]
 
 
