@@ -233,7 +233,14 @@ storage.
 
 - `LIDARR_URL` / `LIDARR_API_KEY` point the backend at Lidarr for artist/album
   lookup and add (`X-Api-Key`). `LIDARR_ENABLED=true` makes `/health/ready` verify
-  Lidarr is reachable.
+  Lidarr is reachable. `LIDARR_API_KEY` is also injected into the Lidarr container
+  as `LIDARR__AUTH__APIKEY` (and `PROWLARR_API_KEY` into Prowlarr) so both apps use
+  the exact key from `.env` — no need to copy it out of the WebUI.
+- Lidarr/Prowlarr WebUI auth is enforced via `LIDARR_AUTH_METHOD`/`LIDARR_AUTH_REQUIRED`
+  (and the `PROWLARR_` equivalents), passed through as `*__AUTH__METHOD` /
+  `*__AUTH__REQUIRED`. The Servarr apps have **no env var for the login
+  username/password** — it's hashed in their DB, so create it once in each app's
+  first-run setup wizard. Backend↔Lidarr calls authenticate by API key regardless.
 - `LIDARR_ROOT_FOLDER` is Lidarr's organized-output path. It must be mounted at the
   **same path** in both the Lidarr container and the API/worker containers so the
   webhook's track-file paths resolve on the backend side.

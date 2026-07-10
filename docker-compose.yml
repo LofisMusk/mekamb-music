@@ -126,6 +126,12 @@ services:
       PUID: 1000
       PGID: 1000
       TZ: Europe/Warsaw
+      # Enforce WebUI auth and pin the API key from .env. The login
+      # username/password itself is created once in Lidarr's setup wizard —
+      # Servarr apps store it hashed in their DB and have no env var for it.
+      LIDARR__AUTH__METHOD: ${LIDARR_AUTH_METHOD:-Forms}
+      LIDARR__AUTH__REQUIRED: ${LIDARR_AUTH_REQUIRED:-Enabled}
+      LIDARR__AUTH__APIKEY: ${LIDARR_API_KEY}
     ports:
       - "8686:8686"
     volumes:
@@ -159,6 +165,10 @@ services:
       PUID: 1000
       PGID: 1000
       TZ: Europe/Warsaw
+      # Same as Lidarr: enforce auth + pin the API key; login is set in the wizard.
+      PROWLARR__AUTH__METHOD: ${PROWLARR_AUTH_METHOD:-Forms}
+      PROWLARR__AUTH__REQUIRED: ${PROWLARR_AUTH_REQUIRED:-Enabled}
+      PROWLARR__AUTH__APIKEY: ${PROWLARR_API_KEY}
     ports:
       - "9696:9696"
     volumes:
