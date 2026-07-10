@@ -23,8 +23,38 @@ import io.ktor.http.encodeURLParameter
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 
-class ApiException(val statusCode: Int, message: String) : Exception(message)
+class ApiException(
+    val statusCode: Int,
+    message: String,
+    /** Stable machine code from the backend's `detail.code` (e.g. `token_migrated`), if any. */
+    val errorCode: String? = null,
+    /** Human-readable `detail.message` from the backend, safe to show in UI. */
+    val errorMessage: String? = null,
+) : Exception(message) {
+    val isTokenMigrated: Boolean get() = errorCode == "token_migrated"
+    fun userMessage(): String = errorMessage ?: (message ?: "Request failed (HTTP $statusCode)")
+}
+
+/** Builds an [ApiException], pulling `detail.code`/`detail.message` out of FastAPI error bodies. */
+internal fun apiException(statusCode: Int, body: String): ApiException {
+    var code: String? = null
+    var msg: String? = null
+    runCatching {
+        when (val detail = apiJson.parseToJsonElement(body).jsonObject["detail"]) {
+            is JsonPrimitive -> msg = detail.content
+            is JsonObject -> {
+                code = (detail["code"] as? JsonPrimitive)?.content
+                msg = (detail["message"] as? JsonPrimitive)?.content
+            }
+            else -> {}
+        }
+    }
+    return ApiException(statusCode, "HTTP $statusCode: ${msg ?: body.take(300)}", code, msg)
+}
 
 /**
  * Normalizes a user-entered endpoint the same way the mobile apps do:
@@ -70,16 +100,16 @@ class MekambApi(
 
     private suspend inline fun <reified T> HttpResponse.expect(): T {
         if (!status.isSuccess()) {
-            val detail = runCatching { bodyAsText().take(300) }.getOrDefault("")
-            throw ApiException(status.value, "HTTP ${status.value}: $detail")
+            val detail = runCatching { bodyAsText() }.getOrDefault("")
+            throw apiException(status.value, detail)
         }
         return body()
     }
 
     private suspend fun HttpResponse.expectOk() {
         if (!status.isSuccess()) {
-            val detail = runCatching { bodyAsText().take(300) }.getOrDefault("")
-            throw ApiException(status.value, "HTTP ${status.value}: $detail")
+            val detail = runCatching { bodyAsText() }.getOrDefault("")
+            throw apiException(status.value, detail)
         }
     }
 
@@ -90,6 +120,32 @@ class MekambApi(
     // ── Health ──────────────────────────────────────────────────────────
 
     suspend fun health(): HealthResponse = client.get(url("/health")).expect()
+
+    // ── Auth (accounts) ──────────────────────────────────────────────────
+    // login/claimToken/register are the front door: no auth header.
+
+    suspend fun login(request: LoginRequest): AuthSessionResponse =
+        client.post(url("/auth/login")) {
+            contentType(ContentType.Application.Json)
+            setBody(request)
+        }.expect()
+
+    /** Migrates a legacy API token to an account; the token stops working afterwards. */
+    suspend fun claimToken(request: ClaimTokenRequest): AuthSessionResponse =
+        client.post(url("/auth/claim-token")) {
+            contentType(ContentType.Application.Json)
+            setBody(request)
+        }.expect()
+
+    suspend fun register(request: RegisterRequest): AuthRegisterResponse =
+        client.post(url("/auth/register")) {
+            contentType(ContentType.Application.Json)
+            setBody(request)
+        }.expect()
+
+    suspend fun me(): AuthUser = client.get(url("/auth/me")) { auth() }.expect()
+
+    suspend fun logout() = client.post(url("/auth/logout")) { auth() }.expectOk()
 
     // ── Tracks ──────────────────────────────────────────────────────────
 

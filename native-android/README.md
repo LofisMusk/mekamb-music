@@ -44,8 +44,11 @@ docker compose up --build
 In the Android app, open Settings and enter:
 
 - API endpoint: `YOUR_MAC_OR_SERVER_LAN_IP:8000`
-- API token: the same value as `API_TOKEN` from the backend `.env`
 - optional Prowlarr API key for indexer searches
+
+Then sign in under **Account**: log in with your email/username and password,
+migrate a legacy `API_TOKEN` (this replaces the token with your new credentials
+and the old token stops working), or sign up (new accounts need admin approval).
 
 The app automatically adds `http://` when you type only `192.168.1.50:8000`.
 Do not use `localhost` on a physical Android device; it points to the device
@@ -65,4 +68,4 @@ use HTTPS and narrow this policy.
 - torrent import through the matching `/imports/...` endpoint
 - direct playback from `GET /tracks/{id}/stream`
 - mini-player with play/pause, previous, next, and progress
-- settings screen for endpoint, API token, and optional Prowlarr key
+- settings screen for endpoint, account login/token migration, and optional Prowlarr key

@@ -185,7 +185,10 @@ async def claim_token(
     The supplied token must match a configured ``API_TOKEN(S)``. The new account
     inherits that token's ``api_key_id`` so the user's library, likes, plays and
     playback carry over, and is created ``approved`` (the token proves prior
-    authorization). A given token/``api_key_id`` can only be claimed once."""
+    authorization). A given token/``api_key_id`` can only be claimed once, and
+    from the moment it is claimed the raw token no longer authenticates —
+    ``require_token`` rejects it with ``token_migrated`` — so the account's
+    email/username/password fully replaces the token."""
     _validate_new_credentials(email=email, username=username, password=password, cfg=cfg)
 
     identity = match_bearer_token(cfg, f"Bearer {token.strip()}")

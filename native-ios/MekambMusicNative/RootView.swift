@@ -287,7 +287,7 @@ struct LibraryView: View {
                 if app.selectedTab == .liked {
                     likedSongsContent
                 } else if app.tracks.isEmpty {
-                    ContentUnavailableView(app.canUseApi ? "No tracks" : "Connect API", systemImage: app.canUseApi ? "music.note" : "wifi.exclamationmark", description: Text(app.canUseApi ? "Import music on the backend or try another search." : "Open Settings and set endpoint + token."))
+                    ContentUnavailableView(app.canUseApi ? "No tracks" : "Connect API", systemImage: app.canUseApi ? "music.note" : "wifi.exclamationmark", description: Text(app.canUseApi ? "Import music on the backend or try another search." : "Open Settings, set the endpoint and log in."))
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity)
                         .padding(.top, 48)
@@ -684,7 +684,7 @@ struct AlbumsView: View {
                     AlbumDetailView(album: album)
                         .environmentObject(app)
                 } else if app.filteredAlbums.isEmpty {
-                    ContentUnavailableView(app.canUseApi ? "No albums" : "Connect API", systemImage: app.canUseApi ? "square.grid.2x2" : "wifi.exclamationmark", description: Text(app.canUseApi ? "Albums will appear after library refresh." : "Open Settings and set endpoint + token."))
+                    ContentUnavailableView(app.canUseApi ? "No albums" : "Connect API", systemImage: app.canUseApi ? "square.grid.2x2" : "wifi.exclamationmark", description: Text(app.canUseApi ? "Albums will appear after library refresh." : "Open Settings, set the endpoint and log in."))
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity)
                         .padding(.top, 48)
@@ -875,7 +875,7 @@ struct PlaylistsView: View {
                     PlaylistDetailView(playlist: playlist)
                         .environmentObject(app)
                 } else if app.filteredPlaylists.isEmpty {
-                    ContentUnavailableView(app.canUseApi ? "No playlists" : "Connect API", systemImage: app.canUseApi ? "music.note.list" : "wifi.exclamationmark", description: Text(app.canUseApi ? "Create a playlist or add songs from track menus." : "Open Settings and set endpoint + token."))
+                    ContentUnavailableView(app.canUseApi ? "No playlists" : "Connect API", systemImage: app.canUseApi ? "music.note.list" : "wifi.exclamationmark", description: Text(app.canUseApi ? "Create a playlist or add songs from track menus." : "Open Settings, set the endpoint and log in."))
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity)
                         .padding(.top, 48)
@@ -1794,9 +1794,6 @@ struct SettingsView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
-                SecureField("API_TOKEN", text: $app.apiToken)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
 
                 if let status = app.connectionStatus {
                     Text(status)
@@ -1838,6 +1835,8 @@ struct SettingsView: View {
                 .buttonStyle(.bordered)
                 .disabled(app.isLoading)
             }
+
+            AccountSection()
 
             Section("Detected endpoint") {
                 Text(app.normalizedEndpoint.isEmpty ? "Not set" : app.normalizedEndpoint)
@@ -1897,5 +1896,164 @@ struct SettingsView: View {
         }
         .scrollContentBackground(.hidden)
         .background(Color.clear)
+    }
+}
+
+// MARK: - Account (login, token migration, registration)
+
+private enum AuthFormMode: String, CaseIterable, Identifiable {
+    case login = "Log in"
+    case migrate = "Migrate token"
+    case register = "Sign up"
+    var id: String { rawValue }
+}
+
+struct AccountSection: View {
+    @EnvironmentObject private var app: AppState
+
+    @State private var mode: AuthFormMode = .login
+    @State private var didPickInitialMode = false
+    @State private var identifier = ""
+    @State private var email = ""
+    @State private var username = ""
+    @State private var password = ""
+    @State private var legacyToken = ""
+
+    var body: some View {
+        Section("Account") {
+            if app.isSignedIn {
+                signedInBody
+            } else {
+                signedOutBody
+            }
+
+            if let status = app.authStatusMessage {
+                Text(status)
+                    .font(.footnote)
+                    .foregroundStyle(app.authStatusIsError ? .red : .green)
+            }
+        }
+        .onAppear {
+            guard !didPickInitialMode else { return }
+            didPickInitialMode = true
+            // A stored bearer token without account info is a legacy API token:
+            // steer straight into migration with the token pre-filled.
+            if !app.isSignedIn && !app.apiToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                mode = .migrate
+                legacyToken = app.apiToken
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var signedInBody: some View {
+        Label(app.accountUsername, systemImage: "person.crop.circle.fill")
+        Text(app.accountEmail)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+        Button(role: .destructive) {
+            Task { await app.logout() }
+        } label: {
+            Label("Log Out", systemImage: "rectangle.portrait.and.arrow.right")
+        }
+        .disabled(app.isAuthenticating)
+    }
+
+    @ViewBuilder
+    private var signedOutBody: some View {
+        if mode == .migrate {
+            Text("Migrate your legacy API token to an account: pick an email, username and password — your library carries over and the old token stops working everywhere.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+
+        Picker("Mode", selection: $mode) {
+            ForEach(AuthFormMode.allCases) { candidate in
+                Text(candidate.rawValue).tag(candidate)
+            }
+        }
+        .pickerStyle(.segmented)
+
+        switch mode {
+        case .login:
+            TextField("Email or username", text: $identifier)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+        case .migrate:
+            SecureField("Legacy API token", text: $legacyToken)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            emailAndUsernameFields
+        case .register:
+            emailAndUsernameFields
+        }
+
+        SecureField("Password", text: $password)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+
+        Button {
+            Task {
+                switch mode {
+                case .login:
+                    await app.login(identifier: identifier, password: password)
+                case .migrate:
+                    await app.claimToken(
+                        token: legacyToken, email: email,
+                        username: username, password: password
+                    )
+                case .register:
+                    await app.registerAccount(email: email, username: username, password: password)
+                }
+                if !app.authStatusIsError { password = "" }
+            }
+        } label: {
+            Label {
+                Text(app.isAuthenticating ? "Working..." : submitTitle)
+            } icon: {
+                if app.isAuthenticating {
+                    ProgressView()
+                } else {
+                    Image(systemName: "person.badge.key")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(app.isAuthenticating || !canSubmit)
+    }
+
+    @ViewBuilder
+    private var emailAndUsernameFields: some View {
+        TextField("Email", text: $email)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .keyboardType(.emailAddress)
+        TextField("Username", text: $username)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+    }
+
+    private var submitTitle: String {
+        switch mode {
+        case .login: return "Log In"
+        case .migrate: return "Migrate & Sign In"
+        case .register: return "Create Account"
+        }
+    }
+
+    private var canSubmit: Bool {
+        guard !password.isEmpty else { return false }
+        switch mode {
+        case .login:
+            return !identifier.trimmingCharacters(in: .whitespaces).isEmpty
+        case .migrate:
+            return !legacyToken.trimmingCharacters(in: .whitespaces).isEmpty
+                && !email.trimmingCharacters(in: .whitespaces).isEmpty
+                && !username.trimmingCharacters(in: .whitespaces).isEmpty
+        case .register:
+            return !email.trimmingCharacters(in: .whitespaces).isEmpty
+                && !username.trimmingCharacters(in: .whitespaces).isEmpty
+        }
     }
 }

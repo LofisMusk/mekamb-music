@@ -40,6 +40,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import pl.mekamb.music.desktop.BuildInfo
+import pl.mekamb.music.desktop.api.ApiException
 import pl.mekamb.music.desktop.api.LibrarySummaryResponse
 import pl.mekamb.music.desktop.api.normalizeEndpoint
 import pl.mekamb.music.desktop.ui.LocalApp
@@ -57,8 +58,6 @@ fun SettingsScreen() {
     val settings by app.settings.state.collectAsState()
 
     var endpoint by remember { mutableStateOf(settings.endpoint) }
-    var token by remember { mutableStateOf(settings.apiToken) }
-    var tokenVisible by remember { mutableStateOf(false) }
     var prowlarrKey by remember { mutableStateOf(settings.prowlarrApiKey) }
     var testResult by remember { mutableStateOf<Result<Unit>?>(null) }
     var confirmRemoveAll by remember { mutableStateOf(false) }
@@ -85,24 +84,8 @@ fun SettingsScreen() {
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
             )
-            OutlinedTextField(
-                value = token,
-                onValueChange = { token = it },
-                label = { Text("API token") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                visualTransformation = if (tokenVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                trailingIcon = {
-                    IconButton(onClick = { tokenVisible = !tokenVisible }) {
-                        Icon(
-                            if (tokenVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                            contentDescription = if (tokenVisible) "Hide token" else "Show token",
-                        )
-                    }
-                },
-            )
             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(onClick = { scope.launch { testResult = app.testConnection(endpoint, token) } }) {
+                Button(onClick = { scope.launch { testResult = app.testConnection(endpoint, settings.apiToken) } }) {
                     Text("Test connection")
                 }
                 testResult?.let {
@@ -114,10 +97,14 @@ fun SettingsScreen() {
             }
             Button(
                 onClick = {
-                    app.settings.update { it.copy(endpoint = normalizeEndpoint(endpoint), apiToken = token) }
+                    app.settings.update { it.copy(endpoint = normalizeEndpoint(endpoint)) }
                     app.refreshLibrary()
                 },
             ) { Text("Save") }
+        }
+
+        SettingsSection(title = "Account") {
+            AccountSection()
         }
 
         SettingsSection(title = "Search") {
@@ -197,6 +184,170 @@ fun SettingsScreen() {
                 TextButton(onClick = { confirmRemoveAll = false }) { Text("Cancel") }
             },
         )
+    }
+}
+
+private enum class AuthMode(val label: String) {
+    Login("Log in"),
+    Migrate("Migrate token"),
+    Register("Sign up"),
+}
+
+@Composable
+private fun ColumnScope.AccountSection() {
+    val app = LocalApp.current
+    val scope = rememberCoroutineScope()
+    val settings by app.settings.state.collectAsState()
+
+    if (settings.accountUsername.isNotBlank()) {
+        Text("Signed in as ${settings.accountUsername}")
+        Text(settings.accountEmail, style = MaterialTheme.typography.bodySmall)
+        Button(
+            onClick = { app.logout() },
+            colors = ButtonDefaults.buttonColors(containerColor = MekambColors.Danger),
+        ) { Text("Log out") }
+        return
+    }
+
+    val hasLegacyToken = settings.apiToken.isNotBlank()
+    var mode by remember { mutableStateOf(if (hasLegacyToken) AuthMode.Migrate else AuthMode.Login) }
+    var identifier by remember { mutableStateOf("") }
+    var email by remember { mutableStateOf("") }
+    var username by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var passwordVisible by remember { mutableStateOf(false) }
+    var legacyToken by remember { mutableStateOf(settings.apiToken) }
+    var busy by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
+
+    if (hasLegacyToken) {
+        Text(
+            "This app is still using a legacy API token. Migrate it to an account: pick an " +
+                "email, username and password — your library carries over and the old token " +
+                "stops working everywhere.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        AuthMode.values().forEach { candidate ->
+            TextButton(onClick = { mode = candidate; message = null }) {
+                Text(
+                    candidate.label,
+                    color = if (mode == candidate) MekambColors.Accent
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+
+    when (mode) {
+        AuthMode.Login -> {
+            OutlinedTextField(
+                value = identifier,
+                onValueChange = { identifier = it },
+                label = { Text("Email or username") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+        }
+        AuthMode.Migrate -> {
+            OutlinedTextField(
+                value = legacyToken,
+                onValueChange = { legacyToken = it },
+                label = { Text("Legacy API token") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = email,
+                onValueChange = { email = it },
+                label = { Text("Email") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = username,
+                onValueChange = { username = it },
+                label = { Text("Username") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+        }
+        AuthMode.Register -> {
+            OutlinedTextField(
+                value = email,
+                onValueChange = { email = it },
+                label = { Text("Email") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = username,
+                onValueChange = { username = it },
+                label = { Text("Username") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+        }
+    }
+
+    OutlinedTextField(
+        value = password,
+        onValueChange = { password = it },
+        label = { Text("Password") },
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+        trailingIcon = {
+            IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                Icon(
+                    if (passwordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                    contentDescription = if (passwordVisible) "Hide password" else "Show password",
+                )
+            }
+        },
+    )
+
+    Button(
+        enabled = !busy,
+        onClick = {
+            busy = true
+            message = null
+            scope.launch {
+                val result = when (mode) {
+                    AuthMode.Login ->
+                        app.login(identifier, password).map { "Signed in as ${it.username}" }
+                    AuthMode.Migrate ->
+                        app.claimLegacyToken(email, username, password, legacyToken)
+                            .map { "Token migrated — signed in as ${it.username}" }
+                    AuthMode.Register ->
+                        app.registerAccount(email, username, password).map { it.message }
+                }
+                busy = false
+                message = result.fold(
+                    onSuccess = { it to false },
+                    onFailure = { failure ->
+                        val text = if (failure is ApiException) failure.userMessage()
+                        else failure.message ?: "Request failed"
+                        text to true
+                    },
+                )
+            }
+        },
+    ) {
+        Text(
+            when {
+                busy -> "Working…"
+                mode == AuthMode.Login -> "Log in"
+                mode == AuthMode.Migrate -> "Migrate & sign in"
+                else -> "Create account"
+            }
+        )
+    }
+
+    message?.let { (text, isError) ->
+        Text(text, color = if (isError) MekambColors.Danger else MekambColors.Success)
     }
 }
 

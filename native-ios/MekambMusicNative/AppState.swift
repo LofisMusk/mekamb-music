@@ -470,7 +470,12 @@ enum PlaybackQuality: String, CaseIterable, Identifiable {
 @MainActor
 final class AppState: ObservableObject {
     @AppStorage("mekambMusicApiEndpoint") var apiEndpoint: String = ""
+    // The bearer credential sent on every request: either a legacy API token or,
+    // once logged in / migrated, the account session token (same header either way).
     @AppStorage("mekambMusicApiToken") var apiToken: String = ""
+    // Set when apiToken is an account session token; blank while on a legacy token.
+    @AppStorage("mekambMusicAccountUsername") var accountUsername: String = ""
+    @AppStorage("mekambMusicAccountEmail") var accountEmail: String = ""
     @AppStorage("mekambMusicProwlarrApiKey") var prowlarrApiKey: String = ""
     @AppStorage("mekambMusicAutoplaySimilarEnabled") var autoplaySimilarEnabled: Bool = true
     @AppStorage("mekambMusicPlaybackQuality") var playbackQuality: PlaybackQuality = .auto
@@ -496,6 +501,10 @@ final class AppState: ObservableObject {
     @Published var isLoading = false
     @Published var isSearchingTorrents = false
     @Published var isTestingConnection = false
+    @Published var isAuthenticating = false
+    /// Outcome of the last login/migrate/register/logout attempt, shown in Settings.
+    @Published var authStatusMessage: String?
+    @Published var authStatusIsError = false
     @Published var connectionStatus: String?
     @Published var errorMessage: String?
     @Published var currentTrack: ApiTrack?
@@ -898,11 +907,101 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Account auth (login, token migration, registration)
+
+    var isSignedIn: Bool { !accountUsername.isEmpty }
+
+    private var deviceName: String { "iOS (\(UIDevice.current.name))" }
+
+    /// Stores a fresh account session: it replaces whatever bearer credential was stored.
+    private func applyAuthSession(token: String, user: AuthUserPayload) {
+        apiToken = token
+        accountUsername = user.username
+        accountEmail = user.email
+    }
+
+    func login(identifier: String, password: String) async {
+        await runAuthAction {
+            let body = try JSONEncoder().encode(
+                LoginPayload(identifier: identifier, password: password, deviceName: self.deviceName)
+            )
+            let session: AuthSessionPayload = try await self.request(
+                "/auth/login", method: "POST", body: body, requiresAuth: false
+            )
+            self.applyAuthSession(token: session.token, user: session.user)
+            return "Signed in as \(session.user.username)."
+        }
+    }
+
+    /// Migrates a legacy API token to an account. The backend invalidates the token;
+    /// the returned session token replaces it on this device.
+    func claimToken(token: String, email: String, username: String, password: String) async {
+        await runAuthAction {
+            let body = try JSONEncoder().encode(
+                ClaimTokenPayload(
+                    email: email, username: username, password: password,
+                    token: token, deviceName: self.deviceName
+                )
+            )
+            let session: AuthSessionPayload = try await self.request(
+                "/auth/claim-token", method: "POST", body: body, requiresAuth: false
+            )
+            self.applyAuthSession(token: session.token, user: session.user)
+            return "Token migrated — signed in as \(session.user.username)."
+        }
+    }
+
+    func registerAccount(email: String, username: String, password: String) async {
+        await runAuthAction {
+            let body = try JSONEncoder().encode(
+                RegisterPayload(email: email, username: username, password: password)
+            )
+            let response: AuthRegisterPayload = try await self.request(
+                "/auth/register", method: "POST", body: body, requiresAuth: false
+            )
+            // A session comes back only when the account is approved on the spot
+            // (bootstrap admins); everyone else waits for admin approval.
+            if let sessionToken = response.token {
+                self.applyAuthSession(token: sessionToken, user: response.user)
+            }
+            return response.message
+        }
+    }
+
+    func logout() async {
+        isAuthenticating = true
+        defer { isAuthenticating = false }
+        // Best effort: revoke the session server-side, but always clear locally.
+        let _: EmptyResponse? = try? await request("/auth/logout", method: "POST")
+        apiToken = ""
+        accountUsername = ""
+        accountEmail = ""
+        authStatusMessage = "Logged out."
+        authStatusIsError = false
+        await refreshLibrary()
+    }
+
+    private func runAuthAction(_ action: () async throws -> String) async {
+        guard !isAuthenticating else { return }
+        isAuthenticating = true
+        defer { isAuthenticating = false }
+        authStatusMessage = nil
+        authStatusIsError = false
+        do {
+            authStatusMessage = try await action()
+            await refreshLibrary()
+        } catch {
+            guard !isCancellation(error) else { return }
+            authStatusMessage = clean(error)
+            authStatusIsError = true
+        }
+    }
+
     func refreshLibrary() async {
         guard !isLoading else { return }
         guard canUseApi else {
             if offlineTrackIds.isEmpty {
-                errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
+                errorMessage = endpointWarning ?? "Set the API endpoint and log in in Settings."
             } else {
                 errorMessage = nil
                 offlineStatusMessage = "Offline library ready: \(offlineTrackCount) downloaded songs."
@@ -1155,7 +1254,7 @@ final class AppState: ObservableObject {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         guard canUseApi else {
-            errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
+            errorMessage = endpointWarning ?? "Set the API endpoint and log in in Settings."
             return
         }
 
@@ -1173,7 +1272,7 @@ final class AppState: ObservableObject {
 
     func deletePlaylist(_ playlist: PlaylistDetail) async {
         guard canUseApi else {
-            errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
+            errorMessage = endpointWarning ?? "Set the API endpoint and log in in Settings."
             return
         }
         do {
@@ -1188,7 +1287,7 @@ final class AppState: ObservableObject {
 
     func addTrack(_ track: ApiTrack, to playlist: PlaylistDetail) async {
         guard canUseApi else {
-            errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
+            errorMessage = endpointWarning ?? "Set the API endpoint and log in in Settings."
             return
         }
         do {
@@ -1208,7 +1307,7 @@ final class AppState: ObservableObject {
 
     func removeTrack(_ track: ApiTrack, from playlist: PlaylistDetail) async {
         guard canUseApi else {
-            errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
+            errorMessage = endpointWarning ?? "Set the API endpoint and log in in Settings."
             return
         }
         do {
@@ -1225,7 +1324,7 @@ final class AppState: ObservableObject {
 
     func deleteAlbum(_ album: Album) async {
         guard canUseApi else {
-            errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
+            errorMessage = endpointWarning ?? "Set the API endpoint and log in in Settings."
             return
         }
         isLoading = true
@@ -1268,7 +1367,7 @@ final class AppState: ObservableObject {
         }
 
         guard canUseApi else {
-            errorMessage = endpointWarning ?? "Set API endpoint and token in Settings."
+            errorMessage = endpointWarning ?? "Set the API endpoint and log in in Settings."
             return false
         }
         let encodedId = encodePathComponent(track.id)
@@ -2538,6 +2637,12 @@ final class AppState: ObservableObject {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         guard (200..<300).contains(http.statusCode) else {
+            // Auth errors (e.g. token_migrated, invalid_credentials) use a structured
+            // {code, message} detail; everything else is a plain string detail.
+            if let structured = try? JSONDecoder().decode(ApiStructuredError.self, from: data),
+               let message = structured.detail.message {
+                throw BackendError.api(status: http.statusCode, message: message)
+            }
             if let payload = try? JSONDecoder().decode(ApiError.self, from: data) {
                 throw BackendError.api(status: http.statusCode, message: payload.detail)
             }
@@ -3010,6 +3115,70 @@ final class AppState: ObservableObject {
 struct EmptyResponse: Decodable {}
 
 struct ApiError: Decodable { let detail: String }
+
+struct ApiStructuredError: Decodable {
+    struct Detail: Decodable {
+        let code: String?
+        let message: String?
+    }
+    let detail: Detail
+}
+
+// MARK: - Account auth payloads
+
+struct AuthUserPayload: Decodable {
+    let id: String
+    let email: String
+    let username: String
+    let status: String
+    let isAdmin: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case id, email, username, status
+        case isAdmin = "is_admin"
+    }
+}
+
+struct AuthSessionPayload: Decodable {
+    let token: String
+    let user: AuthUserPayload
+}
+
+struct AuthRegisterPayload: Decodable {
+    let user: AuthUserPayload
+    let token: String?
+    let message: String
+}
+
+struct LoginPayload: Encodable {
+    let identifier: String
+    let password: String
+    let deviceName: String
+
+    enum CodingKeys: String, CodingKey {
+        case identifier, password
+        case deviceName = "device_name"
+    }
+}
+
+struct ClaimTokenPayload: Encodable {
+    let email: String
+    let username: String
+    let password: String
+    let token: String
+    let deviceName: String
+
+    enum CodingKeys: String, CodingKey {
+        case email, username, password, token
+        case deviceName = "device_name"
+    }
+}
+
+struct RegisterPayload: Encodable {
+    let email: String
+    let username: String
+    let password: String
+}
 
 enum BackendError: LocalizedError {
     case api(status: Int, message: String)

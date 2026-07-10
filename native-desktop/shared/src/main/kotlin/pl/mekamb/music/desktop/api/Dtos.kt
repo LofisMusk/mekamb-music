@@ -357,6 +357,57 @@ data class CacheStatsResponse(
     @SerialName("library_root") val libraryRoot: String? = null,
 )
 
+// ── Auth (accounts, sessions, token migration) ──────────────────────────────
+
+@Serializable
+data class AuthUser(
+    val id: String,
+    val email: String,
+    val username: String,
+    val status: String,
+    @SerialName("is_admin") val isAdmin: Boolean = false,
+    @SerialName("created_at") val createdAt: String? = null,
+    @SerialName("approved_at") val approvedAt: String? = null,
+)
+
+@Serializable
+data class AuthSessionResponse(
+    val token: String,
+    @SerialName("token_type") val tokenType: String = "bearer",
+    val user: AuthUser,
+)
+
+@Serializable
+data class AuthRegisterResponse(
+    val user: AuthUser,
+    val token: String? = null,
+    @SerialName("token_type") val tokenType: String = "bearer",
+    val message: String = "",
+)
+
+@Serializable
+data class LoginRequest(
+    val identifier: String,
+    val password: String,
+    @SerialName("device_name") val deviceName: String? = null,
+)
+
+@Serializable
+data class ClaimTokenRequest(
+    val email: String,
+    val username: String,
+    val password: String,
+    val token: String,
+    @SerialName("device_name") val deviceName: String? = null,
+)
+
+@Serializable
+data class RegisterRequest(
+    val email: String,
+    val username: String,
+    val password: String,
+)
+
 // ── GitHub releases (auto-updater) ──────────────────────────────────────────
 
 @Serializable

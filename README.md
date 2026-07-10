@@ -30,7 +30,11 @@ Existing token-based users migrate without losing data via
 `POST /auth/claim-token` (the "I have a token" flow): supplying a valid
 `API_TOKEN(S)` value creates an approved account that inherits that token's data
 scope, so the library, liked songs, plays, playlists and playback all carry over.
-Raw API tokens keep authenticating in parallel, so a hard cutover isn't required.
+An unclaimed raw API token keeps authenticating, so nobody is forced to migrate
+on a deadline — but the moment a token is claimed it stops working everywhere
+(requests with it get a 401 with code `token_migrated`) and the account's
+email/username/password fully replaces it. Every app (iOS, Android, desktop)
+has this flow in Settings under Account: log in, migrate a token, or sign up.
 
 ## Native iOS App
 
@@ -44,9 +48,9 @@ Open it with:
 open native-ios/MekambMusicNative.xcodeproj
 ```
 
-In the app Settings screen, set the backend endpoint and API token. For a
-physical iPhone, do not use `localhost`; use your Mac/server LAN IP, for example
-`http://192.168.1.50:8000`.
+In the app Settings screen, set the backend endpoint, then log in (or migrate a
+legacy API token / sign up) under Account. For a physical iPhone, do not use
+`localhost`; use your Mac/server LAN IP, for example `http://192.168.1.50:8000`.
 
 ## Native Android App
 

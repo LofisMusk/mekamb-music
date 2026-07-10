@@ -13,8 +13,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import pl.mekamb.music.desktop.api.ApiException
+import pl.mekamb.music.desktop.api.AuthRegisterResponse
+import pl.mekamb.music.desktop.api.AuthUser
+import pl.mekamb.music.desktop.api.ClaimTokenRequest
+import pl.mekamb.music.desktop.api.LoginRequest
 import pl.mekamb.music.desktop.api.MekambApi
 import pl.mekamb.music.desktop.api.PlaylistSummary
+import pl.mekamb.music.desktop.api.RegisterRequest
 import pl.mekamb.music.desktop.api.Track
 import pl.mekamb.music.desktop.api.buildHttpClient
 import pl.mekamb.music.desktop.api.normalizeEndpoint
@@ -94,7 +100,13 @@ class AppViewModel {
                 _playlists.value = lists
                 _connectionState.value = ConnectionState.Connected
             } catch (failure: Exception) {
-                _connectionState.value = ConnectionState.Error(failure.message ?: "Connection failed")
+                _connectionState.value = ConnectionState.Error(
+                    if (failure is ApiException && failure.isTokenMigrated) {
+                        "Your API token was migrated to an account. Log in with your email/username and password in Settings."
+                    } else {
+                        failure.message ?: "Connection failed"
+                    }
+                )
             } finally {
                 _libraryLoading.value = false
             }
@@ -142,6 +154,66 @@ class AppViewModel {
                 _likedTrackIds.value = if (wasLiked) _likedTrackIds.value + track.id
                 else _likedTrackIds.value - track.id
             }
+        }
+    }
+
+    // ── Accounts ─────────────────────────────────────────────────────────
+
+    private fun deviceName(): String = "Desktop (${System.getProperty("os.name") ?: "unknown"})"
+
+    /** Applies a fresh session: it replaces whatever bearer credential was stored. */
+    private fun applySession(token: String, user: AuthUser) {
+        settings.update {
+            it.copy(apiToken = token, accountUsername = user.username, accountEmail = user.email)
+        }
+        refreshLibrary()
+    }
+
+    suspend fun login(identifier: String, password: String): Result<AuthUser> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val session = api.login(LoginRequest(identifier.trim(), password, deviceName()))
+                session.user.also { applySession(session.token, it) }
+            }
+        }
+
+    /** Migrates a legacy API token to an account. On success the server invalidates
+     *  the token; the returned session token replaces it locally. */
+    suspend fun claimLegacyToken(
+        email: String,
+        username: String,
+        password: String,
+        legacyToken: String,
+    ): Result<AuthUser> = withContext(Dispatchers.IO) {
+        runCatching {
+            val session = api.claimToken(
+                ClaimTokenRequest(email.trim(), username.trim(), password, legacyToken.trim(), deviceName())
+            )
+            session.user.also { applySession(session.token, it) }
+        }
+    }
+
+    suspend fun registerAccount(
+        email: String,
+        username: String,
+        password: String,
+    ): Result<AuthRegisterResponse> = withContext(Dispatchers.IO) {
+        runCatching {
+            val response = api.register(RegisterRequest(email.trim(), username.trim(), password))
+            // Approved-on-signup accounts (bootstrap admins) come back with a session.
+            response.token?.let { applySession(it, response.user) }
+            response
+        }
+    }
+
+    fun logout() {
+        scope.launch {
+            withContext(Dispatchers.IO) { runCatching { api.logout() } }
+            settings.update { it.copy(apiToken = "", accountUsername = "", accountEmail = "") }
+            _tracks.value = emptyList()
+            _likedTrackIds.value = emptySet()
+            _playlists.value = emptyList()
+            _connectionState.value = ConnectionState.Unconfigured
         }
     }
 

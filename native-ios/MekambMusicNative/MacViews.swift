@@ -443,9 +443,6 @@ struct SettingsView: View {
                 TextField("192.168.1.50:8000", text: $app.apiEndpoint)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                SecureField("API_TOKEN", text: $app.apiToken)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
 
                 if let status = app.connectionStatus {
                     Text(status)
@@ -467,6 +464,8 @@ struct SettingsView: View {
                     Task { await app.refreshLibrary() }
                 }
             }
+
+            AccountSection()
 
             Section("Detected endpoint") {
                 Text(app.normalizedEndpoint.isEmpty ? "Not set" : app.normalizedEndpoint)

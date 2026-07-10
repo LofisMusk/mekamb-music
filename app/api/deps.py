@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 from fastapi import Depends, Header, HTTPException, status
 from redis.asyncio import Redis
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.service import identity_for, resolve_session_token
@@ -43,13 +44,29 @@ async def require_token(
     """Resolve a request to a data-scope identity (``api_key_id``).
 
     Two auth schemes are accepted in parallel so existing clients keep working:
-      1. Legacy raw ``API_TOKEN(S)`` bearer tokens (matched without a DB hit).
+      1. Legacy raw ``API_TOKEN(S)`` bearer tokens — but only while unclaimed.
+         Once a token has been migrated to an account (``/auth/claim-token``
+         created a user bound to its ``api_key_id``), the raw token is dead and
+         the request gets a ``token_migrated`` 401 so clients know to show the
+         login screen instead of a generic auth failure.
       2. Session tokens issued by ``/auth/login`` — resolved to an *approved*
          user; pending/rejected/disabled accounts never resolve, so an
          unapproved account can never reach a protected endpoint.
     """
     api_key = match_bearer_token(settings, authorization)
     if api_key is not None:
+        claimed = await session.scalar(select(User.id).where(User.api_key_id == api_key.id))
+        if claimed is not None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "code": "token_migrated",
+                    "message": (
+                        "This token has been migrated to an account. "
+                        "Log in with your email/username and password."
+                    ),
+                },
+            )
         return api_key
 
     token = _extract_bearer(authorization)

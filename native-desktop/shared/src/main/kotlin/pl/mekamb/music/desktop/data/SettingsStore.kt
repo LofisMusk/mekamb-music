@@ -12,7 +12,12 @@ import kotlinx.serialization.json.Json
 @Serializable
 data class AppSettings(
     val endpoint: String = "",
+    // The bearer credential sent on every request: either a legacy API token or,
+    // once logged in / migrated, the account session token (same header, either way).
     val apiToken: String = "",
+    // Set when apiToken is an account session token; blank for legacy tokens.
+    val accountUsername: String = "",
+    val accountEmail: String = "",
     val prowlarrApiKey: String = "",
     val autoplaySimilar: Boolean = true,
     val volume: Float = 0.85f,

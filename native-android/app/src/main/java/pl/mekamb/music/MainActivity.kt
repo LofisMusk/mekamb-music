@@ -149,7 +149,7 @@ class MainActivity : Activity() {
         val recentPlays: List<RecentPlay>?
     )
 
-    private class ApiException(message: String) : Exception(message)
+    private class ApiException(message: String, val code: String? = null) : Exception(message)
 
     private val DAY_MS = 86_400_000L
     private val executor = Executors.newSingleThreadExecutor()
@@ -223,9 +223,21 @@ class MainActivity : Activity() {
     private var apiEndpoint: String
         get() = prefs.getString("api_endpoint", "") ?: ""
         set(value) = prefs.edit().putString("api_endpoint", value).apply()
+    // The bearer credential sent on every request: either a legacy API token or,
+    // once logged in / migrated, the account session token (same header either way).
     private var apiToken: String
         get() = prefs.getString("api_token", "") ?: ""
         set(value) = prefs.edit().putString("api_token", value).apply()
+    // Set when apiToken is an account session token; blank while on a legacy token.
+    private var accountUsername: String
+        get() = prefs.getString("account_username", "") ?: ""
+        set(value) = prefs.edit().putString("account_username", value).apply()
+    private var accountEmail: String
+        get() = prefs.getString("account_email", "") ?: ""
+        set(value) = prefs.edit().putString("account_email", value).apply()
+    // Which auth form is showing in Settings ("login" | "migrate" | "register");
+    // null picks a default based on whether a legacy token is stored.
+    private var authFormMode: String? = null
     private var prowlarrApiKey: String
         get() = prefs.getString("prowlarr_api_key", "") ?: ""
         set(value) = prefs.edit().putString("prowlarr_api_key", value).apply()
@@ -814,7 +826,7 @@ class MainActivity : Activity() {
     private fun renderLibrary() {
         content.addView(sectionTitle("Home").withHorizontalPagePadding())
         if (!canUseApi()) {
-            content.addView(messageCard("Set API endpoint and token in Settings. For a phone or emulator, use your Mac/server LAN IP, not localhost."))
+            content.addView(messageCard("Set the API endpoint and log in in Settings. For a phone or emulator, use your Mac/server LAN IP, not localhost."))
         }
         if (tracks.isEmpty()) {
             content.addView(messageCard("No tracks found. Refresh after importing music on the backend."))
@@ -1047,7 +1059,7 @@ class MainActivity : Activity() {
         content.addView(titleRow, matchWrapParams())
 
         if (!canUseApi()) {
-            content.addView(messageCard("Set API endpoint and token in Settings."))
+            content.addView(messageCard("Set the API endpoint and log in in Settings."))
         }
         if (visible.isEmpty()) {
             content.addView(messageCard("No playlists yet. Create one with + or add a song from a track row."))
@@ -1183,10 +1195,8 @@ class MainActivity : Activity() {
         content.addView(sectionTitle("Backend"))
         content.addView(messageCard("Connect the Android app to your private Mekamb backend."))
         val endpointField = editField("API endpoint", apiEndpoint, false)
-        val tokenField = editField("API token", apiToken, true)
         val prowlarrField = editField("Prowlarr API key for indexer search", prowlarrApiKey, true)
         content.addView(endpointField, fieldParams())
-        content.addView(tokenField, fieldParams())
         content.addView(prowlarrField, fieldParams())
         val buttons = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1194,11 +1204,9 @@ class MainActivity : Activity() {
         }
         buttons.addView(button("Save") {
             val previousEndpoint = apiEndpoint
-            val previousToken = apiToken
             apiEndpoint = endpointField.text.toString().trim()
-            apiToken = tokenField.text.toString().trim()
             prowlarrApiKey = prowlarrField.text.toString().trim()
-            if (previousEndpoint != apiEndpoint || previousToken != apiToken) {
+            if (previousEndpoint != apiEndpoint) {
                 clearArtworkState()
             }
             statusMessage = "Settings saved."
@@ -1206,7 +1214,6 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { rightMargin = dp(4) })
         buttons.addView(button("Test", primary = false) {
             apiEndpoint = endpointField.text.toString().trim()
-            apiToken = tokenField.text.toString().trim()
             prowlarrApiKey = prowlarrField.text.toString().trim()
             testConnection()
         }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { leftMargin = dp(4) })
@@ -1217,6 +1224,8 @@ class MainActivity : Activity() {
             topMargin = dp(10)
             bottomMargin = dp(4)
         })
+
+        renderAccountSection()
 
         content.addView(sectionTitle("Playback Quality").withHorizontalPagePadding())
         val qualityRow = LinearLayout(this).apply {
@@ -1258,6 +1267,207 @@ class MainActivity : Activity() {
             bottomMargin = dp(4)
         })
         content.addView(messageCard("On a real Android phone, localhost means the phone itself. Use your Mac/server LAN IP, for example http://192.168.1.50:8000. Plain HTTP is enabled for private LAN development."))
+    }
+
+    private fun renderAccountSection() {
+        content.addView(sectionTitle("Account").withHorizontalPagePadding())
+
+        if (accountUsername.isNotBlank()) {
+            content.addView(messageCard("Signed in as $accountUsername ($accountEmail)."))
+            content.addView(button("Log out", primary = false) {
+                logoutAccount()
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply {
+                topMargin = dp(4)
+                bottomMargin = dp(4)
+            })
+            return
+        }
+
+        val hasLegacyToken = apiToken.isNotBlank()
+        if (hasLegacyToken) {
+            content.addView(messageCard("This app is using a legacy API token. Migrate it to an account: pick an email, username and password — your library carries over and the old token stops working everywhere."))
+        }
+
+        val mode = authFormMode ?: if (hasLegacyToken) "migrate" else "login"
+        val modeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(2), dp(16), dp(2))
+        }
+        listOf("login" to "Log in", "migrate" to "Migrate token", "register" to "Sign up").forEach { (value, labelText) ->
+            val selected = mode == value
+            modeRow.addView(TextView(this).apply {
+                text = labelText
+                gravity = Gravity.CENTER
+                textSize = 13f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(if (selected) Color.BLACK else mutedColor)
+                background = rounded(if (selected) accentAltColor else chipColor, dp(12), strokeColor, 1)
+                setPadding(0, dp(11), 0, dp(11))
+                setOnClickListener {
+                    authFormMode = value
+                    render()
+                }
+            }, LinearLayout.LayoutParams(0, dp(44), 1f).apply {
+                leftMargin = dp(3)
+                rightMargin = dp(3)
+            })
+        }
+        content.addView(modeRow, matchWrapParams())
+
+        val tokenField = if (mode == "migrate") editField("Legacy API token", apiToken, true) else null
+        val identifierField = if (mode == "login") editField("Email or username", "", false) else null
+        val emailField = if (mode != "login") editField("Email", "", false) else null
+        val usernameField = if (mode != "login") editField("Username", "", false) else null
+        val passwordField = editField("Password", "", true)
+        listOfNotNull(tokenField, identifierField, emailField, usernameField, passwordField).forEach {
+            content.addView(it, fieldParams())
+        }
+
+        val submitLabel = when (mode) {
+            "migrate" -> "Migrate & sign in"
+            "register" -> "Create account"
+            else -> "Log in"
+        }
+        content.addView(button(submitLabel) {
+            val password = passwordField.text.toString()
+            when (mode) {
+                "login" -> performLogin(identifierField!!.text.toString().trim(), password)
+                "migrate" -> performClaimToken(
+                    tokenField!!.text.toString().trim(),
+                    emailField!!.text.toString().trim(),
+                    usernameField!!.text.toString().trim(),
+                    password,
+                )
+                else -> performRegister(
+                    emailField!!.text.toString().trim(),
+                    usernameField!!.text.toString().trim(),
+                    password,
+                )
+            }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply {
+            topMargin = dp(4)
+            bottomMargin = dp(4)
+        })
+    }
+
+    private fun deviceName(): String = "Android (${android.os.Build.MODEL})"
+
+    /** Stores a fresh account session: it replaces whatever bearer credential was stored. */
+    private fun applyAuthSession(token: String, username: String, email: String) {
+        apiToken = token
+        accountUsername = username
+        accountEmail = email
+        authFormMode = null
+        clearArtworkState()
+    }
+
+    private fun performLogin(identifier: String, password: String) {
+        if (identifier.isBlank() || password.isBlank()) {
+            statusMessage = "Enter your email/username and password."
+            render()
+            return
+        }
+        runIo(
+            task = {
+                val body = JSONObject()
+                    .put("identifier", identifier)
+                    .put("password", password)
+                    .put("device_name", deviceName())
+                JSONObject(request("/auth/login", method = "POST", body = body.toString(), requiresAuth = false))
+            },
+            success = { response ->
+                val user = response.optJSONObject("user")
+                applyAuthSession(
+                    response.optString("token"),
+                    user?.optString("username").orEmpty(),
+                    user?.optString("email").orEmpty(),
+                )
+                statusMessage = "Signed in as $accountUsername."
+                refreshLibrary()
+            }
+        )
+    }
+
+    private fun performClaimToken(token: String, email: String, username: String, password: String) {
+        if (token.isBlank() || email.isBlank() || username.isBlank() || password.isBlank()) {
+            statusMessage = "Fill in the token, email, username and password."
+            render()
+            return
+        }
+        runIo(
+            task = {
+                val body = JSONObject()
+                    .put("token", token)
+                    .put("email", email)
+                    .put("username", username)
+                    .put("password", password)
+                    .put("device_name", deviceName())
+                JSONObject(request("/auth/claim-token", method = "POST", body = body.toString(), requiresAuth = false))
+            },
+            success = { response ->
+                val user = response.optJSONObject("user")
+                applyAuthSession(
+                    response.optString("token"),
+                    user?.optString("username").orEmpty(),
+                    user?.optString("email").orEmpty(),
+                )
+                statusMessage = "Token migrated — signed in as $accountUsername."
+                refreshLibrary()
+            }
+        )
+    }
+
+    private fun performRegister(email: String, username: String, password: String) {
+        if (email.isBlank() || username.isBlank() || password.isBlank()) {
+            statusMessage = "Fill in the email, username and password."
+            render()
+            return
+        }
+        runIo(
+            task = {
+                val body = JSONObject()
+                    .put("email", email)
+                    .put("username", username)
+                    .put("password", password)
+                JSONObject(request("/auth/register", method = "POST", body = body.toString(), requiresAuth = false))
+            },
+            success = { response ->
+                // A session comes back only when the account is approved on the spot
+                // (bootstrap admins); everyone else waits for admin approval.
+                val sessionToken = response.optString("token").takeIf { it.isNotBlank() && it != "null" }
+                if (sessionToken != null) {
+                    val user = response.optJSONObject("user")
+                    applyAuthSession(
+                        sessionToken,
+                        user?.optString("username").orEmpty(),
+                        user?.optString("email").orEmpty(),
+                    )
+                    refreshLibrary()
+                }
+                statusMessage = response.optString("message").takeIf { it.isNotBlank() }
+                    ?: "Account created."
+                render()
+            }
+        )
+    }
+
+    private fun logoutAccount() {
+        runIo(
+            task = {
+                runCatching { request("/auth/logout", method = "POST") }
+                Unit
+            },
+            success = {
+                apiToken = ""
+                accountUsername = ""
+                accountEmail = ""
+                authFormMode = null
+                clearArtworkState()
+                statusMessage = "Logged out."
+                refreshLibrary()
+            }
+        )
     }
 
     private fun trackRow(track: ApiTrack, queue: List<ApiTrack>, playlist: Playlist? = null): View {
@@ -1318,7 +1528,7 @@ class MainActivity : Activity() {
                 playlists = emptyList()
                 statusMessage = "Offline library ready: ${offlineRecords.size} songs."
             } else {
-                statusMessage = "Set API endpoint and token in Settings."
+                statusMessage = "Set the API endpoint and log in in Settings."
             }
             render()
             return
@@ -1358,7 +1568,7 @@ class MainActivity : Activity() {
     private fun searchSources() {
         val query = searchInput.text.toString().trim()
         if (!canUseApi()) {
-            statusMessage = "Set API endpoint and token in Settings."
+            statusMessage = "Set the API endpoint and log in in Settings."
             render()
             return
         }
@@ -1444,7 +1654,7 @@ class MainActivity : Activity() {
     private fun downloadTrackForOffline(track: ApiTrack) {
         if (offlineTrackIds.contains(track.id) || downloadingTrackIds.contains(track.id)) return
         if (!canUseApi()) {
-            statusMessage = "Set API endpoint and token before downloading."
+            statusMessage = "Set the API endpoint and log in before downloading."
             render()
             return
         }
@@ -1477,7 +1687,7 @@ class MainActivity : Activity() {
     private fun downloadAlbumForOffline(album: Album) {
         if (downloadingAlbumIds.contains(album.id)) return
         if (!canUseApi()) {
-            statusMessage = "Set API endpoint and token before downloading."
+            statusMessage = "Set the API endpoint and log in before downloading."
             render()
             return
         }
@@ -1590,7 +1800,7 @@ class MainActivity : Activity() {
 
     private fun playTrack(track: ApiTrack, queue: List<ApiTrack>) {
         if (offlinePlaybackFile(track) == null && !canUseApi()) {
-            statusMessage = "Set API endpoint and token before streaming."
+            statusMessage = "Set the API endpoint and log in before streaming."
             updateStatus()
             return
         }
@@ -1835,7 +2045,7 @@ class MainActivity : Activity() {
         val trimmed = name.trim()
         if (trimmed.isBlank()) return
         if (!canUseApi()) {
-            statusMessage = "Set API endpoint and token in Settings."
+            statusMessage = "Set the API endpoint and log in in Settings."
             render()
             return
         }
@@ -1870,7 +2080,7 @@ class MainActivity : Activity() {
 
     private fun addTrackToPlaylist(track: ApiTrack, playlist: Playlist) {
         if (!canUseApi()) {
-            statusMessage = "Set API endpoint and token in Settings."
+            statusMessage = "Set the API endpoint and log in in Settings."
             render()
             return
         }
@@ -2106,8 +2316,21 @@ class MainActivity : Activity() {
         val payload = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
         connection.disconnect()
         if (status !in 200..299) {
-            val detail = runCatching { JSONObject(payload).optString("detail") }.getOrNull()
-            throw ApiException(detail?.takeIf { it.isNotBlank() } ?: "API error $status")
+            // FastAPI errors carry either a plain string detail or {code, message}
+            // (auth errors like token_migrated use the structured form).
+            var detailCode: String? = null
+            var detailMessage: String? = null
+            runCatching {
+                when (val detail = JSONObject(payload).opt("detail")) {
+                    is JSONObject -> {
+                        detailCode = detail.optString("code").takeIf { it.isNotBlank() }
+                        detailMessage = detail.optString("message").takeIf { it.isNotBlank() }
+                    }
+                    is String -> detailMessage = detail.takeIf { it.isNotBlank() }
+                    else -> {}
+                }
+            }
+            throw ApiException(detailMessage ?: "API error $status", detailCode)
         }
         return payload
     }
