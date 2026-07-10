@@ -195,7 +195,12 @@ object Playback {
                 finalizePlaySession(naturalEnd = true)
                 advanceAfterCompletion(track)
             }
-            setOnErrorListener { _, _, _ ->
+            setOnErrorListener { failed, _, _ ->
+                // The player is now in the Error state where even isPlaying throws;
+                // drop it so the next play/toggle rebuilds the track instead of
+                // poking a dead player.
+                if (player === failed) player = null
+                runCatching { failed.release() }
                 Playback.isPlaying = false
                 notifyChanged()
                 true
@@ -226,19 +231,44 @@ object Playback {
         }
     }
 
+    /**
+     * MediaPlayer's transport calls (isPlaying/start/pause/seekTo) throw
+     * IllegalStateException once the player has slipped into the Error state —
+     * which is exactly where it lands after a failed stream (truncated download,
+     * dropped connection, rejected token). Returns null for "player is broken"
+     * so callers can rebuild instead of crashing the main thread.
+     */
+    private fun MediaPlayer.isPlayingSafe(): Boolean? = runCatching { isPlaying }.getOrNull()
+
+    /** Drops a dead player and restarts the current track from scratch. */
+    private fun recoverFromDeadPlayer() {
+        player?.let { runCatching { it.release() } }
+        player = null
+        isPlaying = false
+        currentTrack?.let { startTrack(it) }
+    }
+
     fun toggle() {
         val current = player
         if (current == null) {
             currentTrack?.let { startTrack(it) }
             return
         }
-        if (current.isPlaying) {
-            current.pause()
+        val playing = current.isPlayingSafe()
+        if (playing == null) {
+            recoverFromDeadPlayer()
+            return
+        }
+        if (playing) {
+            runCatching { current.pause() }
             isPlaying = false
             pausedByFocusLoss = false
         } else {
             if (!requestAudioFocus()) return
-            current.start()
+            if (runCatching { current.start() }.isFailure) {
+                recoverFromDeadPlayer()
+                return
+            }
             isPlaying = true
         }
         notifyChanged()
@@ -247,9 +277,17 @@ object Playback {
 
     fun resume() {
         val current = player ?: return currentTrack?.let { startTrack(it) } ?: Unit
-        if (!current.isPlaying) {
+        val playing = current.isPlayingSafe()
+        if (playing == null) {
+            recoverFromDeadPlayer()
+            return
+        }
+        if (!playing) {
             if (!requestAudioFocus()) return
-            current.start()
+            if (runCatching { current.start() }.isFailure) {
+                recoverFromDeadPlayer()
+                return
+            }
             isPlaying = true
             notifyChanged()
             postPlaybackStateAsync()
@@ -258,8 +296,10 @@ object Playback {
 
     fun pause() {
         val current = player ?: return
-        if (current.isPlaying) {
-            current.pause()
+        // Called from audio-focus loss and becoming-noisy too: never restart here,
+        // just make sure a dead player can't crash us.
+        if (current.isPlayingSafe() == true) {
+            runCatching { current.pause() }
             isPlaying = false
             notifyChanged()
             postPlaybackStateAsync()
@@ -289,7 +329,7 @@ object Playback {
     }
 
     fun seekTo(ms: Int) {
-        player?.seekTo(ms.coerceAtLeast(0))
+        runCatching { player?.seekTo(ms.coerceAtLeast(0)) }
         notifyChanged()
         postPlaybackStateAsync()
     }
@@ -331,8 +371,12 @@ object Playback {
     /** Called ~1/s by the service's ticker so the skip ratio reflects real listen time. */
     fun tickProgress() {
         val current = player ?: return
-        if (playSessionTrack?.id == currentTrack?.id && current.isPlaying) {
-            playSessionMaxMs = maxOf(playSessionMaxMs, current.currentPosition)
+        // The ticker can race a player error; a dead player throws from isPlaying/
+        // currentPosition, and a missed tick is harmless.
+        runCatching {
+            if (playSessionTrack?.id == currentTrack?.id && current.isPlaying) {
+                playSessionMaxMs = maxOf(playSessionMaxMs, current.currentPosition)
+            }
         }
     }
 
