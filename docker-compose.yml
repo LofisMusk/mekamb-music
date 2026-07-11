@@ -132,8 +132,14 @@ services:
   # Lidarr owns discovery/monitoring/downloading and writes organized albums into
   # /data/library-source. Point its root folder at /data/library-source and set
   # Connect → Webhook to http://api:8000/catalog/webhook?token=$LIDARR_WEBHOOK_TOKEN.
+  #
+  # deemix branch: the `nightly` image enables Lidarr's plugins system so the
+  # TrevTV/Lidarr.Plugin.Deezer plugin can add Deezer as an indexer + download
+  # client (direct Deezer FLAC/MP3, no torrents). NOTE: switching to nightly runs
+  # a one-way DB migration — you cannot revert to a mainline image without
+  # restoring a pre-nightly lidarr-config backup.
   lidarr:
-    image: lscr.io/linuxserver/lidarr:latest
+    image: lscr.io/linuxserver/lidarr:nightly
     depends_on:
       servarr-auth-init:
         condition: service_completed_successfully
@@ -148,6 +154,20 @@ services:
       - library-source:/data/library-source
       - downloads:/downloads
     restart: unless-stopped
+
+  # deemix branch: one-shot job that (once Lidarr is up) installs the Deezer
+  # plugin via Lidarr's API, restarts Lidarr to load it, then adds the Deezer
+  # indexer + download client (injecting DEEZER_ARL). Idempotent — safe to re-run.
+  lidarr-deezer-init:
+    image: python:3.12-alpine
+    env_file: .env
+    depends_on:
+      lidarr:
+        condition: service_started
+    command: ["python", "/scripts/configure_lidarr_deezer.py"]
+    volumes:
+      - ./scripts/configure_lidarr_deezer.py:/scripts/configure_lidarr_deezer.py:ro
+    restart: "no"
 
   # qBittorrent is Lidarr's download client (the backend no longer talks to it).
   qbittorrent:

@@ -262,3 +262,28 @@ storage.
 - The API, worker, and Lidarr containers share the `library-source` volume as
   UID/GID `1000`. The `volume-init` service fixes named-volume ownership before
   the app starts so the worker can read Lidarr's organized albums.
+
+## Deezer via Lidarr (deemix branch)
+
+This branch adds **Deezer** as a music source using the
+[`TrevTV/Lidarr.Plugin.Deezer`](https://github.com/TrevTV/Lidarr.Plugin.Deezer)
+plugin, so albums can be pulled straight from Deezer (FLAC/MP3) instead of only
+torrents. It's wired so the rest of the stack doesn't change:
+
+- **Lidarr runs the plugins image** — `lscr.io/linuxserver/lidarr:nightly` in
+  [docker-compose.yml](docker-compose.yml). ⚠️ Switching to `nightly` runs a
+  one-way Lidarr DB migration; you can't move back to a mainline image without
+  restoring a pre-nightly `lidarr-config` backup.
+- **`lidarr-deezer-init`** (one-shot compose job, [scripts/configure_lidarr_deezer.py](scripts/configure_lidarr_deezer.py))
+  waits for Lidarr, installs the Deezer plugin via its API, restarts Lidarr to
+  load it, then adds a Deezer **indexer** + **download client** — discovering the
+  plugin's field names from Lidarr's live schemas and injecting `DEEZER_ARL`. It's
+  idempotent, so it no-ops on every subsequent `docker compose up`.
+- **`DEEZER_ARL`** is optional: leave it blank and the plugin auto-picks a token;
+  set your own Deezer ARL (premium account for FLAC) for reliability.
+  `DEEZER_PLUGIN_URL` / `DEEZER_DOWNLOAD_DIR` are advanced overrides.
+- **Nothing else changes.** Deezer is just another indexer/download client inside
+  Lidarr, so the backend `/catalog` flow and the native apps are unaffected —
+  searching an artist in the app and tapping **Add** now grabs it from Deezer via
+  Lidarr with no app-side change. qBittorrent + Prowlarr stay wired for torrents
+  too, and Lidarr picks whichever source satisfies the quality profile.
