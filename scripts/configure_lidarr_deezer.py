@@ -55,18 +55,21 @@ def api(method: str, path: str, body=None, timeout: int = 30):
         return resp.status, (json.loads(raw) if raw else None)
 
 
-def wait_for_api(label: str, attempts: int = 120, delay: float = 5.0) -> None:
+def wait_for_api(label: str, attempts: int = 36, delay: float = 8.0) -> bool:
+    """Poll /system/status until ready. Bounded (default ~5 min) so a Lidarr that
+    fails to come back never leaves this job looping and hammering a busy host.
+    Returns True if ready, False on timeout (caller decides how to handle)."""
     for i in range(attempts):
         try:
             status, _ = api("GET", "/system/status", timeout=10)
             if status == 200:
                 log(f"Lidarr API ready ({label}).")
-                return
+                return True
         except Exception as exc:  # noqa: BLE001 — any failure = not ready yet
-            if i % 6 == 0:
+            if i % 4 == 0:
                 log(f"waiting for Lidarr API ({label}): {exc}")
         time.sleep(delay)
-    raise SystemExit(f"Lidarr API never became ready ({label}).")
+    return False
 
 
 def deezer_plugin_installed() -> bool:
@@ -104,7 +107,15 @@ def install_plugin() -> None:
     except urllib.error.URLError:
         pass  # the restart tears down the connection; expected
     time.sleep(10)
-    wait_for_api("after plugin restart")
+    if not wait_for_api("after plugin restart"):
+        # The plugin is installed; it just needs Lidarr to come back to load it.
+        # Don't loop forever (that starves a busy host) — exit with a clear,
+        # re-runnable next step. This job is idempotent, so re-running finishes.
+        raise SystemExit(
+            "Deezer plugin installed, but Lidarr did not return after restart. "
+            "Once Lidarr is healthy, re-run `docker compose up lidarr-deezer-init` "
+            "to finish adding the Deezer indexer + download client."
+        )
 
 
 def find_deezer_schema(kind: str):
@@ -203,7 +214,8 @@ def enable_deezer_in_delay_profiles() -> None:
 def main() -> None:
     if not API_KEY:
         raise SystemExit("LIDARR_API_KEY is required.")
-    wait_for_api("startup")
+    if not wait_for_api("startup"):
+        raise SystemExit("Lidarr API never became ready at startup.")
     install_plugin()
     add_indexer()
     add_download_client()

@@ -154,6 +154,11 @@ services:
       - library-source:/data/library-source
       - downloads:/downloads
     restart: unless-stopped
+    # Safety rail: cap Lidarr so a misbehaving plugin (e.g. a crash-loop during
+    # plugin load) can never peg the whole host and starve the other containers /
+    # SSH. Tune up if your box is bigger; keep some headroom for the host.
+    cpus: 1.5
+    mem_limit: 2g
 
   # deemix branch: one-shot job that (once Lidarr is up) installs the Deezer
   # plugin via Lidarr's API, restarts Lidarr to load it, then adds the Deezer

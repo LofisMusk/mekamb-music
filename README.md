@@ -287,3 +287,12 @@ torrents. It's wired so the rest of the stack doesn't change:
   searching an artist in the app and tapping **Add** now grabs it from Deezer via
   Lidarr with no app-side change. qBittorrent + Prowlarr stay wired for torrents
   too, and Lidarr picks whichever source satisfies the quality profile.
+
+> ⚠️ **Validate off-prod.** The plugins-branch upgrade + first plugin load can be
+> CPU-heavy (plugin load has been seen to crash-loop and spike host load). Bring
+> this branch up on a **separate machine or a box you can afford to reboot** —
+> not on a busy production host. The `lidarr` service is capped (`cpus`/`mem_limit`)
+> as a safety rail, and `lidarr-deezer-init` fails fast (with a "re-run to finish"
+> message) rather than looping if Lidarr doesn't come back after the plugin
+> restart. The plugin install itself is verified working; the end-to-end grab was
+> not validated on a healthy host, so confirm a real Deezer download before merging.
