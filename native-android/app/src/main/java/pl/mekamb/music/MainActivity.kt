@@ -258,9 +258,6 @@ class MainActivity : Activity() {
     // Which auth form is showing in Settings ("login" | "migrate" | "register");
     // null picks a default based on whether a legacy token is stored.
     private var authFormMode: String? = null
-    private var prowlarrApiKey: String
-        get() = prefs.getString("prowlarr_api_key", "") ?: ""
-        set(value) = prefs.edit().putString("prowlarr_api_key", value).apply()
     // "auto" | "aac" | "lossless" — read by the Playback engine when building the stream URL.
     private var playbackQuality: String
         get() = prefs.getString("playback_quality", "auto") ?: "auto"

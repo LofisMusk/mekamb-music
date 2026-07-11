@@ -44,7 +44,6 @@ docker compose up --build
 In the Android app, open Settings and enter:
 
 - API endpoint: `YOUR_MAC_OR_SERVER_LAN_IP:8000`
-- optional Prowlarr API key for indexer searches
 
 Then sign in under **Account**: log in with your email/username and password,
 migrate a legacy `API_TOKEN` (this replaces the token with your new credentials

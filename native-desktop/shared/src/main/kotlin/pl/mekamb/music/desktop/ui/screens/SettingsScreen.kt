@@ -58,7 +58,6 @@ fun SettingsScreen() {
     val settings by app.settings.state.collectAsState()
 
     var endpoint by remember { mutableStateOf(settings.endpoint) }
-    var prowlarrKey by remember { mutableStateOf(settings.prowlarrApiKey) }
     var testResult by remember { mutableStateOf<Result<Unit>?>(null) }
     var confirmRemoveAll by remember { mutableStateOf(false) }
     var summary by remember { mutableStateOf<LibrarySummaryResponse?>(null) }
@@ -105,19 +104,6 @@ fun SettingsScreen() {
 
         SettingsSection(title = "Account") {
             AccountSection()
-        }
-
-        SettingsSection(title = "Search") {
-            OutlinedTextField(
-                value = prowlarrKey,
-                onValueChange = { prowlarrKey = it },
-                label = { Text("Prowlarr API key") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-            )
-            Button(onClick = { app.settings.update { it.copy(prowlarrApiKey = prowlarrKey) } }) {
-                Text("Save")
-            }
         }
 
         SettingsSection(title = "Playback") {

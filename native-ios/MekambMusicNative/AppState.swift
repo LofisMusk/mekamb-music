@@ -584,7 +584,6 @@ final class AppState: ObservableObject {
     // Set when apiToken is an account session token; blank while on a legacy token.
     @AppStorage("mekambMusicAccountUsername") var accountUsername: String = ""
     @AppStorage("mekambMusicAccountEmail") var accountEmail: String = ""
-    @AppStorage("mekambMusicProwlarrApiKey") var prowlarrApiKey: String = ""
     @AppStorage("mekambMusicAutoplaySimilarEnabled") var autoplaySimilarEnabled: Bool = true
     @AppStorage("mekambMusicPlaybackQuality") var playbackQuality: PlaybackQuality = .auto
     @AppStorage("mekambMusicLastTrackId") private var savedPlaybackTrackId: String = ""
@@ -2854,12 +2853,6 @@ final class AppState: ObservableObject {
         let base = normalizedEndpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard !base.isEmpty else { return nil }
         return URL(string: base + path)
-    }
-
-    private func indexerSearchHeaders() -> [String: String] {
-        let key = prowlarrApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { return [:] }
-        return ["X-Prowlarr-Api-Key": key]
     }
 
     private func normalizeEndpoint(_ value: String) -> String {

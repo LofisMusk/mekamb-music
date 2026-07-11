@@ -18,7 +18,6 @@ data class AppSettings(
     // Set when apiToken is an account session token; blank for legacy tokens.
     val accountUsername: String = "",
     val accountEmail: String = "",
-    val prowlarrApiKey: String = "",
     val autoplaySimilar: Boolean = true,
     val volume: Float = 0.85f,
     val deviceId: String = "",
