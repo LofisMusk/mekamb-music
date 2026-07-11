@@ -117,21 +117,30 @@ services:
       mc mb --ignore-existing local/$$S3_BUCKET;
       "
 
+  servarr-auth-init:
+    image: python:3.12-alpine
+    env_file: .env
+    environment:
+      LIDARR_CONFIG_DIR: /lidarr-config
+      PROWLARR_CONFIG_DIR: /prowlarr-config
+    command: ["python", "/scripts/configure_servarr_auth.py"]
+    volumes:
+      - ./scripts/configure_servarr_auth.py:/scripts/configure_servarr_auth.py:ro
+      - lidarr-config:/lidarr-config
+      - prowlarr-config:/prowlarr-config
+
   # Lidarr owns discovery/monitoring/downloading and writes organized albums into
   # /data/library-source. Point its root folder at /data/library-source and set
   # Connect → Webhook to http://api:8000/catalog/webhook?token=$LIDARR_WEBHOOK_TOKEN.
   lidarr:
     image: lscr.io/linuxserver/lidarr:latest
+    depends_on:
+      servarr-auth-init:
+        condition: service_completed_successfully
     environment:
       PUID: 1000
       PGID: 1000
       TZ: Europe/Warsaw
-      # Enforce WebUI auth and pin the API key from .env. The login
-      # username/password itself is created once in Lidarr's setup wizard —
-      # Servarr apps store it hashed in their DB and have no env var for it.
-      LIDARR__AUTH__METHOD: ${LIDARR_AUTH_METHOD:-Forms}
-      LIDARR__AUTH__REQUIRED: ${LIDARR_AUTH_REQUIRED:-Enabled}
-      LIDARR__AUTH__APIKEY: ${LIDARR_API_KEY}
     ports:
       - "8686:8686"
     volumes:
@@ -161,14 +170,13 @@ services:
   # Prowlarr feeds indexers to Lidarr.
   prowlarr:
     image: lscr.io/linuxserver/prowlarr:latest
+    depends_on:
+      servarr-auth-init:
+        condition: service_completed_successfully
     environment:
       PUID: 1000
       PGID: 1000
       TZ: Europe/Warsaw
-      # Same as Lidarr: enforce auth + pin the API key; login is set in the wizard.
-      PROWLARR__AUTH__METHOD: ${PROWLARR_AUTH_METHOD:-Forms}
-      PROWLARR__AUTH__REQUIRED: ${PROWLARR_AUTH_REQUIRED:-Enabled}
-      PROWLARR__AUTH__APIKEY: ${PROWLARR_API_KEY}
     ports:
       - "9696:9696"
     volumes:
