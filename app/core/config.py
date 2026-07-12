@@ -28,6 +28,15 @@ class Settings(BaseSettings):
     lidarr_webhook_token: str = ""  # shared secret verifying inbound Lidarr webhooks
     lidarr_ingest_strategy: str = "copy"  # "copy" | "hardlink"
 
+    # ── Internet Archive Torznab proxy ─────────────────────────────────────────
+    # archive.org's own search API is occasionally slow/flaky, and Prowlarr's
+    # built-in Cardigann definition gives up after one timeout and disables the
+    # indexer for hours. This backend exposes a Torznab-compatible endpoint
+    # (app/api/routes/torznab.py) that Prowlarr indexes instead: it retries
+    # against archive.org and caches results, and always returns 200 (possibly
+    # empty) so Prowlarr's circuit breaker never trips on a transient failure.
+    torznab_ia_api_key: str = ""  # shared secret verifying Prowlarr's requests
+
     database_url: str = "postgresql+asyncpg://music:music@localhost:5432/music"
     redis_url: str = "redis://localhost:6379/0"
     import_queue_name: str = "mekamb-music:import-events"

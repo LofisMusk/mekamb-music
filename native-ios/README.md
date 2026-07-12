@@ -51,8 +51,8 @@ permission on current iOS versions.
 - album covers from `GET /tracks/{id}/artwork`, matching the browser frontend's cover.jpg behavior
 - liked tracks from `GET /tracks/liked`
 - like/unlike with `PUT` / `DELETE /tracks/{id}/like`
-- torrent search through `GET /sources/piratebay/search`
-- torrent import through `POST /imports/piratebay/{torrent_id}` with a native progress bar
+- add music to the shared catalog via `GET /catalog/search` and `POST /catalog/add`
+  (Lidarr acquires it; imports flow in through the backend webhook)
 - stable library refresh after imports without showing false `cancelled` errors
 - direct playback from `GET /tracks/{id}/stream`
 - offline downloads for individual songs and whole albums, stored on the iPhone

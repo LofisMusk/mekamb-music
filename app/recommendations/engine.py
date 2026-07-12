@@ -1182,54 +1182,6 @@ def _score_external_item(
     return round(score, 2), reasons
 
 
-def _from_indexer(item: object) -> UnifiedTorrentSearchItem:
-    return UnifiedTorrentSearchItem(
-        source="indexer",
-        name=getattr(item, "name"),
-        torrent_id=getattr(item, "torrent_id"),
-        info_hash=getattr(item, "info_hash"),
-        magnet_link=getattr(item, "magnet_link"),
-        source_url=getattr(item, "url"),
-        seeders=getattr(item, "seeders"),
-        leechers=getattr(item, "leechers"),
-        size=None,
-        size_bytes=getattr(item, "size_bytes"),
-        uploader=getattr(item, "uploader"),
-    )
-
-
-def _from_piratebay(item: object) -> UnifiedTorrentSearchItem:
-    return UnifiedTorrentSearchItem(
-        source="piratebay",
-        name=getattr(item, "name"),
-        torrent_id=getattr(item, "torrent_id"),
-        info_hash=getattr(item, "info_hash"),
-        magnet_link=getattr(item, "magnet_link"),
-        source_url=getattr(item, "url"),
-        seeders=getattr(item, "seeders"),
-        leechers=getattr(item, "leechers"),
-        size=None,
-        size_bytes=getattr(item, "size_bytes"),
-        uploader=getattr(item, "uploader"),
-    )
-
-
-def _from_1337x(item: object) -> UnifiedTorrentSearchItem:
-    return UnifiedTorrentSearchItem(
-        source="1337x",
-        name=getattr(item, "name"),
-        torrent_id=getattr(item, "torrent_id"),
-        info_hash=None,
-        magnet_link=None,
-        source_url=getattr(item, "url"),
-        seeders=getattr(item, "seeders"),
-        leechers=getattr(item, "leechers"),
-        size=getattr(item, "size"),
-        size_bytes=None,
-        uploader=getattr(item, "uploader"),
-    )
-
-
 def _already_in_library(
     item: UnifiedTorrentSearchItem,
     library_fingerprint: set[frozenset[str]],

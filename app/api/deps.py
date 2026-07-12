@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.service import identity_for, resolve_session_token
+from app.catalog.internet_archive import InternetArchiveClient
 from app.catalog.lidarr_client import LidarrClient
 from app.core.auth import ApiKeyIdentity, match_bearer_token
 from app.core.config import settings
@@ -111,6 +112,16 @@ async def require_admin(user: User = Depends(require_user)) -> User:
 
 def lidarr_client() -> LidarrClient:
     return LidarrClient.from_settings(settings)
+
+
+_internet_archive_client: InternetArchiveClient | None = None
+
+
+def internet_archive_client() -> InternetArchiveClient:
+    global _internet_archive_client
+    if _internet_archive_client is None:
+        _internet_archive_client = InternetArchiveClient(redis_url=settings.redis_url)
+    return _internet_archive_client
 
 
 def redis_client() -> Redis:

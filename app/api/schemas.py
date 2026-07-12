@@ -44,44 +44,6 @@ class LibrarySummaryResponse(BaseModel):
     latest_import_at: datetime | None
 
 
-class Source1337xItem(BaseModel):
-    name: str
-    torrent_id: str
-    url: str
-    seeders: str
-    leechers: str
-    size: str
-    time: str
-    uploader: str
-    uploader_link: str
-    discovered_at: datetime
-
-
-class Source1337xSearchResponse(BaseModel):
-    items: list[Source1337xItem]
-
-
-class SourcePirateBayItem(BaseModel):
-    name: str
-    torrent_id: str
-    info_hash: str
-    magnet_link: str
-    url: str
-    seeders: str
-    leechers: str
-    size_bytes: int
-    num_files: int
-    uploader: str
-    category: str
-    status: str
-    added_at: datetime | None
-    discovered_at: datetime
-
-
-class SourcePirateBaySearchResponse(BaseModel):
-    items: list[SourcePirateBayItem]
-
-
 class SourceSearchItem(BaseModel):
     source: str
     name: str
