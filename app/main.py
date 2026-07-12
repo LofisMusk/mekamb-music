@@ -14,6 +14,7 @@ from app.api.routes import (
     playlists,
     recommendations,
     sync,
+    torznab,
     tracks,
 )
 from app.api.schemas import HealthResponse, ReadinessResponse
@@ -64,6 +65,7 @@ app.include_router(playback.router, prefix="/playback", tags=["playback"])
 app.include_router(playlists.router, prefix="/playlists", tags=["playlists"])
 app.include_router(libraries.router, prefix="/libraries", tags=["libraries"])
 app.include_router(library.router, prefix="/library", tags=["library"])
+app.include_router(torznab.router, prefix="/torznab", tags=["torznab"])
 
 
 @app.get("/health", response_model=HealthResponse)
