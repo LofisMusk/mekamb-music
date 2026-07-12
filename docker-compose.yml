@@ -3,6 +3,10 @@ services:
     build: .
     user: "1000:1000"
     env_file: .env
+    environment:
+      # librosa/numba JIT-cache next to the source file by default, which is
+      # root-owned in the image; point it at a dir the container user can write.
+      NUMBA_CACHE_DIR: /tmp/numba_cache
     depends_on:
       volume-init:
         condition: service_completed_successfully
@@ -43,6 +47,8 @@ services:
     build: .
     user: "1000:1000"
     env_file: .env
+    environment:
+      NUMBA_CACHE_DIR: /tmp/numba_cache
     depends_on:
       volume-init:
         condition: service_completed_successfully
