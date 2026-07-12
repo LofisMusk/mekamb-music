@@ -128,6 +128,27 @@ async def test_process_torrent_downloads_wanted_file_and_cleans_up(tmp_path, mon
 
 
 @pytest.mark.asyncio
+async def test_process_torrent_names_output_folder_after_torrent_file_not_identifier(tmp_path, monkeypatch):
+    """Lidarr correlates a completed Blackhole download by the .torrent
+    file's own name, not the archive.org identifier embedded inside it —
+    these are frequently different strings, so the output folder must be
+    named after the dropped .torrent file, not the parsed identifier."""
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    torrent_path = tmp_path / "Taco Hemingway – Marmur.torrent"
+    torrent_path.write_bytes(
+        _multi_file_torrent("taco-hemingway-marmur_202407", [("01 - Marmur.mp3", 14)])
+    )
+    watch_dir = tmp_path / "watch"
+
+    result = await process_torrent(torrent_path, watch_dir)
+
+    assert result is True
+    assert (watch_dir / "Taco Hemingway – Marmur" / "01 - Marmur.mp3").exists()
+    assert not (watch_dir / "taco-hemingway-marmur_202407").exists()
+
+
+@pytest.mark.asyncio
 async def test_process_torrent_skips_already_complete_output(tmp_path, monkeypatch):
     def fail_if_called(*args, **kwargs):
         raise AssertionError("should not download when already complete")
@@ -176,5 +197,5 @@ async def test_run_ia_blackhole_once_processes_all_pending_torrents(tmp_path, mo
     processed = await run_ia_blackhole_once()
 
     assert processed == 2
-    assert (watch_dir / "album-a" / "x.mp3").exists()
-    assert (watch_dir / "album-b" / "y.mp3").exists()
+    assert (watch_dir / "a" / "x.mp3").exists()
+    assert (watch_dir / "b" / "y.mp3").exists()

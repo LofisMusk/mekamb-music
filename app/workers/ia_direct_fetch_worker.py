@@ -136,7 +136,13 @@ async def process_torrent(torrent_path: Path, watch_dir: Path) -> bool:
         logger.warning("ia-direct-fetch: no audio files found in %s", torrent_path)
         return False
 
-    output_dir = watch_dir / identifier
+    # Lidarr correlates a completed Torrent Blackhole download with the
+    # .torrent file it originally dropped by matching on that file's own
+    # name (without extension) — NOT the archive.org identifier embedded
+    # inside the torrent's bencode, which is usually a different string.
+    # The output folder must use the .torrent's filename stem or Lidarr's
+    # own periodic completion check will never recognize it as finished.
+    output_dir = watch_dir / torrent_path.stem
     if output_dir.exists() and _looks_complete(output_dir, wanted):
         logger.info("ia-direct-fetch: %s already complete, cleaning up torrent file", identifier)
         torrent_path.unlink(missing_ok=True)
