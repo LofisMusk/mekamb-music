@@ -263,36 +263,27 @@ storage.
   UID/GID `1000`. The `volume-init` service fixes named-volume ownership before
   the app starts so the worker can read Lidarr's organized albums.
 
-## Deezer via Lidarr (deemix branch)
+## Internet Archive Torznab proxy
 
-This branch adds **Deezer** as a music source using the
-[`TrevTV/Lidarr.Plugin.Deezer`](https://github.com/TrevTV/Lidarr.Plugin.Deezer)
-plugin, so albums can be pulled straight from Deezer (FLAC/MP3) instead of only
-torrents. It's wired so the rest of the stack doesn't change:
+Prowlarr's built-in Internet Archive indexer definition disables itself for
+hours after a single timeout against archive.org's occasionally-flaky search
+API — a real problem since archive.org hosts a large amount of freely
+downloadable music. The backend exposes its own Torznab-compatible endpoint
+instead ([app/api/routes/torznab.py](app/api/routes/torznab.py),
+[app/catalog/internet_archive.py](app/catalog/internet_archive.py)) that
+Prowlarr indexes as a **Generic Torznab** source:
 
-- **Lidarr runs the plugins image** — `lscr.io/linuxserver/lidarr:nightly` in
-  [docker-compose.yml](docker-compose.yml). ⚠️ Switching to `nightly` runs a
-  one-way Lidarr DB migration; you can't move back to a mainline image without
-  restoring a pre-nightly `lidarr-config` backup.
-- **`lidarr-deezer-init`** (one-shot compose job, [scripts/configure_lidarr_deezer.py](scripts/configure_lidarr_deezer.py))
-  waits for Lidarr, installs the Deezer plugin via its API, restarts Lidarr to
-  load it, then adds a Deezer **indexer** + **download client** — discovering the
-  plugin's field names from Lidarr's live schemas and injecting `DEEZER_ARL`. It's
-  idempotent, so it no-ops on every subsequent `docker compose up`.
-- **`DEEZER_ARL`** is optional: leave it blank and the plugin auto-picks a token;
-  set your own Deezer ARL (premium account for FLAC) for reliability.
-  `DEEZER_PLUGIN_URL` / `DEEZER_DOWNLOAD_DIR` are advanced overrides.
-- **Nothing else changes.** Deezer is just another indexer/download client inside
-  Lidarr, so the backend `/catalog` flow and the native apps are unaffected —
-  searching an artist in the app and tapping **Add** now grabs it from Deezer via
-  Lidarr with no app-side change. qBittorrent + Prowlarr stay wired for torrents
-  too, and Lidarr picks whichever source satisfies the quality profile.
+- Retries against archive.org with backoff and caches successful responses in
+  Redis, so a transient archive.org hiccup doesn't cost every subsequent
+  search a full timeout.
+- Always returns `200 OK` (with zero results on failure) instead of an error,
+  so a bad archive.org response never trips Prowlarr's own indexer circuit
+  breaker and disables the source.
+- Points releases at archive.org's real `.torrent` files
+  (`https://archive.org/download/{id}/{id}_archive.torrent`), not
+  reconstructed magnet links.
 
-> ⚠️ **Validate off-prod.** The plugins-branch upgrade + first plugin load can be
-> CPU-heavy (plugin load has been seen to crash-loop and spike host load). Bring
-> this branch up on a **separate machine or a box you can afford to reboot** —
-> not on a busy production host. The `lidarr` service is capped (`cpus`/`mem_limit`)
-> as a safety rail, and `lidarr-deezer-init` fails fast (with a "re-run to finish"
-> message) rather than looping if Lidarr doesn't come back after the plugin
-> restart. The plugin install itself is verified working; the end-to-end grab was
-> not validated on a healthy host, so confirm a real Deezer download before merging.
+In Prowlarr, add it as **Generic Torznab** with Base URL `http://api:8000`,
+API Path `/torznab/internetarchive/api`, and API Key `TORZNAB_IA_API_KEY`
+from `.env`. Disable (don't delete) the built-in "Internet Archive" indexer
+to avoid duplicate/conflicting results.
