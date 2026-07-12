@@ -13,6 +13,9 @@ logger = logging.getLogger("uvicorn.error")
 
 _SEARCH_URL = "https://archive.org/advancedsearch.php"
 _FIELDS = "identifier,title,mediatype,item_size,downloads,btih,publicdate"
+_METADATA_URL = "https://archive.org/metadata/{identifier}"
+_AUDIO_EXTENSIONS = (".mp3", ".flac", ".ogg", ".m4a", ".wav", ".wma", ".ape")
+_MAX_METADATA_FETCHES = 25
 
 
 @dataclass(frozen=True)
@@ -51,11 +54,82 @@ class InternetArchiveClient:
         cache_key = f"mekamb-music:ia-torznab:{query.strip().lower()}:{rows}"
         cached = await self._redis.get(cache_key)
         if cached is not None:
-            return _parse_docs(json.loads(cached))
+            docs = json.loads(cached)
+        else:
+            docs = await self._fetch_with_retry(query, rows=rows)
+            await self._redis.set(cache_key, json.dumps(docs), ex=self._cache_ttl_seconds)
 
-        docs = await self._fetch_with_retry(query, rows=rows)
-        await self._redis.set(cache_key, json.dumps(docs), ex=self._cache_ttl_seconds)
-        return _parse_docs(docs)
+        releases = _parse_docs(docs)
+        return await self._with_audio_only_sizes(releases)
+
+    async def _with_audio_only_sizes(
+        self, releases: list[InternetArchiveRelease]
+    ) -> list[InternetArchiveRelease]:
+        """archive.org's `item_size` is the whole item (audio + cover art +
+        per-track spectrogram PNGs + sqlite/xml metadata + the .torrent file
+        itself), often 1.5-3x the actual audio content. Lidarr rejects releases
+        that look oversized for their inferred quality tier, so an inflated size
+        causes real, correctly-tracked albums to be silently dropped. Replace it
+        with the sum of just the audio files."""
+        limited = releases[:_MAX_METADATA_FETCHES]
+        sizes = await asyncio.gather(
+            *(self._audio_only_size(r.identifier) for r in limited), return_exceptions=True
+        )
+        resolved: list[InternetArchiveRelease] = []
+        for release, size in zip(limited, sizes):
+            if isinstance(size, Exception) or not size:
+                resolved.append(release)
+            else:
+                resolved.append(
+                    InternetArchiveRelease(
+                        identifier=release.identifier,
+                        title=release.title,
+                        size_bytes=size,
+                        downloads=release.downloads,
+                        published_at=release.published_at,
+                        torrent_url=release.torrent_url,
+                    )
+                )
+        resolved.extend(releases[_MAX_METADATA_FETCHES:])
+        return resolved
+
+    async def _audio_only_size(self, identifier: str) -> int | None:
+        cache_key = f"mekamb-music:ia-torznab:audio-size:{identifier}"
+        cached = await self._redis.get(cache_key)
+        if cached is not None:
+            return int(cached)
+
+        url = _METADATA_URL.format(identifier=identifier)
+        try:
+            async with httpx.AsyncClient(timeout=self._request_timeout_seconds) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("internet-archive-metadata fetch failed for %s: %s", identifier, exc)
+            return None
+
+        files = payload.get("files", [])
+        by_extension: dict[str, int] = {}
+        for f in files:
+            name = str(f.get("name") or "").lower()
+            size = f.get("size")
+            if not isinstance(size, (int, str)) or not str(size).isdigit():
+                continue
+            ext = next((e for e in _AUDIO_EXTENSIONS if name.endswith(e)), None)
+            if ext is None:
+                continue
+            by_extension[ext] = by_extension.get(ext, 0) + int(size)
+
+        if not by_extension:
+            return None
+
+        # Prefer mp3 (the format IA converts everything to and the one qBittorrent
+        # ends up keeping after excluding duplicate formats); otherwise take
+        # whichever single format has the most total bytes.
+        total = by_extension.get(".mp3") or max(by_extension.values())
+        await self._redis.set(cache_key, str(total), ex=self._cache_ttl_seconds * 24)
+        return total
 
     async def _fetch_with_retry(self, query: str, *, rows: int) -> list[dict]:
         q = 'format:("Archive BitTorrent")'
