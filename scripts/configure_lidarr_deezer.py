@@ -50,9 +50,19 @@ def api(method: str, path: str, body=None, timeout: int = 30):
     if data is not None:
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read().decode()
-        return resp.status, (json.loads(raw) if raw else None)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode()
+            return resp.status, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as exc:
+        # Surface the actual validation errors (Lidarr returns them in the body)
+        # instead of a bare "Bad Request".
+        try:
+            detail = exc.read().decode()
+        except Exception:  # noqa: BLE001
+            detail = "<no body>"
+        log(f"{method} {path} -> HTTP {exc.code}: {detail[:800]}")
+        raise
 
 
 def wait_for_api(label: str, attempts: int = 36, delay: float = 8.0) -> bool:
@@ -156,7 +166,10 @@ def add_indexer() -> None:
     if ARL:
         if set_field(schema, lambda n: "arl" in n.lower(), ARL):
             log("injected DEEZER_ARL into indexer.")
-    api("POST", "/indexer", schema)
+    # forceSave=true saves without running Lidarr's connectivity test, which fails
+    # (400) when the ARL is blank/auto-picked or flaky. The indexer still works for
+    # grabs; only the on-save test is skipped.
+    api("POST", "/indexer?forceSave=true", schema)
     log("added Deezer indexer.")
 
 
@@ -177,7 +190,7 @@ def add_download_client() -> None:
         lambda n: any(k in n.lower() for k in ("path", "directory", "folder", "dir")),
         DOWNLOAD_DIR,
     )
-    api("POST", "/downloadclient", schema)
+    api("POST", "/downloadclient?forceSave=true", schema)
     log(f"added Deezer download client (path {DOWNLOAD_DIR}).")
 
 
