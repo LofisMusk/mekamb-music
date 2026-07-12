@@ -37,6 +37,20 @@ class Settings(BaseSettings):
     # empty) so Prowlarr's circuit breaker never trips on a transient failure.
     torznab_ia_api_key: str = ""  # shared secret verifying Prowlarr's requests
 
+    # ── Internet Archive direct-HTTP fetch (Torrent Blackhole fallback) ───────
+    # BitTorrent/webseed delivery for archive.org content is unreliable (dead
+    # swarms, malformed webseed entries, stalls near completion), but plain
+    # HTTPS from archive.org is fast and reliable. Lidarr is configured with a
+    # "Torrent Blackhole" download client pointed at ia_blackhole_torrent_dir;
+    # this worker (app/workers/ia_direct_fetch_worker.py) watches that folder
+    # for .torrent files Lidarr drops there, downloads the audio files directly
+    # over HTTPS instead of via BitTorrent, and writes them into
+    # ia_blackhole_watch_dir, which Lidarr scans for completed downloads.
+    ia_blackhole_enabled: bool = False
+    ia_blackhole_torrent_dir: Path = Path("data/ia-blackhole/torrents")
+    ia_blackhole_watch_dir: Path = Path("data/ia-blackhole/watch")
+    ia_blackhole_poll_interval_seconds: int = 10
+
     database_url: str = "postgresql+asyncpg://music:music@localhost:5432/music"
     redis_url: str = "redis://localhost:6379/0"
     import_queue_name: str = "mekamb-music:import-events"

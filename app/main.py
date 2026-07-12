@@ -27,6 +27,7 @@ from app.imports.queue import check_redis
 from app.workers.audio_feature_worker import run_feature_extraction_loop
 from app.workers.cache_cleanup import run_cleanup_loop
 from app.workers.collaborative_filtering_worker import run_collaborative_recompute_loop
+from app.workers.ia_direct_fetch_worker import run_ia_blackhole_loop
 
 
 @asynccontextmanager
@@ -40,13 +41,16 @@ async def lifespan(app: FastAPI):
     feature_task = asyncio.create_task(run_feature_extraction_loop())
     # Cross-userowy recompute sasiadow trackow (collaborative filtering)
     collab_task = asyncio.create_task(run_collaborative_recompute_loop())
+    # Internet Archive direct-HTTP fetch (Torrent Blackhole fallback)
+    ia_blackhole_task = asyncio.create_task(run_ia_blackhole_loop())
 
     yield
 
     cleanup_task.cancel()
     feature_task.cancel()
     collab_task.cancel()
-    for task in (cleanup_task, feature_task, collab_task):
+    ia_blackhole_task.cancel()
+    for task in (cleanup_task, feature_task, collab_task, ia_blackhole_task):
         try:
             await task
         except asyncio.CancelledError:

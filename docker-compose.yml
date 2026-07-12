@@ -24,6 +24,12 @@ services:
       # Lidarr's organized output, ingested into the library. Mounted at the same
       # path Lidarr uses so webhook trackFile paths resolve on both sides.
       - library-source:/data/library-source
+      # Torrent Blackhole fallback for Internet Archive content: Lidarr drops
+      # .torrent files in ia-blackhole-torrents; the api's ia_direct_fetch_worker
+      # fetches the audio over plain HTTPS and writes it to ia-blackhole-watch,
+      # which Lidarr scans as a completed download. Same paths on both sides.
+      - ia-blackhole-torrents:/data/ia-blackhole/torrents
+      - ia-blackhole-watch:/data/ia-blackhole/watch
     healthcheck:
       test:
         - CMD-SHELL
@@ -58,11 +64,17 @@ services:
 
   volume-init:
     image: alpine:3.20
-    command: ["sh", "-c", "chown -R 1000:1000 /data/quarantine /data/library /data/library-source"]
+    command:
+      [
+        "sh", "-c",
+        "chown -R 1000:1000 /data/quarantine /data/library /data/library-source /data/ia-blackhole",
+      ]
     volumes:
       - quarantine:/data/quarantine
       - library:/data/library
       - library-source:/data/library-source
+      - ia-blackhole-torrents:/data/ia-blackhole/torrents
+      - ia-blackhole-watch:/data/ia-blackhole/watch
 
   postgres:
     image: postgres:16-alpine
@@ -151,6 +163,8 @@ services:
       - lidarr-config:/config
       - library-source:/data/library-source
       - downloads:/downloads
+      - ia-blackhole-torrents:/data/ia-blackhole/torrents
+      - ia-blackhole-watch:/data/ia-blackhole/watch
     restart: unless-stopped
     # Safety rail: cap Lidarr so a runaway process can never peg the whole host
     # and starve the other containers / SSH. Tune up if your box is bigger; keep
@@ -202,3 +216,5 @@ volumes:
   lidarr-config:
   qbittorrent-config:
   prowlarr-config:
+  ia-blackhole-torrents:
+  ia-blackhole-watch:
