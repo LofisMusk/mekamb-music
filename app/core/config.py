@@ -70,6 +70,20 @@ class Settings(BaseSettings):
     ia_backfill_min_match_score: float = 0.6
     ia_backfill_import_mode: str = "move"  # "move" | "copy"
     ia_backfill_retry_cooldown_seconds: int = 3600
+    # After a successful grab+import, don't re-attempt for this long even if the
+    # album still reads "missing" in Lidarr — archive.org rips are often 1-2
+    # tracks short of the MusicBrainz release, and re-downloading a whole album
+    # every hour to chase a track the archive doesn't have is pure waste.
+    ia_backfill_success_cooldown_seconds: int = 2_592_000  # 30 days
+
+    # ── Lidarr → app library reconciliation ───────────────────────────────────
+    # Lidarr's Manual Import (used by the backfill) does NOT fire the Connect
+    # webhook, so albums land in Lidarr but never reach the app catalog. This
+    # loop closes the gap generically: it periodically asks Lidarr for every
+    # album that has track files and ingests any not yet in the app, reusing the
+    # normal quarantine→library pipeline. Idempotent (deduped per Lidarr album).
+    library_reconcile_enabled: bool = False
+    library_reconcile_interval_seconds: int = 600
 
     database_url: str = "postgresql+asyncpg://music:music@localhost:5432/music"
     redis_url: str = "redis://localhost:6379/0"

@@ -127,6 +127,17 @@ class LidarrClient:
         payload = self._request("GET", f"/api/v1/album/{album_id}")
         return payload if isinstance(payload, dict) else {}
 
+    def all_albums(self) -> list[dict[str, Any]]:
+        """Every album Lidarr knows, across all artists (with statistics)."""
+        payload = self._request("GET", "/api/v1/album")
+        return payload if isinstance(payload, list) else []
+
+    def album_track_files(self, album_id: int) -> list[dict[str, Any]]:
+        """The imported track files of an album, with their on-disk ``path`` in
+        the Lidarr root folder (shared with the backend at the same path)."""
+        payload = self._request("GET", "/api/v1/trackfile", query={"albumId": album_id})
+        return payload if isinstance(payload, list) else []
+
     def album_tracks(self, *, album_release_id: int) -> list[dict[str, Any]]:
         """Tracks of a single album release, in Lidarr's order. NOTE: must NOT
         pass artistId — doing so makes Lidarr ignore albumReleaseId and return

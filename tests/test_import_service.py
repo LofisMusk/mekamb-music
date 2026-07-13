@@ -73,6 +73,48 @@ class ImportServiceTests(unittest.IsolatedAsyncioTestCase):
             copied = list(Path(record.quarantine_path).rglob("*.flac"))
             self.assertEqual(len(copied), 1)
 
+    async def test_import_from_files_copies_only_named_files(self):
+        # Lidarr uses a flat per-artist folder, so ingest must pick specific files.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            flat = root / "lidarr" / "Artist"
+            flat.mkdir(parents=True)
+            wanted = flat / "01 - Europa.mp3"
+            wanted.write_bytes(b"audio")
+            (flat / "01 - OtherAlbum.mp3").write_bytes(b"nope")  # different album, same folder
+            repository = FakeRepository()
+            service = _service(root, repository)
+
+            record = await service.create_lidarr_import_from_files(
+                files=[wanted, flat / "does-not-exist.mp3"],
+                foreign_key="lidarr:mb-europa",
+                name="Artist - Europa",
+            )
+
+            self.assertIsNotNone(record)
+            copied = sorted(p.name for p in Path(record.quarantine_path).rglob("*.mp3"))
+            self.assertEqual(copied, ["01 - Europa.mp3"])  # only the named file, not the neighbor
+
+    async def test_import_from_files_returns_none_when_no_files_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = await _service(root, FakeRepository()).create_lidarr_import_from_files(
+                files=[root / "gone.mp3"], foreign_key="lidarr:x", name="x"
+            )
+            self.assertIsNone(record)
+
+    async def test_import_from_files_idempotent_by_foreign_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            f = root / "t.mp3"
+            f.write_bytes(b"a")
+            repository = FakeRepository()
+            service = _service(root, repository)
+            a = await service.create_lidarr_import_from_files(files=[f], foreign_key="lidarr:9", name="a")
+            b = await service.create_lidarr_import_from_files(files=[f], foreign_key="lidarr:9", name="a")
+            self.assertEqual(a.id, b.id)
+            self.assertEqual(len(repository.records), 1)
+
     async def test_lidarr_import_is_idempotent_by_foreign_key(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

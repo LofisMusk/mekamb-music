@@ -148,6 +148,56 @@ class ImportService:
         await self._notify_import_changed(record.id)
         return record
 
+    async def create_lidarr_import_from_files(
+        self,
+        *,
+        files: list[Path],
+        foreign_key: str,
+        name: str,
+        source_url: str = "lidarr",
+    ) -> ImportRecord | None:
+        """Like ``create_lidarr_import`` but for an explicit list of track files
+        rather than a directory. Lidarr organizes every album of an artist into a
+        single flat folder, so a per-album ingest must name the exact files
+        (obtained from Lidarr's trackfile API) instead of copying a directory.
+        Returns None if none of the files exist (Lidarr may not have finished
+        moving them yet — a later reconcile pass will retry)."""
+        existing_files = [Path(f) for f in files if Path(f).exists() and Path(f).is_file()]
+        if not existing_files:
+            return None
+        info_hash = _normalize_key(foreign_key)
+        if not info_hash:
+            raise InvalidImportCandidate("Lidarr import is missing an identifier.")
+
+        existing = await self.repository.get_by_info_hash(info_hash)
+        if existing is not None:
+            return existing
+
+        import_id = uuid4()
+        quarantine = self.planner.plan(import_id)
+        quarantine.host_path.mkdir(parents=True, exist_ok=True)
+        for src in existing_files:
+            _materialize_file(src, quarantine.host_path / src.name, strategy=self.ingest_strategy)
+
+        now = datetime.now(UTC)
+        record = ImportRecord(
+            id=import_id,
+            source="lidarr",
+            torrent_id=info_hash,
+            info_hash=info_hash,
+            magnet_link="",
+            uploader="lidarr",
+            source_url=source_url or "lidarr",
+            status=ImportStatus.READY_TO_IMPORT.value,
+            quarantine_path=str(quarantine.host_path),
+            error_message=None,
+            created_at=now,
+            updated_at=now,
+        )
+        record = await self.repository.add(record)
+        await self._notify_import_changed(record.id)
+        return record
+
     async def get_import(self, import_id: UUID) -> ImportRecord:
         return await self.repository.get(import_id)
 
@@ -209,6 +259,18 @@ class ImportService:
 
 def _normalize_key(value: str) -> str:
     return "".join(ch for ch in str(value).strip() if ch.isalnum() or ch in "-_:.").strip()
+
+
+def _materialize_file(src: Path, dst: Path, *, strategy: str) -> None:
+    if dst.exists():
+        return
+    if strategy == "hardlink":
+        try:
+            os.link(src, dst)
+            return
+        except OSError:
+            pass
+    copy2(src, dst)
 
 
 def _materialize(source_dir: Path, dest_dir: Path, *, strategy: str) -> None:

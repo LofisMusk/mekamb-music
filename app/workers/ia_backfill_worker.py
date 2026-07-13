@@ -32,6 +32,8 @@ from app.catalog import ia_import
 from app.catalog.internet_archive import _AUDIO_EXTENSIONS, InternetArchiveClient
 from app.catalog.lidarr_client import LidarrClient, LidarrError
 from app.core.config import settings
+from app.imports.lidarr_reconcile import ingest_lidarr_album
+from app.imports.queue import RedisImportQueue
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +169,7 @@ async def run_ia_backfill_once() -> int:
 
     ia = InternetArchiveClient(redis_url=settings.redis_url)
     redis: Redis = ia._redis  # reuse the same connection for cooldown bookkeeping
+    publisher = RedisImportQueue.from_settings(settings)
     settings.ia_backfill_staging_dir.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -174,6 +177,7 @@ async def run_ia_backfill_once() -> int:
     except LidarrError as exc:
         logger.warning("ia-backfill: could not list missing albums: %s", exc)
         await ia.close()
+        await publisher.close()
         return 0
 
     processed = 0
@@ -198,12 +202,24 @@ async def run_ia_backfill_once() -> int:
         try:
             if await _process_album(album, ia, lidarr):
                 imported += 1
+                # Don't re-grab a whole album every hour to chase tracks the
+                # archive doesn't have; back off hard once it's imported.
+                await redis.set(
+                    cooldown_key, "1", ex=settings.ia_backfill_success_cooldown_seconds
+                )
+                # Push it straight into the app (Manual Import doesn't fire
+                # Lidarr's webhook); the reconcile loop is the backstop.
+                try:
+                    await ingest_lidarr_album(lidarr, album, publisher=publisher, wait_seconds=20)
+                except Exception:
+                    logger.exception("ia-backfill: app ingest failed for album %s", album_id)
         except LidarrError as exc:
             logger.warning("ia-backfill: Lidarr import failed for album %s: %s", album_id, exc)
         except Exception:
             logger.exception("ia-backfill: unexpected error processing album %s", album_id)
 
     await ia.close()
+    await publisher.close()
     return imported
 
 
