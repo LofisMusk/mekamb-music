@@ -131,18 +131,49 @@ class InternetArchiveClient:
         await self._redis.set(cache_key, str(total), ex=self._cache_ttl_seconds * 24)
         return total
 
-    async def _fetch_with_retry(self, query: str, *, rows: int) -> list[dict]:
-        q = 'format:("Archive BitTorrent")'
-        if query.strip():
-            q = f"title:({query.strip()}) AND {q}"
+    async def search_audio_items(
+        self, artist: str, album: str, *, rows: int = 25
+    ) -> list[dict]:
+        """Global archive.org audio search for the direct-push backfill. Unlike
+        `search`, this does NOT require an "Archive BitTorrent" file (direct
+        HTTPS needs no torrent) and returns raw docs for the caller to score and
+        rank. Sorted by downloads so popular, real uploads come first."""
+        terms = " ".join(part for part in (artist.strip(), album.strip()) if part)
+        q = f"({terms}) AND mediatype:(audio)" if terms else "mediatype:(audio)"
+        cache_key = f"mekamb-music:ia-backfill:search:{terms.lower()}:{rows}"
+        cached = await self._redis.get(cache_key)
+        if cached is not None:
+            return json.loads(cached)
+
         params = {
             "q": q,
-            "fl[]": _FIELDS,
-            "sort": "-publicdate",
+            "fl[]": "identifier,title,downloads,item_size,mediatype",
+            "sort": "-downloads",
             "rows": rows,
             "output": "json",
         }
+        docs = await self._get_docs_with_retry(params)
+        await self._redis.set(cache_key, json.dumps(docs), ex=self._cache_ttl_seconds)
+        return docs
 
+    async def item_formats(self, identifier: str) -> list[str]:
+        """The archive.org `format` label of every file in an item (e.g.
+        "VBR MP3", "Flac", "PNG"). The backfill worker feeds this to
+        `select_audio_format` to choose which format to bulk-download via the
+        /compress/ endpoint."""
+        url = _METADATA_URL.format(identifier=identifier)
+        try:
+            async with httpx.AsyncClient(timeout=self._request_timeout_seconds) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("internet-archive item_formats fetch failed for %s: %s", identifier, exc)
+            return []
+
+        return [str(f.get("format")) for f in payload.get("files", []) if f.get("format")]
+
+    async def _get_docs_with_retry(self, params: dict) -> list[dict]:
         last_error: Exception | None = None
         for attempt in range(1, self._max_attempts + 1):
             try:
@@ -156,15 +187,29 @@ class InternetArchiveClient:
             except (httpx.HTTPError, InternetArchiveError, ValueError) as exc:
                 last_error = exc
                 logger.warning(
-                    "internet-archive-search attempt %s/%s failed: %s",
+                    "internet-archive search attempt %s/%s failed: %s",
                     attempt,
                     self._max_attempts,
                     exc,
                 )
                 if attempt < self._max_attempts:
                     await asyncio.sleep(1.5 * attempt)
+        raise InternetArchiveError(
+            f"archive.org search failed after {self._max_attempts} attempts"
+        ) from last_error
 
-        raise InternetArchiveError(f"archive.org search failed after {self._max_attempts} attempts") from last_error
+    async def _fetch_with_retry(self, query: str, *, rows: int) -> list[dict]:
+        q = 'format:("Archive BitTorrent")'
+        if query.strip():
+            q = f"title:({query.strip()}) AND {q}"
+        params = {
+            "q": q,
+            "fl[]": _FIELDS,
+            "sort": "-publicdate",
+            "rows": rows,
+            "output": "json",
+        }
+        return await self._get_docs_with_retry(params)
 
     async def close(self) -> None:
         await self._redis.aclose()

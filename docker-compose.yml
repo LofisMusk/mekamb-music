@@ -34,6 +34,10 @@ services:
       # which Lidarr scans as a completed download. Same paths on both sides.
       - ia-blackhole-torrents:/data/ia-blackhole/torrents
       - ia-blackhole-watch:/data/ia-blackhole/watch
+      # Direct-push backfill staging: the api downloads archive.org audio here
+      # and hands the paths to Lidarr's Manual Import. Same path on both sides so
+      # the paths resolve for Lidarr too.
+      - ia-backfill:/data/ia-backfill
     healthcheck:
       test:
         - CMD-SHELL
@@ -73,7 +77,7 @@ services:
     command:
       [
         "sh", "-c",
-        "chown -R 1000:1000 /data/quarantine /data/library /data/library-source /data/ia-blackhole",
+        "chown -R 1000:1000 /data/quarantine /data/library /data/library-source /data/ia-blackhole /data/ia-backfill",
       ]
     volumes:
       - quarantine:/data/quarantine
@@ -81,6 +85,7 @@ services:
       - library-source:/data/library-source
       - ia-blackhole-torrents:/data/ia-blackhole/torrents
       - ia-blackhole-watch:/data/ia-blackhole/watch
+      - ia-backfill:/data/ia-backfill
 
   postgres:
     image: postgres:16-alpine
@@ -171,6 +176,7 @@ services:
       - downloads:/downloads
       - ia-blackhole-torrents:/data/ia-blackhole/torrents
       - ia-blackhole-watch:/data/ia-blackhole/watch
+      - ia-backfill:/data/ia-backfill
     restart: unless-stopped
     # Safety rail: cap Lidarr so a runaway process can never peg the whole host
     # and starve the other containers / SSH. Tune up if your box is bigger; keep
@@ -224,3 +230,4 @@ volumes:
   prowlarr-config:
   ia-blackhole-torrents:
   ia-blackhole-watch:
+  ia-backfill:

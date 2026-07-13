@@ -51,6 +51,26 @@ class Settings(BaseSettings):
     ia_blackhole_watch_dir: Path = Path("data/ia-blackhole/watch")
     ia_blackhole_poll_interval_seconds: int = 10
 
+    # ── Internet Archive direct-push backfill ─────────────────────────────────
+    # The Torznab proxy + Blackhole fallback still rely on Lidarr searching
+    # Prowlarr, parsing messy IA titles ("Taco Hemingway – Marmur (MP3)") into a
+    # grabbable release, and routing the grab — every one of which is flaky. This
+    # worker (app/workers/ia_backfill_worker.py) skips that entire chain: it asks
+    # Lidarr which monitored albums are still missing, finds each one directly on
+    # archive.org (scoring artist+album against the item title/identifier),
+    # downloads the audio over plain HTTPS into ia_backfill_staging_dir, and
+    # imports it into the library through Lidarr's Manual Import API — no
+    # Prowlarr, no BitTorrent, no download client. ia_backfill_staging_dir must
+    # be mounted at the SAME path inside both this backend and Lidarr so the
+    # paths Manual Import receives resolve on both sides (like the blackhole dirs).
+    ia_backfill_enabled: bool = False
+    ia_backfill_staging_dir: Path = Path("data/ia-backfill")
+    ia_backfill_poll_interval_seconds: int = 900
+    ia_backfill_max_albums_per_pass: int = 5
+    ia_backfill_min_match_score: float = 0.6
+    ia_backfill_import_mode: str = "move"  # "move" | "copy"
+    ia_backfill_retry_cooldown_seconds: int = 3600
+
     database_url: str = "postgresql+asyncpg://music:music@localhost:5432/music"
     redis_url: str = "redis://localhost:6379/0"
     import_queue_name: str = "mekamb-music:import-events"

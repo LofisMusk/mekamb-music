@@ -104,6 +104,50 @@ class LidarrClient:
         }
         return self._request("POST", "/api/v1/artist", body=body)
 
+    def missing_albums(self, *, page_size: int = 200) -> list[dict[str, Any]]:
+        """Monitored albums Lidarr has zero track files for. Each record is an
+        album resource with an embedded ``artist`` and its ``releases``."""
+        payload = self._request(
+            "GET",
+            "/api/v1/wanted/missing",
+            query={
+                "pageSize": page_size,
+                "sortKey": "albums.title",
+                "sortDirection": "ascending",
+                "monitored": "true",
+                "includeArtist": "true",
+            },
+        )
+        if isinstance(payload, dict):
+            records = payload.get("records")
+            return records if isinstance(records, list) else []
+        return []
+
+    def manual_import_candidates(
+        self, folder: str, *, artist_id: int, album_id: int
+    ) -> list[dict[str, Any]]:
+        """Ask Lidarr to scan a folder *scoped to a specific album*, so its own
+        matcher maps each file to the right track and reports the album release
+        and parsed quality. Returns one entry per file."""
+        payload = self._request(
+            "GET",
+            "/api/v1/manualimport",
+            query={
+                "folder": folder,
+                "artistId": artist_id,
+                "albumId": album_id,
+                "filterExistingFiles": "false",
+            },
+        )
+        return payload if isinstance(payload, list) else []
+
+    def run_manual_import(self, files: list[dict[str, Any]], *, import_mode: str = "move") -> Any:
+        return self._request(
+            "POST",
+            "/api/v1/command",
+            body={"name": "ManualImport", "importMode": import_mode, "files": files},
+        )
+
     def add_album(self, *, foreign_album_id: str, album_title: str, foreign_artist_id: str, artist_name: str) -> dict[str, Any]:
         body = {
             "foreignAlbumId": foreign_album_id,
