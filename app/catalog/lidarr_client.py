@@ -123,12 +123,24 @@ class LidarrClient:
             return records if isinstance(records, list) else []
         return []
 
+    def get_album(self, album_id: int) -> dict[str, Any]:
+        payload = self._request("GET", f"/api/v1/album/{album_id}")
+        return payload if isinstance(payload, dict) else {}
+
+    def album_tracks(self, *, album_release_id: int) -> list[dict[str, Any]]:
+        """Tracks of a single album release, in Lidarr's order. NOTE: must NOT
+        pass artistId — doing so makes Lidarr ignore albumReleaseId and return
+        every track by the artist."""
+        payload = self._request("GET", "/api/v1/track", query={"albumReleaseId": album_release_id})
+        return payload if isinstance(payload, list) else []
+
     def manual_import_candidates(
         self, folder: str, *, artist_id: int, album_id: int
     ) -> list[dict[str, Any]]:
-        """Ask Lidarr to scan a folder *scoped to a specific album*, so its own
-        matcher maps each file to the right track and reports the album release
-        and parsed quality. Returns one entry per file."""
+        """Scan a folder and report each file with the quality Lidarr parsed from
+        it. We only use the paths + qualities — the album/track mapping Lidarr
+        guesses here is unreliable for tag-poor archive.org rips, so we force our
+        own mapping in the ManualImport command instead."""
         payload = self._request(
             "GET",
             "/api/v1/manualimport",

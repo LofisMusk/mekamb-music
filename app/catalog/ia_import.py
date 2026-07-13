@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
 
 # archive.org titles and identifiers are wildly inconsistent for the same album
@@ -128,51 +129,95 @@ def select_audio_format(available_formats: list[str]) -> str | None:
     return None
 
 
-def _has_permanent_rejection(candidate: dict[str, Any]) -> bool:
-    for rejection in candidate.get("rejections") or []:
-        # Lidarr marks blocking rejections "permanent"; warnings are advisory.
-        if str(rejection.get("type", "permanent")).lower() == "permanent":
-            return True
-    return False
+def monitored_release_id(album: dict[str, Any]) -> int | None:
+    """The album release Lidarr is monitoring (whose track IDs we import
+    against). Falls back to the first release for single-release albums."""
+    releases = album.get("releases")
+    if not isinstance(releases, list) or not releases:
+        return None
+    for release in releases:
+        if release.get("monitored") and release.get("id"):
+            return int(release["id"])
+    first_id = releases[0].get("id")
+    return int(first_id) if first_id else None
+
+
+def _track_number(track: dict[str, Any]) -> int | None:
+    try:
+        return int(track.get("trackNumber"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _track_sort_key(track: dict[str, Any]) -> tuple[int, int]:
+    def _int(v: Any) -> int:
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
+    return (_int(track.get("mediumNumber")) or 1, _int(track.get("absoluteTrackNumber")) or _int(track.get("trackNumber")))
+
+
+_LEADING_NUMBER = re.compile(r"^\s*(\d{1,3})\b")
+
+
+def _filename_track_number(path: str) -> int | None:
+    m = _LEADING_NUMBER.match(PurePosixPath(path).name)
+    return int(m.group(1)) if m else None
+
+
+def map_files_to_tracks(
+    file_quality_pairs: list[tuple[str, dict[str, Any] | None]],
+    tracks: list[dict[str, Any]],
+) -> list[tuple[str, dict[str, Any], int]]:
+    """Map downloaded audio files to a release's tracks, returning
+    (path, quality, track_id) triples.
+
+    Lidarr's own matcher can't be trusted here — archive.org's derived MP3s
+    often have poor/missing tags, so a folder scan just reports "couldn't find
+    similar album". Instead we map explicitly: by the leading track number in the
+    filename when every file has one (robust to gaps — e.g. an IA rip missing one
+    track of a 27-track release still lands each file on the right track), else
+    by sorted position. Files with no matching track are dropped."""
+    pairs = [(p, q) for p, q in file_quality_pairs if q is not None]
+    by_number = {n: t for t in tracks if (n := _track_number(t)) is not None and t.get("id")}
+
+    numbered = [(p, q, _filename_track_number(p)) for p, q in pairs]
+    if numbered and all(n is not None and n in by_number for _, _, n in numbered):
+        return [(p, q, by_number[n]["id"]) for p, q, n in numbered]
+
+    # Positional fallback: sorted filenames zipped onto sorted tracks.
+    ordered_files = sorted(pairs, key=lambda x: x[0])
+    ordered_tracks = sorted((t for t in tracks if t.get("id")), key=_track_sort_key)
+    return [(p, q, t["id"]) for (p, q), t in zip(ordered_files, ordered_tracks)]
 
 
 def build_manual_import_files(
-    candidates: list[dict[str, Any]],
+    file_quality_pairs: list[tuple[str, dict[str, Any] | None]],
+    tracks: list[dict[str, Any]],
     *,
     artist_id: int,
     album_id: int,
+    album_release_id: int,
 ) -> list[dict[str, Any]]:
-    """Turn Lidarr's ``manualimport`` scan of our download folder into the
-    payload for the ManualImport command.
-
-    We scope the scan to the target ``albumId`` up front, so Lidarr's own matcher
-    maps each file to the correct track (by tags/track-number) and reports the
-    right ``albumReleaseId`` and parsed ``quality`` — all far more reliable than
-    guessing. We just reshape its result, dropping any file it couldn't map to a
-    track or that carries a blocking (permanent) rejection."""
-    files: list[dict[str, Any]] = []
-    for candidate in candidates:
-        path = candidate.get("path")
-        quality = candidate.get("quality")
-        album_release_id = candidate.get("albumReleaseId")
-        track_ids = [t["id"] for t in candidate.get("tracks") or [] if t.get("id")]
-        if not path or quality is None or not album_release_id or not track_ids:
-            continue
-        if _has_permanent_rejection(candidate):
-            continue
-        files.append(
-            {
-                "path": path,
-                "artistId": artist_id,
-                "albumId": album_id,
-                "albumReleaseId": album_release_id,
-                "trackIds": track_ids,
-                "quality": quality,
-                "indexerFlags": 0,
-                "disableReleaseSwitching": True,
-            }
-        )
-    return files
+    """Build the ManualImport command payload, forcing the target album/release
+    and our own file→track mapping (see ``map_files_to_tracks``). Explicit
+    ``trackIds`` make Lidarr import the files regardless of whether it could
+    identify the album from tags."""
+    return [
+        {
+            "path": path,
+            "artistId": artist_id,
+            "albumId": album_id,
+            "albumReleaseId": album_release_id,
+            "trackIds": [track_id],
+            "quality": quality,
+            "indexerFlags": 0,
+            "disableReleaseSwitching": True,
+        }
+        for path, quality, track_id in map_files_to_tracks(file_quality_pairs, tracks)
+    ]
 
 
 _SANITIZE = re.compile(r'[/\\:*?"<>|\x00-\x1f]+')

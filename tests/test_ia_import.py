@@ -63,48 +63,52 @@ class TestRankCandidates:
         assert ranked == []
 
 
-class TestBuildManualImportFiles:
-    def _candidate(self, path, track_ids, *, release_id=211, rejections=None):
-        return {
-            "path": path,
-            "quality": {"quality": {"id": 8, "name": "MP3-VBR-V0"}, "revision": {"version": 1}},
-            "albumReleaseId": release_id,
-            "tracks": [{"id": tid} for tid in track_ids],
-            "rejections": rejections or [],
-        }
+class TestMonitoredReleaseId:
+    def test_prefers_monitored_release(self):
+        assert ia_import.monitored_release_id({"releases": [{"id": 1, "monitored": False}, {"id": 2, "monitored": True}]}) == 2
 
-    def test_reshapes_lidarr_candidates_forcing_target_ids(self):
-        # Shape mirrors the real prod manualimport response validated against Lidarr.
-        candidates = [
-            self._candidate("/data/ia/01 - Marmur.mp3", [3584]),
-            self._candidate("/data/ia/03 - Żyrandol.mp3", [3586]),
-        ]
-        files = ia_import.build_manual_import_files(candidates, artist_id=5, album_id=34)
-        assert [f["path"] for f in files] == [
-            "/data/ia/01 - Marmur.mp3",
-            "/data/ia/03 - Żyrandol.mp3",
-        ]
+    def test_falls_back_to_first_release(self):
+        assert ia_import.monitored_release_id({"releases": [{"id": 5, "monitored": False}]}) == 5
+
+    def test_none_when_no_releases(self):
+        assert ia_import.monitored_release_id({"releases": []}) is None
+
+
+class TestMapFilesToTracks:
+    def _q(self):
+        return {"quality": {"id": 8, "name": "MP3-320"}}
+
+    def test_maps_by_filename_track_number_tolerating_gaps(self):
+        # 26 files for a 27-track release: file "20 ..." lands on track 20 even
+        # though track (say) 8 has no file — mirrors the real 1-800 case.
+        tracks = [{"id": 3500 + n, "trackNumber": str(n), "mediumNumber": 1} for n in range(1, 28)]
+        pairs = [("/a/01 Intro.mp3", self._q()), ("/a/20 #8 - Kacik.mp3", self._q())]
+        mapped = ia_import.map_files_to_tracks(pairs, tracks)
+        assert [(p, tid) for p, _, tid in mapped] == [("/a/01 Intro.mp3", 3501), ("/a/20 #8 - Kacik.mp3", 3520)]
+
+    def test_falls_back_to_positional_when_filenames_unnumbered(self):
+        tracks = [{"id": 11, "trackNumber": "1", "mediumNumber": 1}, {"id": 12, "trackNumber": "2", "mediumNumber": 1}]
+        pairs = [("/a/Bakayoko.mp3", self._q()), ("/a/Anja.mp3", self._q())]
+        mapped = ia_import.map_files_to_tracks(pairs, tracks)
+        # sorted by path: Anja -> track 1, Bakayoko -> track 2
+        assert [(p, tid) for p, _, tid in mapped] == [("/a/Anja.mp3", 11), ("/a/Bakayoko.mp3", 12)]
+
+    def test_drops_files_without_quality(self):
+        assert ia_import.map_files_to_tracks([("/a/01.mp3", None)], [{"id": 1, "trackNumber": "1"}]) == []
+
+
+class TestBuildManualImportFiles:
+    def test_forces_target_ids_and_track_mapping(self):
+        tracks = [{"id": 3584, "trackNumber": "1", "mediumNumber": 1}, {"id": 3586, "trackNumber": "3", "mediumNumber": 1}]
+        pairs = [("/d/01 - Marmur.mp3", {"quality": {"name": "MP3-320"}}), ("/d/03 - Zyrandol.mp3", {"quality": {"name": "MP3-320"}})]
+        files = ia_import.build_manual_import_files(pairs, tracks, artist_id=5, album_id=34, album_release_id=211)
         assert [f["trackIds"] for f in files] == [[3584], [3586]]
         assert all(f["albumId"] == 34 and f["artistId"] == 5 and f["albumReleaseId"] == 211 for f in files)
+        assert all(f["disableReleaseSwitching"] for f in files)
 
-    def test_skips_files_lidarr_could_not_map_to_a_track(self):
-        candidates = [self._candidate("/a/junk.mp3", [])]
-        assert ia_import.build_manual_import_files(candidates, artist_id=1, album_id=1) == []
-
-    def test_skips_files_without_quality_or_release(self):
-        candidates = [
-            {"path": "/a/x.mp3", "quality": None, "albumReleaseId": 1, "tracks": [{"id": 1}]},
-            {"path": "/a/y.mp3", "quality": {"quality": {}}, "albumReleaseId": None, "tracks": [{"id": 2}]},
-        ]
-        assert ia_import.build_manual_import_files(candidates, artist_id=1, album_id=1) == []
-
-    def test_skips_permanently_rejected_files(self):
-        candidates = [
-            self._candidate("/a/dupe.mp3", [1], rejections=[{"reason": "existing", "type": "permanent"}]),
-            self._candidate("/a/ok.mp3", [2], rejections=[{"reason": "note", "type": "warning"}]),
-        ]
-        files = ia_import.build_manual_import_files(candidates, artist_id=1, album_id=1)
-        assert [f["path"] for f in files] == ["/a/ok.mp3"]  # warning kept, permanent dropped
+    def test_empty_when_no_tracks(self):
+        pairs = [("/d/01.mp3", {"quality": {"name": "MP3-320"}})]
+        assert ia_import.build_manual_import_files(pairs, [], artist_id=1, album_id=1, album_release_id=1) == []
 
 
 class TestSelectAudioFormat:

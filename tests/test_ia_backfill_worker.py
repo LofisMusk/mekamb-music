@@ -70,20 +70,27 @@ class FakeLidarr:
         self._release_id = release_id
         self.imported = None
         self.scoped = None
+        self.tracks_release = None
+
+    def get_album(self, album_id):
+        return {"releases": [{"id": self._release_id, "monitored": True}]}
+
+    def album_tracks(self, *, album_release_id):
+        self.tracks_release = album_release_id
+        return [
+            {"id": 11, "trackNumber": "1", "mediumNumber": 1},
+            {"id": 12, "trackNumber": "2", "mediumNumber": 1},
+        ]
 
     def manual_import_candidates(self, folder, *, artist_id, album_id):
         import os
 
         self.scoped = (artist_id, album_id)
+        # Mirrors the real failure mode: Lidarr parses quality but maps no album.
         return [
-            {
-                "path": os.path.join(folder, name),
-                "quality": {"quality": {"id": 8, "name": "MP3-256"}},
-                "albumReleaseId": self._release_id,
-                "tracks": [{"id": track_id}],
-                "rejections": [],
-            }
-            for name, track_id in (("01.mp3", 11), ("02.mp3", 12))
+            {"path": os.path.join(folder, name), "quality": {"quality": {"id": 8, "name": "MP3-256"}},
+             "albumReleaseId": 0, "tracks": [], "rejections": [{"reason": "Couldn't find similar album"}]}
+            for name in ("01.mp3", "02.mp3")
         ]
 
     def run_manual_import(self, files, *, import_mode="move"):

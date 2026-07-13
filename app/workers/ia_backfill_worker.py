@@ -93,14 +93,27 @@ def _import_into_lidarr(
     """Synchronous Lidarr side of one album (run via asyncio.to_thread). Returns
     the number of files handed to ManualImport, or 0 if nothing could be mapped."""
     album_id = int(album["id"])
+    release_id = ia_import.monitored_release_id(lidarr.get_album(album_id))
+    if release_id is None:
+        logger.warning("ia-backfill: no album release for album %s, skipping import", album_id)
+        return 0
+
+    tracks = lidarr.album_tracks(album_release_id=release_id)
     candidates = lidarr.manual_import_candidates(
         str(album_dir), artist_id=artist_id, album_id=album_id
     )
-    files = ia_import.build_manual_import_files(candidates, artist_id=artist_id, album_id=album_id)
+    file_quality_pairs = [(str(c["path"]), c.get("quality")) for c in candidates if c.get("path")]
+    files = ia_import.build_manual_import_files(
+        file_quality_pairs,
+        tracks,
+        artist_id=artist_id,
+        album_id=album_id,
+        album_release_id=release_id,
+    )
     if not files:
         logger.warning(
-            "ia-backfill: Lidarr mapped none of the %d file(s) in %s to album %s",
-            len(candidates), album_dir, album_id,
+            "ia-backfill: could not map any of the %d file(s) in %s to album %s (release %s, %d tracks)",
+            len(file_quality_pairs), album_dir, album_id, release_id, len(tracks),
         )
         return 0
 
@@ -163,9 +176,14 @@ async def run_ia_backfill_once() -> int:
         await ia.close()
         return 0
 
+    processed = 0
     imported = 0
     for album in missing:
-        if imported >= settings.ia_backfill_max_albums_per_pass:
+        # Cap on albums *attempted* per pass, not imported — otherwise a pass
+        # where every import fails would churn through the entire missing list,
+        # downloading everything at once. The per-album cooldown means the next
+        # pass picks up where this one left off.
+        if processed >= settings.ia_backfill_max_albums_per_pass:
             break
         album_id = album.get("id")
         if not album_id:
@@ -176,6 +194,7 @@ async def run_ia_backfill_once() -> int:
         # Set the cooldown up front so a crash mid-album doesn't re-hammer
         # archive.org/Lidarr every pass; it expires so genuine failures retry.
         await redis.set(cooldown_key, "1", ex=settings.ia_backfill_retry_cooldown_seconds)
+        processed += 1
         try:
             if await _process_album(album, ia, lidarr):
                 imported += 1
