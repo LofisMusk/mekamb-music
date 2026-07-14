@@ -506,18 +506,117 @@ struct LibraryDetail: Identifiable, Codable, Hashable {
     }
 }
 
+// ── Imports (real backend import-tracking API, GET /imports) ────────────────
+struct ImportRecordResponse: Identifiable, Codable, Hashable {
+    let id: String
+    let source: String
+    let torrentId: String
+    let uploader: String
+    let sourceUrl: String
+    let status: String
+    let errorMessage: String?
+    let createdAt: String
+    let updatedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, source, uploader, status
+        case torrentId = "torrent_id"
+        case sourceUrl = "source_url"
+        case errorMessage = "error_message"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+
+    var normalizedStatus: String { status.lowercased() }
+    var isActive: Bool { ["queued", "downloading", "ready_to_import"].contains(normalizedStatus) }
+    var isFailed: Bool { normalizedStatus == "failed" }
+    var isImported: Bool { normalizedStatus == "imported" }
+    var isCanceled: Bool { normalizedStatus == "canceled" }
+
+    /// `ImportRecordResponse` carries no title — best-effort display name from whichever
+    /// identifying field is present (the source URL's last path segment, the torrent id, or a
+    /// truncated import id as a last resort).
+    var displayName: String {
+        if let last = sourceUrl.split(separator: "/").last, !last.isEmpty {
+            return last.removingPercentEncoding ?? String(last)
+        }
+        if !torrentId.isEmpty { return torrentId }
+        return "Import \(id.prefix(8))"
+    }
+
+    var statusLabel: String {
+        switch normalizedStatus {
+        case "queued": return "Queued"
+        case "downloading": return "Downloading"
+        case "ready_to_import": return "Ready"
+        case "imported": return "Imported"
+        case "failed": return "Failed"
+        case "canceled": return "Canceled"
+        default: return status.capitalized
+        }
+    }
+
+    var stageDescription: String {
+        switch normalizedStatus {
+        case "queued": return "Waiting for worker"
+        case "downloading": return "Downloading from source"
+        case "ready_to_import": return "Validating & ingesting"
+        default: return statusLabel
+        }
+    }
+}
+
+struct ImportListResponse: Codable { let items: [ImportRecordResponse] }
+
+/// Minimal projection of `GET /library/summary` — only the fields the Imports tab badge needs.
+struct LibrarySummaryResponse: Decodable {
+    let activeImportCount: Int
+    let failedImportCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case activeImportCount = "active_import_count"
+        case failedImportCount = "failed_import_count"
+    }
+}
+
+/// `GET /tracks/cache/stats` / `POST /tracks/cache/cleanup` response.
+struct CacheStatsResponse: Codable {
+    let totalTracks: Int
+    let totalSizeMb: Double
+    let staleTracks: Int
+    let cacheTtlDays: Int
+    let libraryRoot: String
+
+    enum CodingKeys: String, CodingKey {
+        case totalTracks = "total_tracks"
+        case totalSizeMb = "total_size_mb"
+        case staleTracks = "stale_tracks"
+        case cacheTtlDays = "cache_ttl_days"
+        case libraryRoot = "library_root"
+    }
+}
+
 enum MusicTab: String, CaseIterable, Identifiable {
-    case library = "Home"
+    case home = "Home"
+    case library = "Library"
+    case addMusic = "Add Music"
+    case imports = "Imports"
     case search = "Search"
     case albums = "Albums"
     case playlists = "Playlists"
     case liked = "Liked"
+    case artist = "Artist"
+    case mix = "Mix"
     case settings = "Settings"
     var id: String { rawValue }
 
-    /// Tabs shown in the bottom bar. `albums`/`playlists` stay in the enum for in-app navigation
-    /// (tapping a shelf card) but are no longer top-level tabs.
-    static var barItems: [MusicTab] { [.library, .search, .liked, .settings] }
+    /// Tabs shown in the bottom bar. The rest of the cases are non-bar "pushed detail" states —
+    /// reached by tapping a shelf card / row / avatar — mirroring how `albums`/`playlists`
+    /// already worked before this screen set grew: `selectedTab` doubles as the current screen,
+    /// and detail screens return to `lastBarTab` instead of maintaining a real nav stack (this
+    /// matches the reference design's own back-button behavior, which always returns to the
+    /// originating tab rather than a nested history).
+    static var barItems: [MusicTab] { [.home, .library, .addMusic, .imports] }
 }
 
 enum RepeatMode: String, CaseIterable, Identifiable {
@@ -586,12 +685,30 @@ final class AppState: ObservableObject {
     @AppStorage("mekambMusicAccountEmail") var accountEmail: String = ""
     @AppStorage("mekambMusicAutoplaySimilarEnabled") var autoplaySimilarEnabled: Bool = true
     @AppStorage("mekambMusicPlaybackQuality") var playbackQuality: PlaybackQuality = .auto
+    /// "Prefetch queued tracks" toggle in Settings — gates the upcoming-queue background cache.
+    @AppStorage("mekambMusicPrefetchQueuedTracks") var prefetchQueuedTracksEnabled: Bool = true
+    /// "Download over cellular" toggle in Settings — gates offline downloads while on a
+    /// constrained/cellular connection (see `isConstrainedNetwork`).
+    @AppStorage("mekambMusicDownloadOverCellular") var downloadOverCellularEnabled: Bool = false
     @AppStorage("mekambMusicLastTrackId") private var savedPlaybackTrackId: String = ""
     @AppStorage("mekambMusicLastElapsedTime") private var savedPlaybackElapsedTime: Double = 0
 
     @Published var searchMode: SearchMode = .library
-    @Published var selectedTab: MusicTab = .library
+    @Published var selectedTab: MusicTab = .home {
+        didSet {
+            if MusicTab.barItems.contains(selectedTab) { lastBarTab = selectedTab }
+        }
+    }
+    /// The last real bottom-bar tab the user was on — every pushed detail screen's back button
+    /// returns here, mirroring the reference design (which always backs out to the originating
+    /// tab rather than keeping a nested history).
+    @Published private(set) var lastBarTab: MusicTab = .home
     @Published var searchText: String = ""
+    /// Search text for the Add Music (catalog) tab — kept separate from `searchText` so the
+    /// library-search screen and the catalog-search tab never bleed into each other.
+    @Published var catalogQuery: String = ""
+    @Published var selectedArtistName: String?
+    @Published var selectedMixId: String?
 
     /// Clears any in-progress query/results — used when leaving the Search tab.
     func resetSearch() {
@@ -634,11 +751,20 @@ final class AppState: ObservableObject {
     @Published private(set) var homeRecommendedTracks: [ApiTrack] = []
     @Published private(set) var dailyMixes: [DailyMix] = []
     @Published private(set) var recentlyAddedTracks: [ApiTrack] = []
+    @Published private(set) var recentlyAddedAlbums: [Album] = []
     @Published private(set) var downloadedTracks: [ApiTrack] = []
     @Published private(set) var likedTracksPreview: [ApiTrack] = []
     @Published private(set) var recentlyPlayedTracks: [ApiTrack] = []
     @Published private(set) var jumpBackInAlbums: [Album] = []
     @Published private(set) var albumsFeaturingLikedTracks: [Album] = []
+
+    @Published var importRecords: [ImportRecordResponse] = []
+    @Published var isLoadingImports = false
+    @Published private(set) var activeImportCount: Int = 0
+
+    @Published var cacheStats: CacheStatsResponse?
+    @Published var isLoadingCacheStats = false
+    @Published var isClearingCache = false
 
     private var player: AVPlayer?
     private var timeObserver: Any?
@@ -772,6 +898,12 @@ final class AppState: ObservableObject {
             if leftCreated != rightCreated { return leftCreated > rightCreated }
             return stableLibraryTrackOrder(left, right)
         }.prefix(18))
+        recentlyAddedAlbums = Array(rebuiltAlbums.sorted { left, right in
+            let leftCreated = left.tracks.map(createdTimestamp).max() ?? 0
+            let rightCreated = right.tracks.map(createdTimestamp).max() ?? 0
+            if leftCreated != rightCreated { return leftCreated > rightCreated }
+            return stableAlbumOrder(left, right)
+        }.prefix(12))
         downloadedTracks = Array(tracks.filter { offlineTrackIds.contains($0.id) }.sorted(by: stableLibraryTrackOrder).prefix(18))
         likedTracksPreview = Array(tracks.filter { likedTrackIds.contains($0.id) }.sorted(by: stableLibraryTrackOrder).prefix(18))
         rebuildPlayHistoryShelves(rebuiltAlbums: rebuiltAlbums, tracksById: tracksById)
@@ -985,6 +1117,22 @@ final class AppState: ObservableObject {
         return playlists.first { $0.id == selectedPlaylistId }
     }
 
+    var selectedMix: DailyMix? {
+        guard let selectedMixId else { return nil }
+        return dailyMixes.first { $0.id == selectedMixId }
+    }
+
+    /// Two-letter initials for the profile avatar, derived from the signed-in username.
+    var accountInitials: String {
+        let trimmed = accountUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "?" }
+        let parts = trimmed.split(separator: " ")
+        if parts.count >= 2, let first = parts[0].first, let second = parts[1].first {
+            return String([first, second]).uppercased()
+        }
+        return String(trimmed.prefix(2)).uppercased()
+    }
+
     var queueTracks: [ApiTrack] {
         playbackQueue.isEmpty ? playbackContextTracks() : playbackQueue
     }
@@ -1142,9 +1290,11 @@ final class AppState: ObservableObject {
             restorePlaybackStateIfNeeded()
             selectedAlbumId = selectedAlbumId.flatMap { id in albums.contains(where: { $0.id == id }) ? id : nil }
             selectedPlaylistId = selectedPlaylistId.flatMap { id in playlists.contains(where: { $0.id == id }) ? id : nil }
+            selectedMixId = selectedMixId.flatMap { id in dailyMixes.contains(where: { $0.id == id }) ? id : nil }
             persistLibrarySnapshot()
             await loadPersonalizedHome()
             Task { await loadMissingAlbumCovers() }
+            Task { await refreshImportBadge() }
         } catch {
             if !isCancellation(error) {
                 let message = clean(error)
@@ -1205,7 +1355,7 @@ final class AppState: ObservableObject {
 
     // ── Catalog: request that Lidarr acquire an artist/album ─────────────────
     func searchCatalog() async {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let query = catalogQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canUseApi, !query.isEmpty else {
             catalogItems = []
             return
@@ -1252,6 +1402,108 @@ final class AppState: ObservableObject {
         do {
             let response: CatalogRequestListResponse = try await request("/catalog/requests")
             catalogRequests = response.items
+        } catch {
+            if !isCancellation(error) { errorMessage = clean(error) }
+        }
+    }
+
+    /// Tracks by a specific artist, straight from the backend (there's no `/artists/{name}`
+    /// detail endpoint, so the Artist screen's "Popular" section is sourced this way instead of
+    /// relying on whatever happens to already be loaded into `tracks`).
+    func fetchArtistTracks(_ artistName: String) async -> [ApiTrack] {
+        guard canUseApi else { return tracks.filter { $0.displayArtist == artistName } }
+        do {
+            let encoded = artistName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? artistName
+            let response: TrackListResponse = try await request("/tracks?artist=\(encoded)&limit=200")
+            return response.items
+        } catch {
+            if !isCancellation(error) { errorMessage = clean(error) }
+            return tracks.filter { $0.displayArtist == artistName }
+        }
+    }
+
+    // ── Imports (Imports tab) ─────────────────────────────────────────────────
+    func loadImports(status: String? = nil) async {
+        guard canUseApi else { return }
+        isLoadingImports = true
+        defer { isLoadingImports = false }
+        do {
+            var path = "/imports?limit=100"
+            if let status { path += "&status=\(status)" }
+            let response: ImportListResponse = try await request(path)
+            importRecords = response.items.sorted { $0.createdAt > $1.createdAt }
+            activeImportCount = importRecords.filter(\.isActive).count
+        } catch {
+            if !isCancellation(error) { errorMessage = clean(error) }
+        }
+    }
+
+    /// Cheap badge-only refresh used before the user ever opens the Imports tab (e.g. right
+    /// after launch/refresh). Once `loadImports()` has actually populated `importRecords`, that
+    /// list is the more accurate source and this no longer overrides the count.
+    func refreshImportBadge() async {
+        guard canUseApi, importRecords.isEmpty else { return }
+        do {
+            let summary: LibrarySummaryResponse = try await request("/library/summary")
+            activeImportCount = summary.activeImportCount
+        } catch {
+            // Silent — the badge just won't update this cycle.
+        }
+    }
+
+    func cancelImport(_ record: ImportRecordResponse, deleteFiles: Bool = true) async {
+        guard canUseApi else { return }
+        do {
+            let encoded = encodePathComponent(record.id)
+            let updated: ImportRecordResponse = try await request(
+                "/imports/\(encoded)/cancel?delete_files=\(deleteFiles)", method: "POST"
+            )
+            upsertImportRecord(updated)
+        } catch {
+            if !isCancellation(error) { errorMessage = clean(error) }
+        }
+    }
+
+    func retryImport(_ record: ImportRecordResponse, deleteFiles: Bool = true) async {
+        guard canUseApi else { return }
+        do {
+            let encoded = encodePathComponent(record.id)
+            let updated: ImportRecordResponse = try await request(
+                "/imports/\(encoded)/retry?delete_files=\(deleteFiles)", method: "POST"
+            )
+            upsertImportRecord(updated)
+        } catch {
+            if !isCancellation(error) { errorMessage = clean(error) }
+        }
+    }
+
+    private func upsertImportRecord(_ record: ImportRecordResponse) {
+        if let index = importRecords.firstIndex(where: { $0.id == record.id }) {
+            importRecords[index] = record
+        } else {
+            importRecords.insert(record, at: 0)
+        }
+        activeImportCount = importRecords.filter(\.isActive).count
+    }
+
+    // ── Streaming cache (Settings → Storage) ─────────────────────────────────
+    func loadCacheStats() async {
+        guard canUseApi, !isLoadingCacheStats else { return }
+        isLoadingCacheStats = true
+        defer { isLoadingCacheStats = false }
+        do {
+            cacheStats = try await request("/tracks/cache/stats")
+        } catch {
+            if !isCancellation(error) { errorMessage = clean(error) }
+        }
+    }
+
+    func clearStreamingCache() async {
+        guard canUseApi, !isClearingCache else { return }
+        isClearingCache = true
+        defer { isClearingCache = false }
+        do {
+            cacheStats = try await request("/tracks/cache/cleanup", method: "POST")
         } catch {
             if !isCancellation(error) { errorMessage = clean(error) }
         }
@@ -1565,6 +1817,10 @@ final class AppState: ObservableObject {
 
         guard canUseApi else {
             errorMessage = endpointWarning ?? "Set the API endpoint and log in in Settings."
+            return false
+        }
+        guard downloadOverCellularEnabled || !isConstrainedNetwork else {
+            errorMessage = "Enable \u{201C}Download over cellular\u{201D} in Settings, or connect to Wi\u{2011}Fi, to download tracks."
             return false
         }
         let encodedId = encodePathComponent(track.id)
@@ -2691,6 +2947,7 @@ final class AppState: ObservableObject {
     /// swap instead of waiting on a fresh stream. Extended from 1 to 2 tracks ahead so a quick
     /// skip still lands on an already-cached file.
     private func prefetchUpcomingPlaybackTracks() async {
+        guard prefetchQueuedTracksEnabled else { return }
         let candidates = Array(upcomingQueueTracks.prefix(2))
         guard !candidates.isEmpty else { return }
         await withTaskGroup(of: Void.self) { group in

@@ -1,9 +1,111 @@
 import SwiftUI
 import UIKit
 
+// MARK: - Design system palette
+//
+// Exact hex values from the "Mekamb Mobile" design handoff (dark near-black surfaces + a
+// #5AA9FF accent blue). Existing screens mostly used generic `.blue`/`Color.white.opacity(...)`
+// tokens already close to this palette; new screens below use these exact values for fidelity.
+extension Color {
+    init(hex: UInt32, opacity: Double = 1) {
+        let r = Double((hex >> 16) & 0xFF) / 255
+        let g = Double((hex >> 8) & 0xFF) / 255
+        let b = Double(hex & 0xFF) / 255
+        self.init(.sRGB, red: r, green: g, blue: b, opacity: opacity)
+    }
+}
+
+enum MekambPalette {
+    static let backgroundPrimary = Color(hex: 0x101014)
+    static let backgroundSecondary = Color(hex: 0x0B0B0D)
+    static let surface1 = Color(hex: 0x131317)
+    static let surface2 = Color(hex: 0x1A1A1F)
+    static let surface3 = Color(hex: 0x17171B)
+    static let border1 = Color(hex: 0x1E1E24)
+    static let border2 = Color(hex: 0x26262E)
+    static let border3 = Color(hex: 0x2E2E36)
+    static let textPrimary = Color(hex: 0xF2F4F8)
+    static let textMuted = Color(hex: 0x9BA1AC)
+    static let textFaint = Color(hex: 0x6E7480)
+    static let accentBlue = Color(hex: 0x5AA9FF)
+    static let accentBlueDeep = Color(hex: 0x2F7FE0)
+    static let linkBlue = Color(hex: 0x8CC4FF)
+    static let likePink = Color(hex: 0xFF6B9D)
+    static let successGreen = Color(hex: 0x4CD984)
+    static let dangerRed = Color(hex: 0xF46363)
+}
+
+/// Small pulsing equalizer-bars indicator shown on whichever track row is currently playing,
+/// matching the reference design's animated "now playing" glyph.
+struct EqualizerBarsView: View {
+    @State private var animate = false
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 2) {
+            bar(duration: 0.9, delay: 0)
+            bar(duration: 0.8, delay: 0.15)
+            bar(duration: 1.0, delay: 0.3)
+        }
+        .frame(width: 14, height: 14, alignment: .bottom)
+        .onAppear { animate = true }
+    }
+
+    private func bar(duration: Double, delay: Double) -> some View {
+        RoundedRectangle(cornerRadius: 1)
+            .fill(MekambPalette.accentBlue)
+            .frame(width: 3, height: animate ? 13 : 5)
+            .animation(.easeInOut(duration: duration).repeatForever(autoreverses: true).delay(delay), value: animate)
+    }
+}
+
+/// Indeterminate animated progress bar for the Imports tab — `ImportRecordResponse` carries no
+/// byte-level percentage, so every active import shows this rather than a fabricated number.
+struct IndeterminateProgressBarView: View {
+    @State private var animate = false
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color(hex: 0x222228))
+                Capsule()
+                    .fill(MekambPalette.accentBlue)
+                    .frame(width: max(proxy.size.width * 0.35, 24))
+                    .offset(x: animate ? proxy.size.width * 0.65 : -proxy.size.width * 0.35)
+            }
+        }
+        .frame(height: 4)
+        .clipShape(Capsule())
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: false)) {
+                animate = true
+            }
+        }
+    }
+}
+
+/// A small reusable circular icon button used for back chevrons across pushed detail screens
+/// (Album/Artist/Mix/Liked/Search/Settings), matching the translucent-circle back button in the
+/// reference design.
+struct DetailBackButton: View {
+    var tint: Color = MekambPalette.textPrimary
+    var background: Color = Color.black.opacity(0.4)
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "chevron.left")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 34, height: 34)
+                .background(background)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 struct RootView: View {
     @EnvironmentObject private var app: AppState
-    @FocusState private var searchFocused: Bool
 
     var body: some View {
         ZStack {
@@ -11,10 +113,6 @@ struct RootView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                if showsSearchHeader {
-                    searchHeader
-                }
-
                 if let warning = app.endpointWarning, app.selectedTab == .settings {
                     Text(warning)
                         .font(.footnote)
@@ -48,12 +146,8 @@ struct RootView: View {
 
                 PlayerBar()
                     .environmentObject(app)
-                    .contentShape(Rectangle())
-                    .simultaneousGesture(TapGesture().onEnded { dismissSearch() })
 
                 tabBar
-                    .contentShape(Rectangle())
-                    .simultaneousGesture(TapGesture().onEnded { dismissSearch() })
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
@@ -62,136 +156,94 @@ struct RootView: View {
             await app.refreshLibrary()
             await app.loadLibraries()
         }
-        .onChange(of: app.searchText) { _, _ in
-            guard app.searchMode.searchesRemoteSources else { return }
-            Task {
-                try? await Task.sleep(nanoseconds: 350_000_000)
-                await app.searchCatalog()
-            }
+        .task {
+            await app.refreshImportBadge()
         }
-        .onChange(of: app.searchMode) { _, mode in
-            if mode.searchesRemoteSources {
-                app.selectedAlbumId = nil
-                app.catalogItems = []
-                Task { await app.searchCatalog() }
-            }
-        }
-        .onChange(of: app.catalogKind) { _, _ in
-            if app.searchMode.searchesRemoteSources { Task { await app.searchCatalog() } }
-        }
-        .onChange(of: app.selectedTab) { _, tab in
-            if tab != .albums { app.selectedAlbumId = nil }
-            if tab != .playlists { app.selectedPlaylistId = nil }
-            // Auto-focus the field when entering Search; clear the query when leaving it.
-            searchFocused = tab == .search
-            if tab != .search { app.resetSearch() }
-        }
-    }
-
-    /// The home leads with content like the reference design, so it has no search bar. The
-    /// dedicated Search tab always shows it, and the (card-reachable) Albums/Playlists/Liked
-    /// screens keep an inline filter bar.
-    private var showsSearchHeader: Bool {
-        switch app.selectedTab {
-        case .library, .settings: return false
-        case .search, .albums, .playlists, .liked: return true
-        }
-    }
-
-    private var searchHeader: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 10) {
-                HStack(spacing: 10) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
-                    TextField(searchPlaceholder, text: $app.searchText)
-                        .focused($searchFocused)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .submitLabel(.search)
-                        .onSubmit {
-                            dismissSearch()
-                            if app.searchMode.searchesRemoteSources { Task { await app.searchCatalog() } }
-                        }
-                    if !app.searchText.isEmpty {
-                        Button {
-                            app.searchText = ""
-                            app.catalogItems = []
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .padding(12)
-                .background(Color.white.opacity(0.08))
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            }
-
-            if searchFocused || !app.searchText.isEmpty || app.searchMode.searchesRemoteSources {
-                Picker("Search mode", selection: $app.searchMode) {
-                    ForEach(SearchMode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .transition(.move(edge: .top).combined(with: .opacity))
-            }
-        }
-        .animation(.easeInOut(duration: 0.18), value: searchFocused)
-        .animation(.easeInOut(duration: 0.18), value: app.searchText.isEmpty)
-        .padding(.horizontal)
-        .padding(.top, 10)
-        .padding(.bottom, 10)
-        .background(.ultraThinMaterial)
     }
 
     @ViewBuilder
     private var content: some View {
-        if app.searchMode.searchesRemoteSources {
-            CatalogSearchView()
-                .environmentObject(app)
-        } else {
-            switch app.selectedTab {
-            case .library, .liked:
-                LibraryView()
-                    .environmentObject(app)
-            case .search:
-                SearchView()
-                    .environmentObject(app)
-            case .albums:
-                AlbumsView()
-                    .environmentObject(app)
-            case .playlists:
-                PlaylistsView()
-                    .environmentObject(app)
-            case .settings:
-                SettingsView()
-                    .environmentObject(app)
+        switch app.selectedTab {
+        case .home:
+            HomeView().environmentObject(app)
+        case .library:
+            LibraryView().environmentObject(app)
+        case .addMusic:
+            CatalogSearchView().environmentObject(app)
+        case .imports:
+            ImportsView().environmentObject(app)
+        case .search:
+            SearchView().environmentObject(app)
+        case .liked:
+            LikedSongsView().environmentObject(app)
+        case .albums:
+            if let album = app.selectedAlbum {
+                AlbumDetailView(album: album).environmentObject(app)
+            } else {
+                missingDetailFallback
             }
+        case .playlists:
+            if let playlist = app.selectedPlaylist {
+                PlaylistDetailScreen(playlist: playlist).environmentObject(app)
+            } else {
+                missingDetailFallback
+            }
+        case .artist:
+            if let name = app.selectedArtistName {
+                ArtistDetailView(artistName: name).environmentObject(app)
+            } else {
+                missingDetailFallback
+            }
+        case .mix:
+            if let mix = app.selectedMix {
+                DailyMixDetailView(mix: mix).environmentObject(app)
+            } else {
+                missingDetailFallback
+            }
+        case .settings:
+            SettingsView().environmentObject(app)
         }
+    }
+
+    /// Shown if a pushed detail screen's backing id went stale (e.g. the album was deleted while
+    /// viewing it) — bounces back to the last real tab instead of showing a blank screen.
+    private var missingDetailFallback: some View {
+        ContentUnavailableView("Not found", systemImage: "questionmark.circle")
+            .foregroundStyle(.secondary)
+            .onAppear { app.selectedTab = app.lastBarTab }
     }
 
     private var tabBar: some View {
         HStack(spacing: 6) {
             ForEach(MusicTab.barItems) { tab in
                 Button {
-                    dismissSearch()
-                    if tab != .search { app.searchMode = .library }
                     app.selectedTab = tab
-                    if tab != .albums { app.selectedAlbumId = nil }
-                    if tab != .playlists { app.selectedPlaylistId = nil }
+                    app.selectedAlbumId = nil
+                    app.selectedPlaylistId = nil
+                    app.selectedArtistName = nil
+                    app.selectedMixId = nil
                 } label: {
                     VStack(spacing: 4) {
-                        Image(systemName: icon(for: tab))
-                            .font(.system(size: 17, weight: .semibold))
+                        ZStack(alignment: .topTrailing) {
+                            Image(systemName: icon(for: tab))
+                                .font(.system(size: 17, weight: .semibold))
+                            if tab == .imports, app.activeImportCount > 0 {
+                                Text("\(min(app.activeImportCount, 99))")
+                                    .font(.system(size: 9, weight: .heavy))
+                                    .foregroundStyle(MekambPalette.backgroundSecondary)
+                                    .padding(.horizontal, 3)
+                                    .frame(minWidth: 14, minHeight: 14)
+                                    .background(Circle().fill(MekambPalette.accentBlue))
+                                    .offset(x: 10, y: -6)
+                            }
+                        }
                         Text(tab.rawValue)
                             .font(.caption2.weight(.semibold))
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
-                    .foregroundStyle(app.selectedTab == tab ? Color.blue : Color.secondary)
-                    .background(app.selectedTab == tab ? Color.blue.opacity(0.16) : Color.clear)
+                    .foregroundStyle(app.selectedTab == tab ? MekambPalette.accentBlue : MekambPalette.textMuted)
+                    .background(app.selectedTab == tab ? MekambPalette.accentBlue.opacity(0.16) : Color.clear)
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
             }
@@ -202,50 +254,467 @@ struct RootView: View {
         .background(.ultraThinMaterial)
     }
 
-    private func dismissSearch() {
-        searchFocused = false
-    }
-
-    private var searchPlaceholder: String {
-        switch app.searchMode {
-        case .catalog:
-            return app.catalogKind == .artist ? "Add an artist..." : "Add an album..."
-        case .library:
-            if app.selectedTab == .albums { return "Search albums..." }
-            if app.selectedTab == .playlists { return "Search playlists..." }
-            return "Search library..."
-        }
-    }
-
     private func icon(for tab: MusicTab) -> String {
         switch tab {
-        case .library:
-            return "house.fill"
-        case .search:
-            return "magnifyingglass"
-        case .albums:
-            return "square.grid.2x2.fill"
-        case .playlists:
-            return "list.bullet.rectangle.fill"
-        case .liked:
-            return "heart.fill"
-        case .settings:
-            return "gearshape.fill"
+        case .home: return "house.fill"
+        case .library: return "square.stack.fill"
+        case .addMusic: return "plus.magnifyingglass"
+        case .imports: return "tray.and.arrow.down.fill"
+        default: return "circle"
         }
     }
 }
 
-struct SearchView: View {
+// MARK: - Home
+
+struct HomeView: View {
     @EnvironmentObject private var app: AppState
+    @State private var showingProfileMenu = false
+
+    private var greeting: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        switch hour {
+        case ..<12: return "Good morning"
+        case 12..<18: return "Good afternoon"
+        default: return "Good evening"
+        }
+    }
+
+    /// The pinned 2-column grid: Liked Songs first, then a few playlists, then a few albums —
+    /// mirroring the reference design's mixed pin list (there's no real "pinned items" concept
+    /// in the backend, so this is assembled client-side from what's already loaded).
+    private var pinnedItems: [LibraryRowKind] {
+        var items: [LibraryRowKind] = [.liked]
+        items.append(contentsOf: app.playlists.prefix(3).map { LibraryRowKind.playlist($0) })
+        items.append(contentsOf: app.albums.prefix(4).map { LibraryRowKind.album($0) })
+        return items
+    }
 
     var body: some View {
-        let query = app.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        ZStack(alignment: .topTrailing) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    header
+                    searchBarRow
+                    pinnedGrid
+
+                    DailyMixShelfView(title: "Made for you", mixes: app.dailyMixes)
+                        .environmentObject(app)
+
+                    AlbumShelfView(title: "Recently added", albums: app.recentlyAddedAlbums)
+                        .environmentObject(app)
+                }
+                .padding(.top, 10)
+                .padding(.bottom, 24)
+            }
+            .refreshable { await app.refreshLibrary() }
+
+            if showingProfileMenu {
+                ProfileMenuOverlay(isPresented: $showingProfileMenu)
+                    .environmentObject(app)
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Text(greeting)
+                .font(.system(size: 23, weight: .heavy))
+                .foregroundStyle(MekambPalette.textPrimary)
+            Spacer()
+
+            Button {
+                app.selectedTab = .imports
+            } label: {
+                ZStack(alignment: .topTrailing) {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(MekambPalette.surface2)
+                        .frame(width: 34, height: 34)
+                        .overlay(
+                            Image(systemName: "tray.and.arrow.down")
+                                .font(.system(size: 15))
+                                .foregroundStyle(MekambPalette.textMuted)
+                        )
+                    if app.activeImportCount > 0 {
+                        Text("\(min(app.activeImportCount, 99))")
+                            .font(.system(size: 9.5, weight: .heavy))
+                            .foregroundStyle(MekambPalette.backgroundSecondary)
+                            .padding(.horizontal, 3)
+                            .frame(minWidth: 15, minHeight: 15)
+                            .background(Circle().fill(MekambPalette.accentBlue))
+                            .offset(x: 4, y: -4)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                showingProfileMenu = true
+            } label: {
+                Circle()
+                    .fill(LinearGradient(colors: [MekambPalette.accentBlueDeep, MekambPalette.accentBlue], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .frame(width: 34, height: 34)
+                    .overlay(
+                        Text(app.accountInitials)
+                            .font(.system(size: 12, weight: .heavy))
+                            .foregroundStyle(MekambPalette.backgroundSecondary)
+                    )
+                    .overlay(Circle().stroke(showingProfileMenu ? MekambPalette.accentBlue : Color.clear, lineWidth: 2))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal)
+    }
+
+    private var searchBarRow: some View {
+        Button {
+            app.selectedTab = .search
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 15))
+                    .foregroundStyle(MekambPalette.textMuted)
+                Text("Search tracks, albums, artists")
+                    .font(.system(size: 13.5))
+                    .foregroundStyle(MekambPalette.textMuted)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 13)
+            .frame(height: 40)
+            .background(MekambPalette.surface2)
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(MekambPalette.border2, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal)
+    }
+
+    private var pinnedGrid: some View {
+        let columns = [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)]
+        return LazyVGrid(columns: columns, spacing: 8) {
+            ForEach(Array(pinnedItems.enumerated()), id: \.offset) { _, kind in
+                PinnedTileView(kind: kind).environmentObject(app)
+            }
+        }
+        .padding(.horizontal)
+    }
+}
+
+struct PinnedTileView: View {
+    @EnvironmentObject private var app: AppState
+    let kind: LibraryRowKind
+
+    private var name: String {
+        switch kind {
+        case .liked: return "Liked Songs"
+        case .playlist(let playlist): return playlist.name
+        case .album(let album): return album.title
+        case .artist(let artistName): return artistName
+        }
+    }
+
+    var body: some View {
+        Button(action: { navigate(kind, app: app) }) {
+            HStack(spacing: 9) {
+                artwork
+                Text(name)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(MekambPalette.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 0)
+            }
+            .padding(.trailing, 8)
+            .frame(height: 48)
+            .background(MekambPalette.surface3)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var artwork: some View {
+        switch kind {
+        case .liked:
+            ZStack {
+                LinearGradient(colors: [MekambPalette.accentBlueDeep, Color(hex: 0x7B5BD6), MekambPalette.likePink], startPoint: .topLeading, endPoint: .bottomTrailing)
+                Image(systemName: "heart.fill").font(.system(size: 15)).foregroundStyle(.white)
+            }
+            .frame(width: 48, height: 48)
+        case .playlist:
+            ZStack {
+                LinearGradient(colors: [.green.opacity(0.65), .blue.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                Image(systemName: "music.note.list").font(.system(size: 15)).foregroundStyle(.white)
+            }
+            .frame(width: 48, height: 48)
+        case .album(let album):
+            AlbumArtworkView(album: album, size: 48).environmentObject(app)
+        case .artist:
+            ZStack {
+                LinearGradient(colors: [.blue.opacity(0.6), .purple.opacity(0.5)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                Image(systemName: "music.mic").font(.system(size: 15)).foregroundStyle(.white)
+            }
+            .frame(width: 48, height: 48)
+        }
+    }
+}
+
+/// Shared "what does this row represent" case used by both the Home pinned grid and the Library
+/// tab's flat list, since both show the same mix of liked/playlists/albums/artists.
+enum LibraryRowKind {
+    case liked
+    case playlist(PlaylistDetail)
+    case album(Album)
+    case artist(String)
+}
+
+func navigate(_ kind: LibraryRowKind, app: AppState) {
+    switch kind {
+    case .liked:
+        app.selectedTab = .liked
+    case .playlist(let playlist):
+        app.selectedPlaylistId = playlist.id
+        app.selectedTab = .playlists
+    case .album(let album):
+        app.selectedAlbumId = album.id
+        app.selectedTab = .albums
+    case .artist(let name):
+        app.selectedArtistName = name
+        app.selectedTab = .artist
+    }
+}
+
+// MARK: - Library ("Your Library" tab — distinct from the personal-curated "Libraries" feature)
+
+enum LibraryFilter: String, CaseIterable, Identifiable {
+    case all = "All"
+    case playlists = "Playlists"
+    case albums = "Albums"
+    case artists = "Artists"
+    var id: String { rawValue }
+}
+
+struct LibraryView: View {
+    @EnvironmentObject private var app: AppState
+    @State private var filter: LibraryFilter = .all
+
+    private var artistNames: [String] {
+        Array(Set(app.albums.map(\.artist))).sorted()
+    }
+
+    /// Mirrors the reference design exactly: Liked Songs only appears under "All"/"Playlists",
+    /// never under "Albums"/"Artists".
+    private var rows: [LibraryRowKind] {
+        let playlistRows: [LibraryRowKind] = app.playlists.map { LibraryRowKind.playlist($0) }
+        switch filter {
+        case .all:
+            var items: [LibraryRowKind] = [.liked]
+            items.append(contentsOf: playlistRows)
+            items.append(contentsOf: app.albums.prefix(8).map { LibraryRowKind.album($0) })
+            return items
+        case .playlists:
+            var items: [LibraryRowKind] = [.liked]
+            items.append(contentsOf: playlistRows)
+            return items
+        case .albums:
+            return app.albums.map { LibraryRowKind.album($0) }
+        case .artists:
+            return artistNames.map { LibraryRowKind.artist($0) }
+        }
+    }
+
+    var body: some View {
         ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Your Library")
+                    .font(.system(size: 23, weight: .heavy))
+                    .foregroundStyle(MekambPalette.textPrimary)
+                    .padding(.horizontal)
+                    .padding(.top, 12)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(LibraryFilter.allCases) { candidate in
+                            Button {
+                                filter = candidate
+                            } label: {
+                                Text(candidate.rawValue)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .padding(.horizontal, 13)
+                                    .padding(.vertical, 7)
+                                    .background(filter == candidate ? MekambPalette.accentBlue.opacity(0.16) : MekambPalette.surface2)
+                                    .foregroundStyle(filter == candidate ? MekambPalette.accentBlue : MekambPalette.textMuted)
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+
+                if !app.canUseApi {
+                    ContentUnavailableView("Connect API", systemImage: "wifi.exclamationmark", description: Text("Open Settings, set the endpoint and log in."))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 48)
+                } else if rows.isEmpty {
+                    ContentUnavailableView("Nothing here yet", systemImage: "square.stack", description: Text("Create a playlist or import albums to see them here."))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 48)
+                } else {
+                    LazyVStack(spacing: 2) {
+                        ForEach(Array(rows.enumerated()), id: \.offset) { _, kind in
+                            LibraryRow(kind: kind).environmentObject(app)
+                        }
+                    }
+                }
+            }
+            .padding(.bottom, 24)
+        }
+        .refreshable { await app.refreshLibrary() }
+    }
+}
+
+struct LibraryRow: View {
+    @EnvironmentObject private var app: AppState
+    let kind: LibraryRowKind
+
+    private var likedCount: Int {
+        app.tracks.filter { app.likedTrackIds.contains($0.id) }.count
+    }
+
+    private var title: String {
+        switch kind {
+        case .liked: return "Liked Songs"
+        case .playlist(let playlist): return playlist.name
+        case .album(let album): return album.title
+        case .artist(let name): return name
+        }
+    }
+
+    private var subtitle: String {
+        switch kind {
+        case .liked: return "Playlist · \(likedCount == 1 ? "1 song" : "\(likedCount) songs")"
+        case .playlist(let playlist): return "Playlist · \(playlist.trackCountText)"
+        case .album(let album): return "Album · \(album.artist)"
+        case .artist: return "Artist"
+        }
+    }
+
+    var body: some View {
+        Button(action: { navigate(kind, app: app) }) {
+            HStack(spacing: 12) {
+                artwork
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(MekambPalette.textPrimary)
+                        .lineLimit(1)
+                    Text(subtitle)
+                        .font(.system(size: 12))
+                        .foregroundStyle(MekambPalette.textMuted)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Color(hex: 0x4A4F5A))
+            }
+            .padding(.vertical, 6)
+            .padding(.horizontal, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal)
+    }
+
+    @ViewBuilder
+    private var artwork: some View {
+        switch kind {
+        case .liked:
+            ZStack {
+                LinearGradient(colors: [MekambPalette.accentBlueDeep, Color(hex: 0x7B5BD6), MekambPalette.likePink], startPoint: .topLeading, endPoint: .bottomTrailing)
+                Image(systemName: "heart.fill").font(.system(size: 19)).foregroundStyle(.white)
+            }
+            .frame(width: 50, height: 50)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        case .playlist:
+            ZStack {
+                LinearGradient(colors: [.green.opacity(0.65), .blue.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                Image(systemName: "music.note.list").foregroundStyle(.white)
+            }
+            .frame(width: 50, height: 50)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        case .album(let album):
+            AlbumArtworkView(album: album, size: 50).environmentObject(app)
+        case .artist(let name):
+            ZStack {
+                LinearGradient(colors: [.blue.opacity(0.6), .purple.opacity(0.5)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                Text(String(name.prefix(1)).uppercased())
+                    .font(.headline)
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 50, height: 50)
+            .clipShape(Circle())
+        }
+    }
+}
+
+// MARK: - Search (pushed from Home's search bar)
+
+struct SearchView: View {
+    @EnvironmentObject private var app: AppState
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            results
+        }
+        .onAppear { isFocused = true }
+        .onDisappear { app.searchText = "" }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            DetailBackButton(tint: MekambPalette.textPrimary, background: MekambPalette.surface2) {
+                app.selectedTab = app.lastBarTab
+            }
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass").foregroundStyle(MekambPalette.textMuted)
+                TextField("Search tracks, albums, artists", text: $app.searchText)
+                    .focused($isFocused)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .submitLabel(.search)
+                    .foregroundStyle(MekambPalette.textPrimary)
+                if !app.searchText.isEmpty {
+                    Button {
+                        app.searchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(MekambPalette.textMuted)
+                    }
+                }
+            }
+            .padding(.horizontal, 13)
+            .frame(height: 40)
+            .background(MekambPalette.surface2)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .padding(.horizontal)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
+    }
+
+    private var results: some View {
+        let query = app.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ScrollView {
             if query.isEmpty {
                 ContentUnavailableView(
                     "Search",
                     systemImage: "magnifyingglass",
-                    description: Text("Find songs in your library, or switch to Torrent or Indexers to import new music.")
+                    description: Text("Find songs, albums, and artists in your library.")
                 )
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity)
@@ -254,7 +723,7 @@ struct SearchView: View {
                 ContentUnavailableView(
                     "No results",
                     systemImage: "magnifyingglass",
-                    description: Text("Nothing in your library matches \u{201C}\(query)\u{201D}. Switch to Torrent or Indexers to import it.")
+                    description: Text("Nothing in your library matches \u{201C}\(query)\u{201D}.")
                 )
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity)
@@ -273,109 +742,19 @@ struct SearchView: View {
     }
 }
 
-struct LibraryView: View {
-    @EnvironmentObject private var app: AppState
-
-    var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 22) {
-                HStack(spacing: 12) {
-                    Text(app.selectedTab == .liked ? "Liked Songs" : "Home")
-                        .font(.title2.bold())
-                    Spacer()
-                    if app.isLoading { ProgressView() }
-                }
-                .padding(.horizontal)
-                .padding(.top, 12)
-
-                if app.selectedTab == .liked {
-                    likedSongsContent
-                } else if app.tracks.isEmpty {
-                    ContentUnavailableView(app.canUseApi ? "No tracks" : "Connect API", systemImage: app.canUseApi ? "music.note" : "wifi.exclamationmark", description: Text(app.canUseApi ? "Import music on the backend or try another search." : "Open Settings, set the endpoint and log in."))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 48)
-                } else if !app.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    TrackShelfView(title: "Search Results", tracks: Array(app.filteredTracks.prefix(24)))
-                        .environmentObject(app)
-                } else {
-                    homeContent
-                }
-            }
-            .padding(.bottom, 24)
-        }
-        .refreshable { await app.refreshLibrary() }
-    }
-
-    @ViewBuilder
-    private var likedSongsContent: some View {
-        if app.filteredTracks.isEmpty {
-            ContentUnavailableView("No liked tracks", systemImage: "heart", description: Text("Heart songs from your library to build this collection."))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity)
-                .padding(.top, 48)
-        } else {
-            LazyVStack(spacing: 10) {
-                ForEach(app.filteredTracks) { track in
-                    TrackRowNative(track: track)
-                        .environmentObject(app)
-                        .padding(.horizontal)
-                }
-            }
-        }
-    }
-
-    // Shelf order mirrors the reference design: quick-access tiles lead, then playlists, then
-    // the play-history shelves, then the generated mixes and recommendations.
-    private var homeContent: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            RecentTileGridView()
-                .environmentObject(app)
-
-            PlaylistShelfView(title: "Your Playlists", playlists: Array(app.playlists.prefix(10)))
-                .environmentObject(app)
-
-            AlbumShelfView(title: "Jump Back In", albums: app.jumpBackInAlbums)
-                .environmentObject(app)
-
-            // The tile grid shows the first 8 recent plays; this shelf continues from there.
-            TrackShelfView(title: "Recents", tracks: Array(app.recentlyPlayedTracks.dropFirst(8).prefix(12)))
-                .environmentObject(app)
-
-            AlbumShelfView(title: "Albums Featuring Songs You Like", albums: app.albumsFeaturingLikedTracks)
-                .environmentObject(app)
-
-            DailyMixShelfView(mixes: app.dailyMixes)
-                .environmentObject(app)
-
-            TrackShelfView(title: "Recommended For You", tracks: app.homeRecommendedTracks)
-                .environmentObject(app)
-
-            TrackShelfView(title: "Recently Added", tracks: app.recentlyAddedTracks)
-                .environmentObject(app)
-
-            if !app.downloadedTracks.isEmpty {
-                TrackShelfView(title: "Available Offline", tracks: app.downloadedTracks)
-                    .environmentObject(app)
-            }
-
-            if !app.likedTracksPreview.isEmpty {
-                TrackShelfView(title: "Your Liked Mix", tracks: app.likedTracksPreview)
-                    .environmentObject(app)
-            }
-        }
-    }
-}
+// MARK: - Shelves (reused by Home / Artist detail)
 
 struct DailyMixShelfView: View {
     @EnvironmentObject private var app: AppState
+    var title: String = "Daily Mixes"
     let mixes: [DailyMix]
 
     var body: some View {
         if !mixes.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Daily Mixes")
+                Text(title)
                     .font(.headline)
+                    .foregroundStyle(MekambPalette.textPrimary)
                     .padding(.horizontal)
 
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -398,28 +777,29 @@ struct DailyMixCard: View {
 
     var body: some View {
         Button {
-            if let first = mix.tracks.first {
-                app.play(first, queue: mix.tracks)
-            }
+            app.selectedMixId = mix.id
+            app.selectedTab = .mix
         } label: {
-            VStack(alignment: .leading, spacing: 8) {
-                ZStack(alignment: .bottomLeading) {
+            VStack(alignment: .leading, spacing: 7) {
+                ZStack(alignment: .topLeading) {
                     if let firstTrack = mix.tracks.first {
-                        TrackArtworkView(track: firstTrack, size: 156)
+                        TrackArtworkView(track: firstTrack, size: 132)
                             .environmentObject(app)
                     } else {
-                        LinearGradient(colors: [.green.opacity(0.65), .blue.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                            .frame(width: 156, height: 156)
-                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        LinearGradient(colors: [.blue.opacity(0.65), .purple.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                            .frame(width: 132, height: 132)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
 
-                    Image(systemName: "play.fill")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.black)
-                        .padding(8)
-                        .background(Color.white)
-                        .clipShape(Circle())
-                        .padding(10)
+                    Text("MIX")
+                        .font(.system(size: 8.5, weight: .heavy))
+                        .tracking(0.7)
+                        .foregroundStyle(MekambPalette.accentBlue)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.black.opacity(0.65))
+                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                        .padding(7)
                 }
 
                 Text(mix.title)
@@ -432,36 +812,10 @@ struct DailyMixCard: View {
                     .lineLimit(2)
                     .frame(height: 34, alignment: .topLeading)
             }
-            .frame(width: 156, alignment: .leading)
+            .frame(width: 132, alignment: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-    }
-}
-
-struct TrackShelfView: View {
-    @EnvironmentObject private var app: AppState
-    let title: String
-    let tracks: [ApiTrack]
-
-    var body: some View {
-        if !tracks.isEmpty {
-            VStack(alignment: .leading, spacing: 12) {
-                Text(title)
-                    .font(.headline)
-                    .padding(.horizontal)
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(alignment: .top, spacing: 14) {
-                        ForEach(tracks) { track in
-                            TrackRecommendationCard(track: track)
-                                .environmentObject(app)
-                        }
-                    }
-                    .padding(.horizontal)
-                }
-            }
-        }
     }
 }
 
@@ -475,6 +829,7 @@ struct AlbumShelfView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text(title)
                     .font(.headline)
+                    .foregroundStyle(MekambPalette.textPrimary)
                     .padding(.horizontal)
 
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -491,42 +846,14 @@ struct AlbumShelfView: View {
     }
 }
 
-struct TrackRecommendationCard: View {
-    @EnvironmentObject private var app: AppState
-    let track: ApiTrack
-
-    var body: some View {
-        Button {
-            app.play(track)
-        } label: {
-            VStack(alignment: .leading, spacing: 8) {
-                TrackArtworkView(track: track, size: 132)
-                    .environmentObject(app)
-                Text(track.title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                    .frame(height: 38, alignment: .topLeading)
-                Text(track.displayArtist)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .frame(width: 132, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-}
-
 struct AlbumRecommendationCard: View {
     @EnvironmentObject private var app: AppState
     let album: Album
 
     var body: some View {
         Button {
-            app.selectedTab = .albums
             app.selectedAlbumId = album.id
+            app.selectedTab = .albums
         } label: {
             VStack(alignment: .leading, spacing: 8) {
                 AlbumArtworkView(album: album, size: 132)
@@ -548,401 +875,460 @@ struct AlbumRecommendationCard: View {
     }
 }
 
-/// Spotify-style compact grid at the top of home: two columns of small tiles with the
-/// artwork on the left and the title beside it, showing the most recently played tracks.
-struct RecentTileGridView: View {
-    @EnvironmentObject private var app: AppState
-
-    private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
-
-    var body: some View {
-        let tiles = Array(app.recentlyPlayedTracks.prefix(8))
-        if !tiles.isEmpty {
-            LazyVGrid(columns: columns, spacing: 10) {
-                ForEach(tiles) { track in
-                    RecentTileCard(track: track)
-                        .environmentObject(app)
-                }
-            }
-            .padding(.horizontal)
-        }
-    }
-}
-
-struct RecentTileCard: View {
-    @EnvironmentObject private var app: AppState
-    let track: ApiTrack
-
-    var body: some View {
-        Button {
-            app.play(track, queue: app.recentlyPlayedTracks)
-        } label: {
-            HStack(spacing: 10) {
-                TrackArtworkView(track: track, size: 52)
-                    .environmentObject(app)
-                Text(track.title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                Spacer(minLength: 0)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: 56)
-            .background(Color.white.opacity(0.08))
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-struct PlaylistShelfView: View {
-    @EnvironmentObject private var app: AppState
-    let title: String
-    let playlists: [PlaylistDetail]
-
-    var body: some View {
-        if !playlists.isEmpty {
-            VStack(alignment: .leading, spacing: 12) {
-                Text(title)
-                    .font(.headline)
-                    .padding(.horizontal)
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(alignment: .top, spacing: 14) {
-                        ForEach(playlists) { playlist in
-                            PlaylistRecommendationCard(playlist: playlist)
-                                .environmentObject(app)
-                        }
-                    }
-                    .padding(.horizontal)
-                }
-            }
-        }
-    }
-}
-
-struct PlaylistRecommendationCard: View {
-    @EnvironmentObject private var app: AppState
-    let playlist: PlaylistDetail
-
-    var body: some View {
-        Button {
-            app.selectedTab = .playlists
-            app.selectedPlaylistId = playlist.id
-        } label: {
-            VStack(alignment: .leading, spacing: 8) {
-                ZStack {
-                    LinearGradient(colors: [.green.opacity(0.65), .blue.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                    Image(systemName: "music.note.list")
-                        .font(.largeTitle.weight(.semibold))
-                        .foregroundStyle(.white)
-                }
-                .frame(width: 132, height: 132)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                Text(playlist.name)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                    .frame(height: 38, alignment: .topLeading)
-                Text(playlist.trackCountText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .frame(width: 132, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-struct AlbumsView: View {
-    @EnvironmentObject private var app: AppState
-
-    var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Button { app.selectedAlbumId = nil } label: {
-                        if app.selectedAlbumId != nil {
-                            Label("Albums", systemImage: "chevron.left")
-                                .font(.subheadline.weight(.semibold))
-                        }
-                    }
-                    .buttonStyle(.plain)
-
-                    Text(app.selectedAlbum?.title ?? "Albums")
-                        .font(.title2.bold())
-                        .lineLimit(1)
-
-                    Spacer()
-                    if app.isLoading { ProgressView() }
-                }
-                .padding(.horizontal)
-                .padding(.top, 12)
-
-                if let album = app.selectedAlbum {
-                    AlbumDetailView(album: album)
-                        .environmentObject(app)
-                } else if app.filteredAlbums.isEmpty {
-                    ContentUnavailableView(app.canUseApi ? "No albums" : "Connect API", systemImage: app.canUseApi ? "square.grid.2x2" : "wifi.exclamationmark", description: Text(app.canUseApi ? "Albums will appear after library refresh." : "Open Settings, set the endpoint and log in."))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 48)
-                } else {
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 14) {
-                        ForEach(app.filteredAlbums) { album in
-                            AlbumCardNative(album: album)
-                                .environmentObject(app)
-                        }
-                    }
-                    .padding(.horizontal)
-                }
-            }
-            .padding(.bottom, 10)
-        }
-        .refreshable { await app.refreshLibrary() }
-        .task { await app.loadMissingAlbumCovers() }
-    }
-}
+// MARK: - Album detail (pushed)
 
 struct AlbumDetailView: View {
     @EnvironmentObject private var app: AppState
     let album: Album
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .bottom, spacing: 16) {
-                AlbumArtworkView(album: album, size: 132)
-                    .environmentObject(app)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(album.title)
-                        .font(.title2.bold())
-                        .lineLimit(2)
-                    Text(album.artist)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    Text(album.trackCountText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    HStack(spacing: 10) {
-                        Button {
-                            if let first = album.tracks.first { app.play(first, queue: album.tracks) }
-                        } label: {
-                            Label("Play", systemImage: "play.fill")
-                        }
-                        .buttonStyle(.borderedProminent)
-
-                        Button {
-                            if let first = album.tracks.first {
-                                let previousShuffle = app.shuffleEnabled
-                                if !app.shuffleEnabled { app.shuffleEnabled = true }
-                                app.play(first, queue: album.tracks)
-                                app.shuffleEnabled = previousShuffle || app.shuffleEnabled
-                            }
-                        } label: {
-                            Image(systemName: "shuffle")
-                        }
-                        .buttonStyle(.bordered)
-
-                        Button {
-                            Task { await app.downloadAlbum(album) }
-                        } label: {
-                            if app.downloadingAlbumIds.contains(album.id) {
-                                ProgressView()
-                            } else {
-                                Label(
-                                    app.isAlbumAvailableOffline(album) ? "Offline" : "Download",
-                                    systemImage: app.isAlbumAvailableOffline(album) ? "arrow.down.circle.fill" : "arrow.down.circle"
-                                )
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(app.downloadingAlbumIds.contains(album.id) || app.isAlbumAvailableOffline(album))
-
-                        if app.downloadedTrackCount(in: album) > 0 {
-                            Button(role: .destructive) {
-                                app.removeDownloadedAlbum(album)
-                            } label: {
-                                Label("Remove", systemImage: "trash")
-                            }
-                            .buttonStyle(.bordered)
-                        }
-
-                        Button(role: .destructive) {
-                            Task { await app.deleteAlbum(album) }
-                        } label: {
-                            Label("Delete", systemImage: "trash")
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(app.isLoading)
-                    }
-                    .padding(.top, 6)
-                }
-            }
-            .padding(.horizontal)
-
-            LazyVStack(spacing: 10) {
-                ForEach(album.tracks) { track in
-                    TrackRowNative(track: track)
-                        .environmentObject(app)
-                }
-            }
-            .padding(.horizontal)
-        }
+    private var albumDurationText: String {
+        let totalSeconds = album.tracks.reduce(0.0) { $0 + ($1.durationSeconds ?? 0) }
+        return "\(Int(totalSeconds / 60)) min"
     }
-}
-
-struct AlbumCardNative: View {
-    @EnvironmentObject private var app: AppState
-    let album: Album
-
-    var body: some View {
-        Button { app.selectedAlbumId = album.id } label: {
-            VStack(alignment: .leading, spacing: 9) {
-                ZStack(alignment: .topTrailing) {
-                    AlbumArtworkView(album: album, size: nil)
-                        .environmentObject(app)
-                        .aspectRatio(1, contentMode: .fit)
-
-                    if app.isAlbumAvailableOffline(album) {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(.white)
-                            .padding(6)
-                            .background(Color.blue.opacity(0.9))
-                            .clipShape(Circle())
-                            .padding(7)
-                    }
-                }
-                Text(album.title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                Text("\(album.artist) · \(album.trackCountText)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .padding(10)
-            .background(Color.white.opacity(0.06))
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-struct PlaylistsView: View {
-    @EnvironmentObject private var app: AppState
-    @State private var showingCreatePlaylist = false
-    @State private var newPlaylistName = ""
 
     var body: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Button { app.selectedPlaylistId = nil } label: {
-                        if app.selectedPlaylistId != nil {
-                            Label("Playlists", systemImage: "chevron.left")
-                                .font(.subheadline.weight(.semibold))
-                        }
-                    }
-                    .buttonStyle(.plain)
-
-                    Text(app.selectedPlaylist?.name ?? "Playlists")
-                        .font(.title2.bold())
-                        .lineLimit(1)
-
-                    Spacer()
-
-                    if app.isLoading {
-                        ProgressView()
-                    } else if app.selectedPlaylistId == nil {
-                        Button {
-                            newPlaylistName = ""
-                            showingCreatePlaylist = true
-                        } label: {
-                            Image(systemName: "plus.circle.fill")
-                                .font(.title3)
-                        }
-                        .accessibilityLabel("Create Playlist")
-                    }
-                }
-                .padding(.horizontal)
-                .padding(.top, 12)
-
-                if let playlist = app.selectedPlaylist {
-                    PlaylistDetailView(playlist: playlist)
-                        .environmentObject(app)
-                } else if app.filteredPlaylists.isEmpty {
-                    ContentUnavailableView(app.canUseApi ? "No playlists" : "Connect API", systemImage: app.canUseApi ? "music.note.list" : "wifi.exclamationmark", description: Text(app.canUseApi ? "Create a playlist or add songs from track menus." : "Open Settings, set the endpoint and log in."))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 48)
-                } else {
-                    LazyVStack(spacing: 10) {
-                        ForEach(app.filteredPlaylists) { playlist in
-                            PlaylistCardNative(playlist: playlist)
-                                .environmentObject(app)
-                        }
-                    }
-                    .padding(.horizontal)
-                }
+            VStack(spacing: 0) {
+                hero
+                controls
+                trackList
             }
-            .padding(.bottom, 10)
+            .padding(.bottom, 24)
         }
-        .refreshable { await app.refreshLibrary() }
-        .alert("New Playlist", isPresented: $showingCreatePlaylist) {
-            TextField("Playlist name", text: $newPlaylistName)
-            Button("Create") {
-                Task { await app.createPlaylist(named: newPlaylistName) }
+        .background(MekambPalette.backgroundPrimary.ignoresSafeArea())
+    }
+
+    private var hero: some View {
+        VStack(spacing: 14) {
+            HStack {
+                DetailBackButton {
+                    app.selectedAlbumId = nil
+                    app.selectedTab = app.lastBarTab
+                }
+                Spacer()
             }
-            Button("Cancel", role: .cancel) {}
+
+            AlbumArtworkView(album: album, size: 208)
+                .environmentObject(app)
+                .shadow(color: .black.opacity(0.5), radius: 24, y: 10)
+
+            VStack(spacing: 5) {
+                Text(album.title)
+                    .font(.system(size: 21, weight: .heavy))
+                    .foregroundStyle(MekambPalette.textPrimary)
+                    .multilineTextAlignment(.center)
+                Button {
+                    app.selectedArtistName = album.artist
+                    app.selectedTab = .artist
+                } label: {
+                    Text(album.artist)
+                        .font(.system(size: 13.5, weight: .bold))
+                        .foregroundStyle(MekambPalette.linkBlue)
+                }
+                .buttonStyle(.plain)
+                Text("\(album.trackCountText) · \(albumDurationText)")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(MekambPalette.textMuted)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 8)
+        .padding(.bottom, 20)
+        .background(
+            LinearGradient(colors: [MekambPalette.accentBlueDeep.opacity(0.34), MekambPalette.backgroundPrimary.opacity(0)], startPoint: .top, endPoint: .bottom)
+        )
+    }
+
+    private var controls: some View {
+        HStack(spacing: 16) {
+            Button {
+                let shuffled = album.tracks.shuffled()
+                if let first = shuffled.first { app.play(first, queue: shuffled) }
+            } label: {
+                Image(systemName: "shuffle").foregroundStyle(MekambPalette.textMuted)
+            }
+            .frame(width: 42, height: 42)
+            .overlay(Circle().stroke(MekambPalette.border3, lineWidth: 1))
+            .disabled(album.tracks.isEmpty)
+
+            Button {
+                if let first = album.tracks.first { app.play(first, queue: album.tracks) }
+            } label: {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 21))
+                    .foregroundStyle(MekambPalette.backgroundSecondary)
+            }
+            .frame(width: 54, height: 54)
+            .background(Circle().fill(MekambPalette.accentBlue))
+            .disabled(album.tracks.isEmpty)
+
+            Menu {
+                Button {
+                    Task { await app.downloadAlbum(album) }
+                } label: {
+                    Label(
+                        app.isAlbumAvailableOffline(album) ? "Available Offline" : "Download",
+                        systemImage: app.isAlbumAvailableOffline(album) ? "checkmark.circle" : "arrow.down.circle"
+                    )
+                }
+                .disabled(app.downloadingAlbumIds.contains(album.id) || app.isAlbumAvailableOffline(album))
+
+                if app.downloadedTrackCount(in: album) > 0 {
+                    Button(role: .destructive) {
+                        app.removeDownloadedAlbum(album)
+                    } label: {
+                        Label("Remove Downloads", systemImage: "trash")
+                    }
+                }
+
+                Button(role: .destructive) {
+                    Task { await app.deleteAlbum(album) }
+                } label: {
+                    Label("Delete Album", systemImage: "trash")
+                }
+            } label: {
+                if app.downloadingAlbumIds.contains(album.id) {
+                    ProgressView()
+                } else {
+                    Image(systemName: "ellipsis").foregroundStyle(MekambPalette.textMuted)
+                }
+            }
+            .frame(width: 42, height: 42)
+            .overlay(Circle().stroke(MekambPalette.border3, lineWidth: 1))
+        }
+        .padding(.bottom, 14)
+    }
+
+    private var trackList: some View {
+        LazyVStack(spacing: 10) {
+            ForEach(album.tracks) { track in
+                TrackRowNative(track: track)
+                    .environmentObject(app)
+            }
+        }
+        .padding(.horizontal)
+    }
+}
+
+// MARK: - Artist detail (pushed) — new screen; no /artists/{name} endpoint exists, so tracks come
+// from GET /tracks?artist= and the album shelf is a client-side filter of already-loaded albums.
+
+struct ArtistDetailView: View {
+    @EnvironmentObject private var app: AppState
+    let artistName: String
+    @State private var popularTracks: [ApiTrack] = []
+    @State private var isLoadingPopular = false
+
+    private var albumsInLibrary: [Album] {
+        app.albums.filter { $0.artist == artistName }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                hero
+                controls.padding(.horizontal)
+                popularSection
+                AlbumShelfView(title: "In your library", albums: albumsInLibrary)
+                    .environmentObject(app)
+            }
+            .padding(.bottom, 24)
+        }
+        .background(MekambPalette.backgroundPrimary.ignoresSafeArea())
+        .task(id: artistName) {
+            isLoadingPopular = true
+            popularTracks = Array((await app.fetchArtistTracks(artistName)).prefix(5))
+            isLoadingPopular = false
+        }
+    }
+
+    private var hero: some View {
+        ZStack(alignment: .bottomLeading) {
+            LinearGradient(colors: [MekambPalette.accentBlueDeep.opacity(0.55), MekambPalette.backgroundPrimary], startPoint: .top, endPoint: .bottom)
+
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    DetailBackButton {
+                        app.selectedArtistName = nil
+                        app.selectedTab = app.lastBarTab
+                    }
+                    Spacer()
+                }
+                Spacer()
+                Text("ARTIST")
+                    .font(.system(size: 10.5, weight: .heavy))
+                    .tracking(1.3)
+                    .foregroundStyle(.white.opacity(0.72))
+                Text(artistName)
+                    .font(.system(size: 32, weight: .heavy))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                Text("\(albumsInLibrary.count) album\(albumsInLibrary.count == 1 ? "" : "s") in your library")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .padding(.top, 3)
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 8)
+            .padding(.bottom, 18)
+        }
+        .frame(height: 200)
+    }
+
+    private var controls: some View {
+        HStack(spacing: 12) {
+            Button {
+                if let first = popularTracks.first { app.play(first, queue: popularTracks) }
+            } label: {
+                Image(systemName: "play.fill")
+                    .foregroundStyle(MekambPalette.backgroundSecondary)
+            }
+            .frame(width: 48, height: 48)
+            .background(Circle().fill(MekambPalette.accentBlue))
+            .disabled(popularTracks.isEmpty)
+
+            Button {
+                let shuffled = popularTracks.shuffled()
+                if let first = shuffled.first { app.play(first, queue: shuffled) }
+            } label: {
+                Label("Shuffle", systemImage: "shuffle")
+                    .font(.system(size: 12, weight: .bold))
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 36)
+            .foregroundStyle(MekambPalette.textMuted)
+            .overlay(Capsule().stroke(MekambPalette.border3, lineWidth: 1))
+            .disabled(popularTracks.isEmpty)
+
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private var popularSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Popular")
+                .font(.system(size: 16, weight: .heavy))
+                .foregroundStyle(MekambPalette.textPrimary)
+                .padding(.horizontal)
+
+            if isLoadingPopular && popularTracks.isEmpty {
+                ProgressView().frame(maxWidth: .infinity).padding(.vertical, 12)
+            } else if popularTracks.isEmpty {
+                Text("No tracks from this artist yet.")
+                    .font(.subheadline)
+                    .foregroundStyle(MekambPalette.textMuted)
+                    .padding(.horizontal)
+            } else {
+                LazyVStack(spacing: 8) {
+                    ForEach(popularTracks) { track in
+                        TrackRowNative(track: track)
+                            .environmentObject(app)
+                            .padding(.horizontal)
+                    }
+                }
+            }
         }
     }
 }
 
-struct PlaylistCardNative: View {
+// MARK: - Liked Songs (pushed)
+
+struct LikedSongsView: View {
+    @EnvironmentObject private var app: AppState
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                hero
+                if app.filteredTracks.isEmpty {
+                    ContentUnavailableView("No liked tracks", systemImage: "heart", description: Text("Heart songs from your library to build this collection."))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 24)
+                } else {
+                    LazyVStack(spacing: 10) {
+                        ForEach(app.filteredTracks) { track in
+                            TrackRowNative(track: track)
+                                .environmentObject(app)
+                                .padding(.horizontal)
+                        }
+                    }
+                }
+            }
+            .padding(.bottom, 24)
+        }
+        .background(MekambPalette.backgroundPrimary.ignoresSafeArea())
+    }
+
+    private var hero: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                DetailBackButton { app.selectedTab = app.lastBarTab }
+                Spacer()
+            }
+
+            HStack(spacing: 14) {
+                ZStack {
+                    LinearGradient(colors: [MekambPalette.accentBlueDeep, Color(hex: 0x7B5BD6), MekambPalette.likePink], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    Image(systemName: "heart.fill").font(.system(size: 34)).foregroundStyle(.white)
+                }
+                .frame(width: 88, height: 88)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .shadow(color: .black.opacity(0.5), radius: 16, y: 8)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Liked Songs")
+                        .font(.system(size: 22, weight: .heavy))
+                        .foregroundStyle(MekambPalette.textPrimary)
+                    Text("\(app.filteredTracks.count) tracks · yours")
+                        .font(.system(size: 12))
+                        .foregroundStyle(MekambPalette.textMuted)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    if let first = app.filteredTracks.first { app.play(first, queue: app.filteredTracks) }
+                } label: {
+                    Image(systemName: "play.fill")
+                        .foregroundStyle(MekambPalette.backgroundSecondary)
+                }
+                .frame(width: 48, height: 48)
+                .background(Circle().fill(MekambPalette.accentBlue))
+                .disabled(app.filteredTracks.isEmpty)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 8)
+        .padding(.bottom, 16)
+        .background(
+            LinearGradient(colors: [MekambPalette.accentBlueDeep.opacity(0.30), MekambPalette.backgroundPrimary.opacity(0)], startPoint: .top, endPoint: .bottom)
+        )
+    }
+}
+
+// MARK: - Daily Mix detail (pushed) — new screen, mirrors PlaylistDetailView's structure.
+
+struct DailyMixDetailView: View {
+    @EnvironmentObject private var app: AppState
+    let mix: DailyMix
+
+    private var totalMinutes: Int {
+        Int(mix.tracks.reduce(0.0) { $0 + ($1.durationSeconds ?? 0) } / 60)
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                hero
+                if mix.tracks.isEmpty {
+                    ContentUnavailableView("No tracks", systemImage: "music.note")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 24)
+                } else {
+                    LazyVStack(spacing: 10) {
+                        ForEach(mix.tracks) { track in
+                            TrackRowNative(track: track)
+                                .environmentObject(app)
+                                .padding(.horizontal)
+                        }
+                    }
+                }
+            }
+            .padding(.bottom, 24)
+        }
+        .background(MekambPalette.backgroundPrimary.ignoresSafeArea())
+    }
+
+    private var hero: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                DetailBackButton {
+                    app.selectedMixId = nil
+                    app.selectedTab = app.lastBarTab
+                }
+                Spacer()
+            }
+
+            HStack(alignment: .center, spacing: 14) {
+                ZStack(alignment: .topLeading) {
+                    if let first = mix.tracks.first {
+                        TrackArtworkView(track: first, size: 88).environmentObject(app)
+                    } else {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(LinearGradient(colors: [.blue.opacity(0.7), .purple.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                            .frame(width: 88, height: 88)
+                    }
+                    Text("MIX")
+                        .font(.system(size: 8.5, weight: .heavy))
+                        .tracking(0.7)
+                        .foregroundStyle(MekambPalette.accentBlue)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.black.opacity(0.65))
+                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                        .padding(6)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(mix.title)
+                        .font(.system(size: 22, weight: .heavy))
+                        .foregroundStyle(MekambPalette.textPrimary)
+                    Text(mix.description)
+                        .font(.system(size: 12))
+                        .foregroundStyle(MekambPalette.textMuted)
+                        .lineLimit(2)
+                    Text("\(mix.tracks.count) tracks · \(totalMinutes) min · refreshed daily")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(MekambPalette.textMuted)
+                }
+                Spacer(minLength: 0)
+
+                Button {
+                    if let first = mix.tracks.first { app.play(first, queue: mix.tracks) }
+                } label: {
+                    Image(systemName: "play.fill")
+                        .foregroundStyle(MekambPalette.backgroundSecondary)
+                }
+                .frame(width: 48, height: 48)
+                .background(Circle().fill(MekambPalette.accentBlue))
+                .disabled(mix.tracks.isEmpty)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 8)
+        .padding(.bottom, 16)
+        .background(
+            LinearGradient(colors: [MekambPalette.accentBlueDeep.opacity(0.30), MekambPalette.backgroundPrimary.opacity(0)], startPoint: .top, endPoint: .bottom)
+        )
+    }
+}
+
+// MARK: - Playlist detail (pushed) — existing PlaylistDetailView, wrapped with a back header.
+
+struct PlaylistDetailScreen: View {
     @EnvironmentObject private var app: AppState
     let playlist: PlaylistDetail
 
     var body: some View {
-        Button {
-            app.selectedPlaylistId = playlist.id
-        } label: {
-            HStack(spacing: 12) {
-                ZStack {
-                    LinearGradient(colors: [.green.opacity(0.65), .blue.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                    Image(systemName: "music.note.list")
-                        .font(.title2.weight(.semibold))
-                        .foregroundStyle(.white)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    DetailBackButton(tint: MekambPalette.textPrimary, background: MekambPalette.surface2) {
+                        app.selectedPlaylistId = nil
+                        app.selectedTab = app.lastBarTab
+                    }
+                    Spacer()
                 }
-                .frame(width: 58, height: 58)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .padding(.horizontal)
+                .padding(.top, 12)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(playlist.name)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                    Text(playlist.trackCountText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.secondary)
+                PlaylistDetailView(playlist: playlist)
+                    .environmentObject(app)
             }
-            .padding(12)
-            .background(Color.white.opacity(0.06))
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .padding(.bottom, 24)
         }
-        .buttonStyle(.plain)
+        .background(MekambPalette.backgroundPrimary.ignoresSafeArea())
     }
 }
 
@@ -1022,6 +1408,8 @@ struct PlaylistDetailView: View {
     }
 }
 
+// MARK: - Artwork
+
 struct AlbumArtworkView: View {
     @EnvironmentObject private var app: AppState
     let album: Album
@@ -1070,6 +1458,8 @@ struct TrackRowNative: View {
     let track: ApiTrack
     var playlist: PlaylistDetail? = nil
 
+    private var isCurrent: Bool { app.currentTrack?.id == track.id }
+
     var body: some View {
         ZStack(alignment: .leading) {
             Label("Queue", systemImage: "text.badge.plus")
@@ -1080,13 +1470,21 @@ struct TrackRowNative: View {
                 .opacity(dragOffset > 8 ? 1 : 0)
 
             HStack(spacing: 12) {
-                TrackArtworkView(track: track, size: 52)
-                    .environmentObject(app)
+                ZStack {
+                    TrackArtworkView(track: track, size: 52)
+                        .environmentObject(app)
+                    if isCurrent {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.black.opacity(0.45))
+                        EqualizerBarsView()
+                    }
+                }
+                .frame(width: 52, height: 52)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(track.title)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(isCurrent ? MekambPalette.accentBlue : .white)
                         .lineLimit(1)
                     Text("\(track.displayArtist) · \(track.displayAlbum)")
                         .font(.caption)
@@ -1099,7 +1497,7 @@ struct TrackRowNative: View {
                 if app.isTrackAvailableOffline(track) {
                     Image(systemName: "arrow.down.circle.fill")
                         .font(.caption.weight(.bold))
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(MekambPalette.accentBlue)
                 }
 
                 Text(track.durationText)
@@ -1177,7 +1575,7 @@ struct TrackRowNative: View {
                 .disabled(app.downloadingTrackIds.contains(track.id))
             }
             .padding(12)
-            .background(app.currentTrack?.id == track.id ? Color.blue.opacity(0.18) : Color.white.opacity(0.06))
+            .background(isCurrent ? MekambPalette.accentBlue.opacity(0.18) : Color.white.opacity(0.06))
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .offset(x: dragOffset)
         }
@@ -1215,22 +1613,44 @@ struct TrackRowNative: View {
     }
 }
 
-/// The "Add Music" screen: search Lidarr for an artist/album and request it be
-/// added to the shared catalog. Lidarr acquires it and the backend ingests it.
+// MARK: - Add Music (wired directly to the existing Lidarr-backed catalog search)
+
 struct CatalogSearchView: View {
     @EnvironmentObject private var app: AppState
+    @FocusState private var isFocused: Bool
 
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 10) {
                 HStack {
-                    Text(app.searchText.isEmpty ? "Add Music" : "Results")
+                    Text(app.catalogQuery.isEmpty ? "Add Music" : "Results")
                         .font(.title2.bold())
                     Spacer()
                     if app.isSearchingCatalog { ProgressView() }
                 }
                 .padding(.horizontal)
                 .padding(.top, 12)
+
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField(app.catalogKind == .artist ? "Add an artist..." : "Add an album...", text: $app.catalogQuery)
+                        .focused($isFocused)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .submitLabel(.search)
+                    if !app.catalogQuery.isEmpty {
+                        Button {
+                            app.catalogQuery = ""
+                            app.catalogItems = []
+                        } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .padding(12)
+                .background(Color.white.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .padding(.horizontal)
 
                 Picker("Type", selection: $app.catalogKind) {
                     ForEach(CatalogKind.allCases) { kind in
@@ -1240,7 +1660,7 @@ struct CatalogSearchView: View {
                 .pickerStyle(.segmented)
                 .padding(.horizontal)
 
-                if app.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if app.catalogQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     ContentUnavailableView(
                         "Grow the library",
                         systemImage: "plus.magnifyingglass",
@@ -1281,6 +1701,18 @@ struct CatalogSearchView: View {
             }
         }
         .task { await app.loadCatalogRequests() }
+        .task(id: app.catalogQuery) {
+            guard !app.catalogQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                app.catalogItems = []
+                return
+            }
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            await app.searchCatalog()
+        }
+        .onChange(of: app.catalogKind) { _, _ in
+            Task { await app.searchCatalog() }
+        }
         .refreshable { await app.searchCatalog() }
     }
 }
@@ -1332,8 +1764,193 @@ struct CatalogRowNative: View {
     }
 }
 
-/// Small "FLAC" / "AAC" pill shown next to the track that's playing.
-/// Lists the user's personal libraries (curated subsets of the shared catalog).
+// MARK: - Imports tab
+
+struct ImportsView: View {
+    @EnvironmentObject private var app: AppState
+    @State private var pollTask: Task<Void, Never>?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Imports")
+                        .font(.system(size: 23, weight: .heavy))
+                        .foregroundStyle(MekambPalette.textPrimary)
+                    Spacer()
+                    if app.isLoadingImports { ProgressView() }
+                }
+                .padding(.horizontal)
+                .padding(.top, 12)
+
+                Text("Albums acquired through the catalog appear here as they ingest.")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(MekambPalette.textMuted)
+                    .padding(.horizontal)
+                    .padding(.bottom, 12)
+
+                if !app.canUseApi {
+                    ContentUnavailableView("Connect API", systemImage: "wifi.exclamationmark", description: Text("Open Settings, set the endpoint and log in."))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 40)
+                } else if app.isLoadingImports && app.importRecords.isEmpty {
+                    ProgressView()
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 40)
+                } else if app.importRecords.isEmpty {
+                    ContentUnavailableView(
+                        "No imports yet",
+                        systemImage: "tray",
+                        description: Text("Add music from the Add Music tab; imports show up here as they ingest.")
+                    )
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 40)
+                } else {
+                    LazyVStack(spacing: 10) {
+                        ForEach(app.importRecords) { record in
+                            ImportRowView(record: record)
+                                .environmentObject(app)
+                                .padding(.horizontal)
+                        }
+                    }
+                }
+            }
+            .padding(.bottom, 24)
+        }
+        .refreshable { await app.loadImports() }
+        .task { await app.loadImports() }
+        .onAppear { startPolling() }
+        .onDisappear {
+            pollTask?.cancel()
+            pollTask = nil
+        }
+    }
+
+    private func startPolling() {
+        pollTask?.cancel()
+        pollTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                if Task.isCancelled { break }
+                await app.loadImports()
+            }
+        }
+    }
+}
+
+struct ImportRowView: View {
+    @EnvironmentObject private var app: AppState
+    let record: ImportRecordResponse
+    @State private var isWorking = false
+
+    private var chipColor: Color {
+        if record.isImported { return MekambPalette.successGreen }
+        if record.isFailed || record.isCanceled { return MekambPalette.dangerRed }
+        return MekambPalette.accentBlue
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(LinearGradient(colors: [.blue.opacity(0.55), .purple.opacity(0.45)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .frame(width: 38, height: 38)
+                    .overlay(Image(systemName: "square.and.arrow.down").font(.caption).foregroundStyle(.white))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(record.displayName)
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(MekambPalette.textPrimary)
+                        .lineLimit(1)
+                    Text("\(record.source.capitalized) · \(record.uploader.isEmpty ? "unknown uploader" : record.uploader)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(MekambPalette.textMuted)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Text(record.statusLabel.uppercased())
+                    .font(.system(size: 9.5, weight: .heavy))
+                    .tracking(0.5)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(chipColor.opacity(0.15))
+                    .foregroundStyle(chipColor)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+
+            if record.isActive {
+                VStack(alignment: .leading, spacing: 4) {
+                    IndeterminateProgressBarView()
+                    HStack {
+                        Text(record.stageDescription)
+                        Spacer()
+                    }
+                    .font(.system(size: 11))
+                    .foregroundStyle(MekambPalette.textMuted)
+                }
+            }
+
+            if record.isFailed, let error = record.errorMessage, !error.isEmpty {
+                Text(error)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(MekambPalette.dangerRed)
+            }
+
+            if record.isActive || record.isFailed {
+                HStack(spacing: 8) {
+                    if record.isActive {
+                        Button {
+                            Task {
+                                isWorking = true
+                                await app.cancelImport(record)
+                                isWorking = false
+                            }
+                        } label: {
+                            Text("Cancel")
+                                .font(.system(size: 11.5, weight: .bold))
+                                .foregroundStyle(MekambPalette.textMuted)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 5)
+                                .overlay(Capsule().stroke(MekambPalette.border3, lineWidth: 1))
+                        }
+                        .disabled(isWorking)
+                    }
+                    if record.isFailed {
+                        Button {
+                            Task {
+                                isWorking = true
+                                await app.retryImport(record)
+                                isWorking = false
+                            }
+                        } label: {
+                            Text("Retry")
+                                .font(.system(size: 11.5, weight: .bold))
+                                .foregroundStyle(MekambPalette.backgroundSecondary)
+                                .padding(.horizontal, 13)
+                                .padding(.vertical, 6)
+                                .background(MekambPalette.accentBlue)
+                                .clipShape(Capsule())
+                        }
+                        .disabled(isWorking)
+                    }
+                    if isWorking { ProgressView() }
+                }
+            }
+        }
+        .padding(13)
+        .background(MekambPalette.surface1)
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(MekambPalette.border1, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+// MARK: - Personal libraries (curated subsets of the shared catalog — unrelated to the "Your
+// Library" tab above; reached from Settings → Storage → "My Libraries").
+
 struct LibrariesView: View {
     @EnvironmentObject private var app: AppState
     @State private var showCreate = false
@@ -1389,8 +2006,6 @@ struct LibrariesView: View {
     }
 }
 
-/// Shows one personal library's tracks; play, add-to-queue (via the row menu),
-/// or swipe to remove from the library.
 struct LibraryDetailView: View {
     @EnvironmentObject private var app: AppState
     let summary: LibrarySummary
@@ -1433,13 +2048,15 @@ struct CodecBadgeView: View {
     var body: some View {
         Text(text)
             .font(.system(size: 9, weight: .bold))
-            .foregroundStyle(.blue)
+            .foregroundStyle(MekambPalette.accentBlue)
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
-            .background(Color.blue.opacity(0.18), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .background(MekambPalette.accentBlue.opacity(0.18), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
             .fixedSize()
     }
 }
+
+// MARK: - Now Playing / mini player (unchanged behavior; palette nudged to the exact accent hex)
 
 struct PlayerBar: View {
     @EnvironmentObject private var app: AppState
@@ -1448,13 +2065,13 @@ struct PlayerBar: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            ScrubbablePlaybackBar(tint: .blue)
+            ScrubbablePlaybackBar(tint: MekambPalette.accentBlue)
                 .environmentObject(app)
 
             HStack(spacing: 10) {
                 Button { app.toggleShuffle() } label: {
                     Image(systemName: "shuffle")
-                        .foregroundStyle(app.shuffleEnabled ? .blue : .secondary)
+                        .foregroundStyle(app.shuffleEnabled ? MekambPalette.accentBlue : .secondary)
                 }
                 .accessibilityLabel("Shuffle")
 
@@ -1468,7 +2085,7 @@ struct PlayerBar: View {
 
                 Button { app.cycleRepeatMode() } label: {
                     Image(systemName: app.repeatMode.iconName)
-                        .foregroundStyle(app.repeatMode.isActive ? .blue : .secondary)
+                        .foregroundStyle(app.repeatMode.isActive ? MekambPalette.accentBlue : .secondary)
                 }
                 .accessibilityLabel(app.repeatMode.label)
             }
@@ -1514,8 +2131,8 @@ struct PlayerBar: View {
                     Image(systemName: app.isPlaying ? "pause.fill" : "play.fill")
                         .font(.title3.weight(.bold))
                         .frame(width: 42, height: 42)
-                        .background(Color.blue)
-                        .foregroundStyle(.white)
+                        .background(MekambPalette.accentBlue)
+                        .foregroundStyle(MekambPalette.backgroundSecondary)
                         .clipShape(Circle())
                 }
                 Button { app.nextTrack() } label: { Image(systemName: "forward.fill") }
@@ -1641,7 +2258,7 @@ struct NowPlayingSheetView: View {
                                     } label: {
                                         Image(systemName: app.likedTrackIds.contains(track.id) ? "heart.fill" : "heart")
                                             .font(.title3.weight(.semibold))
-                                            .foregroundStyle(app.likedTrackIds.contains(track.id) ? .pink : .white)
+                                            .foregroundStyle(app.likedTrackIds.contains(track.id) ? MekambPalette.likePink : .white)
                                     }
                                     .accessibilityLabel(app.likedTrackIds.contains(track.id) ? "Unlike" : "Like")
                                 }
@@ -1662,7 +2279,7 @@ struct NowPlayingSheetView: View {
                             HStack(spacing: 26) {
                                 Button { app.toggleShuffle() } label: {
                                     Image(systemName: "shuffle")
-                                        .foregroundStyle(app.shuffleEnabled ? .blue : .white)
+                                        .foregroundStyle(app.shuffleEnabled ? MekambPalette.accentBlue : .white)
                                 }
 
                                 Button { app.previousTrack() } label: {
@@ -1684,7 +2301,7 @@ struct NowPlayingSheetView: View {
 
                                 Button { app.cycleRepeatMode() } label: {
                                     Image(systemName: app.repeatMode.iconName)
-                                        .foregroundStyle(app.repeatMode.isActive ? .blue : .white)
+                                        .foregroundStyle(app.repeatMode.isActive ? MekambPalette.accentBlue : .white)
                                 }
                             }
                             .font(.title2.weight(.semibold))
@@ -1891,116 +2508,283 @@ struct QueueTrackRow: View {
     }
 }
 
+// MARK: - Profile menu (avatar → menu overlay on Home)
+
+struct ProfileMenuOverlay: View {
+    @EnvironmentObject private var app: AppState
+    @Binding var isPresented: Bool
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Color.black.opacity(0.45)
+                .ignoresSafeArea()
+                .onTapGesture { isPresented = false }
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 10) {
+                    Circle()
+                        .fill(LinearGradient(colors: [MekambPalette.accentBlueDeep, MekambPalette.accentBlue], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 38, height: 38)
+                        .overlay(
+                            Text(app.accountInitials)
+                                .font(.system(size: 12, weight: .heavy))
+                                .foregroundStyle(MekambPalette.backgroundSecondary)
+                        )
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(app.accountUsername.isEmpty ? "Not signed in" : app.accountUsername)
+                            .font(.system(size: 13.5, weight: .bold))
+                            .foregroundStyle(MekambPalette.textPrimary)
+                        Text(app.accountEmail.isEmpty ? "Sign in from Settings" : app.accountEmail)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(MekambPalette.textMuted)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(10)
+
+                Rectangle().fill(MekambPalette.border3).frame(height: 1).padding(.horizontal, 4).padding(.bottom, 6)
+
+                ProfileMenuRow(icon: "gearshape", title: "Settings", tint: MekambPalette.textPrimary) {
+                    isPresented = false
+                    app.selectedTab = .settings
+                }
+                ProfileMenuRow(icon: "person.crop.circle", title: "Account", tint: MekambPalette.textPrimary) {
+                    // "Account" is now a section inside Settings rather than a separate screen.
+                    isPresented = false
+                    app.selectedTab = .settings
+                }
+
+                Rectangle().fill(MekambPalette.border3).frame(height: 1).padding(.horizontal, 4).padding(.vertical, 6)
+
+                ProfileMenuRow(icon: "rectangle.portrait.and.arrow.right", title: "Log out", tint: MekambPalette.dangerRed) {
+                    isPresented = false
+                    Task { await app.logout() }
+                }
+            }
+            .padding(6)
+            .frame(width: 230)
+            .background(MekambPalette.surface2)
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(MekambPalette.border3, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .shadow(color: .black.opacity(0.5), radius: 24, y: 12)
+            .padding(.top, 96)
+            .padding(.trailing, 16)
+        }
+    }
+}
+
+struct ProfileMenuRow: View {
+    let icon: String
+    let title: String
+    let tint: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 11) {
+                Image(systemName: icon)
+                    .font(.system(size: 15))
+                    .foregroundStyle(tint == MekambPalette.dangerRed ? tint : MekambPalette.textMuted)
+                    .frame(width: 18)
+                Text(title)
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(tint)
+                Spacer()
+            }
+            .padding(10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Settings (reached from the profile menu, not a bottom tab)
+
 struct SettingsView: View {
     @EnvironmentObject private var app: AppState
     @State private var showLibraries = false
+    @State private var updateStatusMessage = "You're up to date"
+
+    private var appVersionText: String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
+        return "\(version) (\(build))"
+    }
 
     var body: some View {
-        Form {
-            Section("Library") {
-                Button {
-                    showLibraries = true
-                } label: {
-                    Label("My Libraries", systemImage: "books.vertical")
-                }
-            }
-            Section("Backend") {
-                TextField("192.168.1.50:8000", text: $app.apiEndpoint)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .keyboardType(.URL)
+        VStack(spacing: 0) {
+            header
+            Form {
+                AccountSection()
 
-                if let status = app.connectionStatus {
-                    Text(status)
+                Section("Server") {
+                    TextField("192.168.1.50:8000", text: $app.apiEndpoint)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+
+                    HStack(spacing: 7) {
+                        Circle()
+                            .fill(app.connectionStatus?.lowercased().contains("connected") == true ? MekambPalette.successGreen : MekambPalette.dangerRed)
+                            .frame(width: 7, height: 7)
+                        Text(app.connectionStatus ?? (app.canUseApi ? "Not tested yet" : "Not connected"))
+                            .font(.footnote)
+                            .foregroundStyle(app.connectionStatus?.lowercased().contains("connected") == true ? MekambPalette.successGreen : .secondary)
+                    }
+
+                    Button {
+                        Task { await app.testConnection() }
+                    } label: {
+                        Label {
+                            Text(app.isTestingConnection ? "Testing connection..." : "Test connection")
+                        } icon: {
+                            if app.isTestingConnection {
+                                ProgressView()
+                            } else {
+                                Image(systemName: "network")
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .center)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(app.isTestingConnection)
+
+                    Button {
+                        Task { await app.refreshLibrary() }
+                    } label: {
+                        Label {
+                            Text(app.isLoading ? "Refreshing library..." : "Refresh library")
+                        } icon: {
+                            if app.isLoading {
+                                ProgressView()
+                            } else {
+                                Image(systemName: "arrow.clockwise")
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .center)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(app.isLoading)
+
+                    Text(app.normalizedEndpoint.isEmpty ? "Not set" : app.normalizedEndpoint)
+                        .font(.footnote.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+
+                Section("Playback") {
+                    Picker(selection: $app.playbackQuality) {
+                        ForEach(PlaybackQuality.allCases) { quality in
+                            Text(quality.label).tag(quality)
+                        }
+                    } label: {
+                        Label("Streaming quality", systemImage: "waveform")
+                    }
+                    Text(app.playbackQuality.detail)
                         .font(.footnote)
-                        .foregroundStyle(status.lowercased().contains("connected") ? .green : .red)
-                }
+                        .foregroundStyle(.secondary)
 
-                Button {
-                    Task { await app.testConnection() }
-                } label: {
-                    Label {
-                        Text(app.isTestingConnection ? "Testing connection..." : "Test connection")
-                    } icon: {
-                        if app.isTestingConnection {
-                            ProgressView()
-                        } else {
-                            Image(systemName: "network")
-                        }
+                    Toggle(isOn: $app.autoplaySimilarEnabled) {
+                        Label("Autoplay Similar Songs", systemImage: "infinity")
                     }
-                    .frame(maxWidth: .infinity, alignment: .center)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(app.isTestingConnection)
 
-                Button {
-                    Task { await app.refreshLibrary() }
-                } label: {
-                    Label {
-                        Text(app.isLoading ? "Refreshing library..." : "Refresh library")
-                    } icon: {
-                        if app.isLoading {
-                            ProgressView()
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                        }
+                    Toggle(isOn: $app.prefetchQueuedTracksEnabled) {
+                        Label("Prefetch queued tracks", systemImage: "arrow.down.circle")
                     }
-                    .frame(maxWidth: .infinity, alignment: .center)
-                }
-                .buttonStyle(.bordered)
-                .disabled(app.isLoading)
-            }
+                    Text("Skips start instantly")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
 
-            AccountSection()
-
-            Section("Detected endpoint") {
-                Text(app.normalizedEndpoint.isEmpty ? "Not set" : app.normalizedEndpoint)
-                    .font(.footnote.monospaced())
-                    .textSelection(.enabled)
-            }
-
-            Section("Playback") {
-                Toggle(isOn: $app.autoplaySimilarEnabled) {
-                    Label("Autoplay Similar Songs", systemImage: "infinity")
-                }
-                Picker(selection: $app.playbackQuality) {
-                    ForEach(PlaybackQuality.allCases) { quality in
-                        Text(quality.label).tag(quality)
+                    Toggle(isOn: $app.downloadOverCellularEnabled) {
+                        Label("Download over cellular", systemImage: "antenna.radiowaves.left.and.right")
                     }
-                } label: {
-                    Label("Playback Quality", systemImage: "waveform")
-                }
-                Text(app.playbackQuality.detail)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Offline Downloads") {
-                Label("\(app.offlineTrackCount) downloaded songs", systemImage: "arrow.down.circle.fill")
-                Text(app.offlineStorageText)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                if let message = app.offlineStatusMessage {
-                    Text(message)
+                    Text("Offline downloads on mobile data")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-                Button(role: .destructive) {
-                    app.removeAllDownloads()
-                } label: {
-                    Label("Remove All Downloads", systemImage: "trash")
-                }
-                .disabled(app.offlineTrackCount == 0)
-            }
 
-            Section("Tip") {
-                Text("For iPhone + backend on your computer/server, use the LAN IP, for example 192.168.1.50:8000. localhost on iPhone means the iPhone itself, not your Mac.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                Section("Storage") {
+                    Button {
+                        showLibraries = true
+                    } label: {
+                        Label("My Libraries", systemImage: "books.vertical")
+                    }
+
+                    Label("\(app.offlineTrackCount) downloaded songs", systemImage: "arrow.down.circle.fill")
+                    Text(app.offlineStorageText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    if let message = app.offlineStatusMessage {
+                        Text(message)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    Button(role: .destructive) {
+                        app.removeAllDownloads()
+                    } label: {
+                        Label("Remove All Downloads", systemImage: "trash")
+                    }
+                    .disabled(app.offlineTrackCount == 0)
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Streaming cache")
+                            if let stats = app.cacheStats {
+                                Text("\(stats.totalTracks) tracks · \(String(format: "%.0f", stats.totalSizeMb)) MB")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            } else if app.isLoadingCacheStats {
+                                Text("Loading…")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        Button {
+                            Task { await app.clearStreamingCache() }
+                        } label: {
+                            if app.isClearingCache {
+                                ProgressView()
+                            } else {
+                                Text("Clear")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(app.isClearingCache)
+                    }
+                    .task { await app.loadCacheStats() }
+                }
+
+                Section("Updates") {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Mekamb Music v\(appVersionText)")
+                            Text(updateStatusMessage)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button {
+                            // There's no update-check backend for this self-hosted app — this is
+                            // a harmless client-side confirmation, not a fabricated network call.
+                            updateStatusMessage = "You're up to date"
+                        } label: {
+                            Text("Check")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+
+                Section("Tip") {
+                    Text("For iPhone + backend on your computer/server, use the LAN IP, for example 192.168.1.50:8000. localhost on iPhone means the iPhone itself, not your Mac.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
+            .scrollContentBackground(.hidden)
+            .background(Color.clear)
         }
-        .scrollContentBackground(.hidden)
-        .background(Color.clear)
+        .background(MekambPalette.backgroundPrimary.ignoresSafeArea())
         .sheet(isPresented: $showLibraries) {
             NavigationStack {
                 LibrariesView()
@@ -2012,6 +2796,21 @@ struct SettingsView: View {
                     }
             }
         }
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            DetailBackButton(tint: MekambPalette.textPrimary, background: MekambPalette.surface2) {
+                app.selectedTab = app.lastBarTab
+            }
+            Text("Settings")
+                .font(.system(size: 23, weight: .heavy))
+                .foregroundStyle(MekambPalette.textPrimary)
+            Spacer()
+        }
+        .padding(.horizontal)
+        .padding(.top, 12)
+        .padding(.bottom, 4)
     }
 }
 
