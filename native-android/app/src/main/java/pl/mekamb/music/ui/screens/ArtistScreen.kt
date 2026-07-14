@@ -107,7 +107,7 @@ fun ArtistScreen(
         }
         if (resolved.topTracks.isNotEmpty()) {
             item {
-                Text("Popular", color = MekambColors.TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.padding(horizontal = 18.dp, top = 8.dp, bottom = 8.dp))
+                Text("Popular", color = MekambColors.TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp))
             }
             items(resolved.topTracks, key = { it.id }) { track ->
                 val isCurrent = playback.currentTrack?.id == track.id

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -113,7 +114,11 @@ fun MekambApp(viewModel: AppViewModel = viewModel()) {
     val isCurrentLiked = playback.currentTrack?.id?.let { uiState.likedTrackIds.contains(it) } ?: false
 
     Box(Modifier.fillMaxSize().background(MekambColors.Background)) {
-        Column(Modifier.fillMaxSize()) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+        ) {
             Box(Modifier.weight(1f)) {
                 NavHost(navController = navController, startDestination = Routes.Home) {
                     composable(Routes.Home) {
