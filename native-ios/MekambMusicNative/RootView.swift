@@ -468,7 +468,7 @@ enum LibraryRowKind {
     case artist(String)
 }
 
-func navigate(_ kind: LibraryRowKind, app: AppState) {
+@MainActor func navigate(_ kind: LibraryRowKind, app: AppState) {
     switch kind {
     case .liked:
         app.selectedTab = .liked
