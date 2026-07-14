@@ -1,12 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Pre-Compose window chrome only (status/nav bar + first-frame background); the actual UI
+         theme (colors, typography, shapes) lives in ui/theme/Theme.kt. Palette matches the
+         Mekamb Mobile design handoff: near-black background + #5AA9FF accent. -->
     <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowActionBar">false</item>
+        <item name="android:windowBackground">#101014</item>
         <item name="android:windowLightStatusBar">false</item>
-        <item name="android:navigationBarColor">#070A12</item>
-        <item name="android:statusBarColor">#070A12</item>
-        <item name="android:colorAccent">#1DB954</item>
+        <item name="android:navigationBarColor">#0B0B0D</item>
+        <item name="android:statusBarColor">#0B0B0D</item>
+        <item name="android:colorAccent">#5AA9FF</item>
     </style>
 </resources>
