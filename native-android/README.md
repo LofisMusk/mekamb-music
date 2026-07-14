@@ -1,8 +1,10 @@
 # Mekamb Music Native Android
 
 Native Android client for Mekamb Music. This app does not use Electron, React,
-Capacitor, or a WebView. It talks directly to the FastAPI backend with
-`HttpURLConnection` and streams tracks with Android `MediaPlayer`.
+Capacitor, or a WebView. The UI is Jetpack Compose; networking stays plain
+`HttpURLConnection` (wrapped in suspend functions, see `data/ApiClient.kt`)
+and playback is a process-scoped `android.media.MediaPlayer` singleton
+(`Playback.kt`) with a foreground service for lock-screen/Bluetooth controls.
 
 ## Open in Android Studio
 
@@ -58,13 +60,17 @@ use HTTPS and narrow this policy.
 
 ## Current native features
 
-- library list from `GET /tracks`, fetched page by page
-- albums tab grouped from library tracks
-- liked songs from `GET /tracks/liked`
-- like/unlike with `PUT` / `DELETE /tracks/{id}/like`
-- source search through `GET /sources/search`
-- indexer search through `GET /sources/indexers/search`
-- torrent import through the matching `/imports/...` endpoint
-- direct playback from `GET /tracks/{id}/stream`
-- mini-player with play/pause, previous, next, and progress
-- settings screen for endpoint, account login/token migration, and optional Prowlarr key
+- Bottom tabs: Home, Library, Add Music, Imports (with an active-import badge)
+- Home: pinned Liked Songs/playlists/albums grid, daily-mix shelf, recently-added shelf
+- Library: filterable (All/Playlists/Albums/Artists) flat list
+- Album, Artist, Liked Songs, and Daily Mix detail screens, each with a
+  playable track list and like/unlike (`PUT`/`DELETE /tracks/{id}/like`)
+- Add Music: Lidarr-backed catalog search/add via `/catalog/*`
+- Imports: polls `GET /imports`, cancel/retry via `/imports/{id}/cancel|retry`
+- Daily mixes and recommendations from `GET /recommendations/personalized`
+- Full-screen Now Playing sheet (scrubbable progress, shuffle/repeat, a
+  real Up Next queue) plus a persistent mini player
+- Settings: account (login/migrate-token/register), server endpoint + a
+  live connection check, streaming quality + prefetch/cellular-download
+  toggles, offline-download and streaming-cache storage info, app version
+- Offline downloads for playback without a network connection
