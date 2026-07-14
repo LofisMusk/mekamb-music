@@ -26,6 +26,9 @@ android {
 
     buildFeatures {
         compose = true
+        // BuildConfig.VERSION_NAME backs the Settings > Updates section; AGP 8+ defaults this to
+        // false, so it must be opted into explicitly.
+        buildConfig = true
     }
 }
 
