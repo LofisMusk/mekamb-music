@@ -104,6 +104,26 @@ struct DetailBackButton: View {
     }
 }
 
+/// Top-level gate: no account session → onboarding/login (`AuthGateView`); signed
+/// in → the full app (`RootView`). Refreshes the account on appear so a session
+/// revoked server-side (reject/disable) drops back to the login screen.
+struct RootContainerView: View {
+    @EnvironmentObject private var app: AppState
+
+    var body: some View {
+        Group {
+            if app.isSignedIn {
+                RootView()
+                    .environmentObject(app)
+                    .task { await app.loadCurrentAccount() }
+            } else {
+                AuthGateView()
+                    .environmentObject(app)
+            }
+        }
+    }
+}
+
 struct RootView: View {
     @EnvironmentObject private var app: AppState
 
@@ -2814,33 +2834,49 @@ struct SettingsView: View {
     }
 }
 
-// MARK: - Account (login, token migration, registration)
-
-private enum AuthFormMode: String, CaseIterable, Identifiable {
-    case login = "Log in"
-    case migrate = "Migrate token"
-    case register = "Sign up"
-    var id: String { rawValue }
-}
+// MARK: - Account (signed-in view + admin approval)
+//
+// Login and registration happen at the launch gate (`AuthGateView`) — the app can
+// only reach Settings while signed in, so this section only ever renders the
+// signed-in account, plus an admin-only entry into the account-approval panel.
 
 struct AccountSection: View {
     @EnvironmentObject private var app: AppState
-
-    @State private var mode: AuthFormMode = .login
-    @State private var didPickInitialMode = false
-    @State private var identifier = ""
-    @State private var email = ""
-    @State private var username = ""
-    @State private var password = ""
-    @State private var legacyToken = ""
+    @State private var showAdminPanel = false
 
     var body: some View {
         Section("Account") {
-            if app.isSignedIn {
-                signedInBody
-            } else {
-                signedOutBody
+            HStack(spacing: 10) {
+                Label(app.accountUsername, systemImage: "person.crop.circle.fill")
+                if app.accountIsAdmin {
+                    Text("ADMIN")
+                        .font(.system(size: 9, weight: .heavy))
+                        .tracking(0.6)
+                        .foregroundStyle(MekambPalette.accentBlue)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(MekambPalette.accentBlue.opacity(0.16))
+                        .clipShape(Capsule())
+                }
             }
+            Text(app.accountEmail)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            if app.accountIsAdmin {
+                Button {
+                    showAdminPanel = true
+                } label: {
+                    Label("Approve accounts", systemImage: "person.badge.shield.checkmark")
+                }
+            }
+
+            Button(role: .destructive) {
+                Task { await app.logout() }
+            } label: {
+                Label("Log Out", systemImage: "rectangle.portrait.and.arrow.right")
+            }
+            .disabled(app.isAuthenticating)
 
             if let status = app.authStatusMessage {
                 Text(status)
@@ -2848,113 +2884,321 @@ struct AccountSection: View {
                     .foregroundStyle(app.authStatusIsError ? .red : .green)
             }
         }
-        .onAppear {
-            guard !didPickInitialMode else { return }
-            didPickInitialMode = true
-            // A stored bearer token without account info is a legacy API token:
-            // steer straight into migration with the token pre-filled.
-            if !app.isSignedIn && !app.apiToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                mode = .migrate
-                legacyToken = app.apiToken
+        .sheet(isPresented: $showAdminPanel) {
+            NavigationStack {
+                AdminApprovalView()
+                    .environmentObject(app)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") { showAdminPanel = false }
+                        }
+                    }
             }
         }
     }
+}
 
-    @ViewBuilder
-    private var signedInBody: some View {
-        Label(app.accountUsername, systemImage: "person.crop.circle.fill")
-        Text(app.accountEmail)
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-        Button(role: .destructive) {
-            Task { await app.logout() }
-        } label: {
-            Label("Log Out", systemImage: "rectangle.portrait.and.arrow.right")
+// MARK: - Admin approval panel
+
+/// Lets an admin review pending signups and approve/reject them, plus see the
+/// already-approved roster. Backed by the `/admin/users` endpoints (admin-scoped).
+struct AdminApprovalView: View {
+    @EnvironmentObject private var app: AppState
+    @State private var pending: [AuthUserPayload] = []
+    @State private var approved: [AuthUserPayload] = []
+    @State private var isLoading = false
+    @State private var busyUserId: String?
+
+    var body: some View {
+        List {
+            Section("Pending approval") {
+                if pending.isEmpty {
+                    Text(isLoading ? "Loading…" : "No accounts awaiting approval.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(pending) { user in
+                        pendingRow(user)
+                    }
+                }
+            }
+
+            if !approved.isEmpty {
+                Section("Approved") {
+                    ForEach(approved) { user in
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 8) {
+                                Text(user.username).font(.system(size: 14, weight: .semibold))
+                                if user.isAdmin {
+                                    Text("admin").font(.caption2).foregroundStyle(MekambPalette.accentBlue)
+                                }
+                            }
+                            Text(user.email).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
         }
-        .disabled(app.isAuthenticating)
+        .navigationTitle("Accounts")
+        .navigationBarTitleDisplayMode(.inline)
+        .task { await reload() }
+        .refreshable { await reload() }
+    }
+
+    private func pendingRow(_ user: AuthUserPayload) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(user.username).font(.system(size: 15, weight: .semibold))
+                Text(user.email).font(.caption).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 10) {
+                Button {
+                    Task { await decide(user, approve: true) }
+                } label: {
+                    Label("Approve", systemImage: "checkmark.circle")
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button(role: .destructive) {
+                    Task { await decide(user, approve: false) }
+                } label: {
+                    Label("Reject", systemImage: "xmark.circle")
+                }
+                .buttonStyle(.bordered)
+
+                if busyUserId == user.id { ProgressView() }
+                Spacer()
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func reload() async {
+        isLoading = true
+        defer { isLoading = false }
+        async let pendingUsers = app.fetchAdminUsers(status: "pending")
+        async let approvedUsers = app.fetchAdminUsers(status: "approved")
+        pending = await pendingUsers
+        approved = await approvedUsers
+    }
+
+    private func decide(_ user: AuthUserPayload, approve: Bool) async {
+        busyUserId = user.id
+        defer { busyUserId = nil }
+        if await app.setUserApproval(id: user.id, approve: approve) {
+            await reload()
+        }
+    }
+}
+
+// MARK: - Launch gate: onboarding + login/register
+
+/// Full-screen gate shown until an account session exists. Collects the server
+/// URL (onboarding), then logs in or registers. Registration lands `pending` —
+/// the user is told to wait for an admin to approve them.
+struct AuthGateView: View {
+    @EnvironmentObject private var app: AppState
+
+    private enum Mode: String, CaseIterable, Identifiable {
+        case login = "Log in"
+        case register = "Sign up"
+        var id: String { rawValue }
+    }
+
+    @State private var mode: Mode = .login
+    @State private var identifier = ""
+    @State private var email = ""
+    @State private var username = ""
+    @State private var password = ""
+    @State private var showServerField = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [Color(hex: 0x0E1420), MekambPalette.backgroundSecondary],
+                startPoint: .top, endPoint: .bottom
+            )
+            .ignoresSafeArea()
+
+            ScrollView {
+                VStack(spacing: 22) {
+                    branding
+                    serverSection
+                    Picker("Mode", selection: $mode) {
+                        ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+
+                    formFields
+                    submitButton
+                    statusArea
+                }
+                .padding(.horizontal, 24)
+                .padding(.top, 60)
+                .padding(.bottom, 40)
+                .frame(maxWidth: 460)
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .task { await app.testConnection() }
+    }
+
+    private var branding: some View {
+        VStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(LinearGradient(
+                        colors: [MekambPalette.accentBlueDeep, MekambPalette.accentBlue],
+                        startPoint: .topLeading, endPoint: .bottomTrailing
+                    ))
+                    .frame(width: 76, height: 76)
+                Image(systemName: "music.note")
+                    .font(.system(size: 34, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+            .shadow(color: MekambPalette.accentBlue.opacity(0.4), radius: 18, y: 8)
+
+            Text("Mekamb Music")
+                .font(.system(size: 26, weight: .heavy))
+                .foregroundStyle(MekambPalette.textPrimary)
+            Text(mode == .login ? "Sign in to your account" : "Request an account")
+                .font(.system(size: 14))
+                .foregroundStyle(MekambPalette.textMuted)
+        }
+        .padding(.bottom, 4)
     }
 
     @ViewBuilder
-    private var signedOutBody: some View {
-        if mode == .migrate {
-            Text("Migrate your legacy API token to an account: pick an email, username and password — your library carries over and the old token stops working everywhere.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        }
+    private var serverSection: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Circle()
+                    .fill(app.connectionStatus?.lowercased().contains("connected") == true
+                          ? MekambPalette.successGreen : MekambPalette.dangerRed)
+                    .frame(width: 8, height: 8)
+                Text(app.connectionStatus ?? "Not connected")
+                    .font(.footnote)
+                    .foregroundStyle(MekambPalette.textMuted)
+                Spacer()
+                Button(showServerField ? "Hide" : "Server") {
+                    withAnimation { showServerField.toggle() }
+                }
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(MekambPalette.linkBlue)
+            }
 
-        Picker("Mode", selection: $mode) {
-            ForEach(AuthFormMode.allCases) { candidate in
-                Text(candidate.rawValue).tag(candidate)
+            if showServerField {
+                gateField("Server URL (e.g. 192.168.1.50:8000)", text: $app.apiEndpoint,
+                          secure: false, keyboard: .URL)
+                if let warning = app.endpointWarning {
+                    Text(warning)
+                        .font(.caption)
+                        .foregroundStyle(.yellow)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                Button {
+                    Task { await app.testConnection() }
+                } label: {
+                    Text(app.isTestingConnection ? "Testing…" : "Test connection")
+                        .font(.footnote.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(MekambPalette.surface2)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .foregroundStyle(MekambPalette.textPrimary)
+                }
+                .disabled(app.isTestingConnection)
             }
         }
-        .pickerStyle(.segmented)
+        .padding(14)
+        .background(MekambPalette.surface1)
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(MekambPalette.border2, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
 
-        switch mode {
-        case .login:
-            TextField("Email or username", text: $identifier)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-        case .migrate:
-            SecureField("Legacy API token", text: $legacyToken)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-            emailAndUsernameFields
-        case .register:
-            emailAndUsernameFields
+    @ViewBuilder
+    private var formFields: some View {
+        VStack(spacing: 12) {
+            switch mode {
+            case .login:
+                gateField("Email or username", text: $identifier, secure: false)
+            case .register:
+                gateField("Email", text: $email, secure: false, keyboard: .emailAddress)
+                gateField("Username", text: $username, secure: false)
+            }
+            gateField("Password", text: $password, secure: true)
         }
+    }
 
-        SecureField("Password", text: $password)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-
+    private var submitButton: some View {
         Button {
+            focused = false
             Task {
                 switch mode {
                 case .login:
                     await app.login(identifier: identifier, password: password)
-                case .migrate:
-                    await app.claimToken(
-                        token: legacyToken, email: email,
-                        username: username, password: password
-                    )
                 case .register:
                     await app.registerAccount(email: email, username: username, password: password)
                 }
                 if !app.authStatusIsError { password = "" }
             }
         } label: {
-            Label {
-                Text(app.isAuthenticating ? "Working..." : submitTitle)
-            } icon: {
-                if app.isAuthenticating {
-                    ProgressView()
-                } else {
-                    Image(systemName: "person.badge.key")
-                }
+            HStack {
+                if app.isAuthenticating { ProgressView().tint(.white) }
+                Text(app.isAuthenticating ? "Working…" : (mode == .login ? "Log In" : "Create Account"))
+                    .font(.system(size: 16, weight: .bold))
             }
-            .frame(maxWidth: .infinity, alignment: .center)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 14)
+            .background(canSubmit ? MekambPalette.accentBlue : MekambPalette.surface3)
+            .foregroundStyle(canSubmit ? MekambPalette.backgroundSecondary : MekambPalette.textFaint)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
-        .buttonStyle(.borderedProminent)
         .disabled(app.isAuthenticating || !canSubmit)
     }
 
     @ViewBuilder
-    private var emailAndUsernameFields: some View {
-        TextField("Email", text: $email)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .keyboardType(.emailAddress)
-        TextField("Username", text: $username)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
+    private var statusArea: some View {
+        if let status = app.authStatusMessage {
+            Text(status)
+                .font(.footnote)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(app.authStatusIsError ? MekambPalette.dangerRed : MekambPalette.successGreen)
+                .frame(maxWidth: .infinity)
+        }
+        if mode == .register {
+            Text("New accounts must be approved by an admin before you can log in.")
+                .font(.caption)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(MekambPalette.textFaint)
+                .frame(maxWidth: .infinity)
+        }
     }
 
-    private var submitTitle: String {
-        switch mode {
-        case .login: return "Log In"
-        case .migrate: return "Migrate & Sign In"
-        case .register: return "Create Account"
+    private func gateField(
+        _ placeholder: String,
+        text: Binding<String>,
+        secure: Bool,
+        keyboard: UIKeyboardType = .default
+    ) -> some View {
+        Group {
+            if secure {
+                SecureField(placeholder, text: text)
+            } else {
+                TextField(placeholder, text: text)
+                    .keyboardType(keyboard)
+            }
         }
+        .focused($focused)
+        .textInputAutocapitalization(.never)
+        .autocorrectionDisabled()
+        .foregroundStyle(MekambPalette.textPrimary)
+        .padding(.horizontal, 14)
+        .frame(height: 48)
+        .background(MekambPalette.surface2)
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(MekambPalette.border2, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private var canSubmit: Bool {
@@ -2962,10 +3206,6 @@ struct AccountSection: View {
         switch mode {
         case .login:
             return !identifier.trimmingCharacters(in: .whitespaces).isEmpty
-        case .migrate:
-            return !legacyToken.trimmingCharacters(in: .whitespaces).isEmpty
-                && !email.trimmingCharacters(in: .whitespaces).isEmpty
-                && !username.trimmingCharacters(in: .whitespaces).isEmpty
         case .register:
             return !email.trimmingCharacters(in: .whitespaces).isEmpty
                 && !username.trimmingCharacters(in: .whitespaces).isEmpty

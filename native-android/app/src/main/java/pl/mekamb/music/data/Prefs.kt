@@ -15,7 +15,7 @@ class Prefs(context: Context) {
         get() = prefs.getString("api_endpoint", "") ?: ""
         set(value) = prefs.edit().putString("api_endpoint", value).apply()
 
-    /** Bearer credential sent on every request — legacy API token or account session token alike. */
+    /** Bearer credential sent on every request — the account session token from /auth/login. */
     var apiToken: String
         get() = prefs.getString("api_token", "") ?: ""
         set(value) = prefs.edit().putString("api_token", value).apply()
@@ -27,6 +27,11 @@ class Prefs(context: Context) {
     var accountEmail: String
         get() = prefs.getString("account_email", "") ?: ""
         set(value) = prefs.edit().putString("account_email", value).apply()
+
+    /** Whether the signed-in account is an admin — gates the in-app approval panel. */
+    var accountIsAdmin: Boolean
+        get() = prefs.getBoolean("account_is_admin", false)
+        set(value) = prefs.edit().putBoolean("account_is_admin", value).apply()
 
     /** "auto" | "aac" | "lossless" — read by Playback when building the stream URL. */
     var playbackQuality: String
@@ -62,5 +67,6 @@ class Prefs(context: Context) {
         apiToken = ""
         accountUsername = ""
         accountEmail = ""
+        accountIsAdmin = false
     }
 }

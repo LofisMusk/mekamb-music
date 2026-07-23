@@ -1,8 +1,8 @@
 """Account authentication service.
 
-All account logic lives here (register, claim-token migration, login, sessions,
-password change, admin approval) so the route handlers stay thin and the security
-rules are testable in one place. Functions take an ``AsyncSession`` and mutate it;
+All account logic lives here (register, login, sessions, password change, admin
+approval) so the route handlers stay thin and the security rules are testable in
+one place. Functions take an ``AsyncSession`` and mutate it;
 callers are responsible for the surrounding transaction (``commit``).
 
 Security model (hardened so approval cannot be bypassed):
@@ -11,10 +11,8 @@ Security model (hardened so approval cannot be bypassed):
     ``login``/``resolve_session_token`` refuse anything that isn't ``approved``.
   * ``is_admin`` is never settable from a request body; it is only granted by the
     ``ADMIN_EMAILS`` bootstrap allowlist or by an existing admin.
-  * Claiming a valid legacy token yields an ``approved`` account (the token proves
-    prior authorization) bound to that token's ``api_key_id`` — but only once per
-    ``api_key_id``, so a token can't be used to hijack an already-migrated scope.
-  * Session tokens are 256-bit random and stored only as SHA-256 hashes.
+  * Session tokens are 256-bit random and stored only as SHA-256 hashes. They are
+    the only credential the API accepts; there is no raw API-token scheme.
 """
 from __future__ import annotations
 
@@ -24,10 +22,10 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import ApiKeyIdentity, match_bearer_token
+from app.core.auth import ApiKeyIdentity
 from app.core.config import Settings, settings
 from app.core.passwords import hash_password, needs_rehash, verify_password
 from app.db.models import User, UserSession, utcnow
@@ -116,10 +114,6 @@ async def get_user_by_identifier(session: AsyncSession, identifier: str) -> User
     )
 
 
-async def _user_with_api_key_id(session: AsyncSession, api_key_id: str) -> User | None:
-    return await session.scalar(select(User).where(User.api_key_id == api_key_id))
-
-
 async def _assert_unique(session: AsyncSession, *, email_norm: str, username_norm: str) -> None:
     existing = await session.scalar(
         select(User).where(
@@ -165,57 +159,6 @@ async def register_user(
         status=STATUS_APPROVED if is_bootstrap_admin else STATUS_PENDING,
         is_admin=is_bootstrap_admin,
         approved_at=utcnow() if is_bootstrap_admin else None,
-    )
-    session.add(user)
-    await session.flush()
-    return user
-
-
-async def claim_token(
-    session: AsyncSession,
-    *,
-    email: str,
-    username: str,
-    password: str,
-    token: str,
-    cfg: Settings = settings,
-) -> User:
-    """Migrate a legacy bearer-token user to an email/username/password account.
-
-    The supplied token must match a configured ``API_TOKEN(S)``. The new account
-    inherits that token's ``api_key_id`` so the user's library, likes, plays and
-    playback carry over, and is created ``approved`` (the token proves prior
-    authorization). A given token/``api_key_id`` can only be claimed once, and
-    from the moment it is claimed the raw token no longer authenticates —
-    ``require_token`` rejects it with ``token_migrated`` — so the account's
-    email/username/password fully replaces the token."""
-    _validate_new_credentials(email=email, username=username, password=password, cfg=cfg)
-
-    identity = match_bearer_token(cfg, f"Bearer {token.strip()}")
-    if identity is None:
-        raise AuthError("invalid_token", "That token is not valid.")
-
-    if await _user_with_api_key_id(session, identity.id) is not None:
-        raise AuthError(
-            "token_already_claimed",
-            "This token has already been migrated to an account.",
-        )
-
-    email_norm = normalize_email(email)
-    username_norm = normalize_username(username)
-    await _assert_unique(session, email_norm=email_norm, username_norm=username_norm)
-
-    is_admin = email_norm in admin_email_set(cfg)
-    user = User(
-        email=email.strip(),
-        email_normalized=email_norm,
-        username=username.strip(),
-        username_normalized=username_norm,
-        password_hash=hash_password(password),
-        api_key_id=identity.id,  # inherit the token's data scope — this is the migration
-        status=STATUS_APPROVED,
-        is_admin=is_admin,
-        approved_at=utcnow(),
     )
     session.add(user)
     await session.flush()

@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import pl.mekamb.music.data.AccountInfo
+import pl.mekamb.music.data.AdminUser
 import pl.mekamb.music.data.Album
 import pl.mekamb.music.data.ApiClient
 import pl.mekamb.music.data.ApiException
@@ -39,6 +40,7 @@ data class AppUiState(
     val apiToken: String = "",
     val accountUsername: String = "",
     val accountEmail: String = "",
+    val accountIsAdmin: Boolean = false,
     val tracks: List<ApiTrack> = emptyList(),
     val albums: List<Album> = emptyList(),
     val playlists: List<Playlist> = emptyList(),
@@ -89,6 +91,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             apiToken = prefs.apiToken,
             accountUsername = prefs.accountUsername,
             accountEmail = prefs.accountEmail,
+            accountIsAdmin = prefs.accountIsAdmin,
             playbackQuality = prefs.playbackQuality,
             prefetchQueuedTracks = prefs.prefetchQueuedTracks,
             downloadOverCellular = prefs.downloadOverCellular,
@@ -100,6 +103,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         offlineStore.load()
         refreshOfflineCounts()
         if (prefs.canUseApi()) {
+            refreshAccount()
             refreshLibrary()
             loadRecommendations()
             loadLibraries()
@@ -475,7 +479,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         prefs.apiToken = token
         prefs.accountUsername = account.username
         prefs.accountEmail = account.email
-        _uiState.update { it.copy(apiToken = token, accountUsername = account.username, accountEmail = account.email) }
+        prefs.accountIsAdmin = account.isAdmin
+        _uiState.update {
+            it.copy(
+                apiToken = token,
+                accountUsername = account.username,
+                accountEmail = account.email,
+                accountIsAdmin = account.isAdmin,
+            )
+        }
     }
 
     fun login(identifier: String, password: String) {
@@ -493,17 +505,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    fun claimToken(token: String, email: String, username: String, password: String) {
-        if (token.isBlank() || email.isBlank() || username.isBlank() || password.isBlank()) {
-            setStatus("Fill in the token, email, username and password.", isError = true)
-            return
-        }
+    /** Refreshes account info from /auth/me; keeps admin/status current and, on a revoked/expired
+     * session (401), signs out so the app drops back to the login gate. */
+    fun refreshAccount() {
+        if (!prefs.canUseApi()) return
         runIo(
-            task = { api.claimToken(token, email, username, password, deviceName()) },
-            onSuccess = { (newToken, account) ->
-                applySession(newToken, account)
-                setStatus("Token migrated — signed in as ${account.username}.")
-                refreshLibrary(); loadRecommendations(); loadLibraries(); loadCatalogRequests(); refreshLibrarySummary()
+            showLoading = false,
+            task = { api.me() },
+            onSuccess = { account ->
+                prefs.accountUsername = account.username
+                prefs.accountEmail = account.email
+                prefs.accountIsAdmin = account.isAdmin
+                _uiState.update {
+                    it.copy(
+                        accountUsername = account.username,
+                        accountEmail = account.email,
+                        accountIsAdmin = account.isAdmin,
+                    )
+                }
             },
         )
     }
@@ -533,12 +552,35 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 prefs.clearSession()
                 _uiState.update {
                     it.copy(
-                        apiToken = "", accountUsername = "", accountEmail = "",
+                        apiToken = "", accountUsername = "", accountEmail = "", accountIsAdmin = false,
                         tracks = emptyList(), albums = emptyList(), playlists = emptyList(),
                         likedTrackIds = emptySet(), dailyMixes = emptyList(), recommendedTracks = emptyList(),
                     )
                 }
                 setStatus("Logged out.")
+            },
+        )
+    }
+
+    // ── Admin account approval ───────────────────────────────────────────────────────────────────
+
+    /** Loads pending + approved accounts for the admin panel. No-op for non-admins. */
+    fun loadAdminUsers(onResult: (pending: List<AdminUser>, approved: List<AdminUser>) -> Unit) {
+        if (!_uiState.value.accountIsAdmin) return
+        runIo(
+            showLoading = false,
+            task = { api.adminUsers("pending") to api.adminUsers("approved") },
+            onSuccess = { (pending, approved) -> onResult(pending, approved) },
+        )
+    }
+
+    fun setUserApproval(id: String, approve: Boolean, onDone: () -> Unit) {
+        runIo(
+            showLoading = false,
+            task = { api.setUserApproval(id, approve) },
+            onSuccess = {
+                setStatus(if (approve) "Account approved." else "Account rejected.")
+                onDone()
             },
         )
     }

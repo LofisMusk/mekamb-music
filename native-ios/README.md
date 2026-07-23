@@ -23,13 +23,13 @@ Start the backend first:
 docker compose up --build
 ```
 
-In the iOS app, open Settings and enter:
+On launch the app shows an onboarding + login screen. Enter:
 
 - API endpoint: `YOUR_MAC_OR_SERVER_LAN_IP:8000`
 
-Then sign in under **Account**: log in with your email/username and password,
-migrate a legacy `API_TOKEN` (this replaces the token with your new credentials
-and the old token stops working), or sign up (new accounts need admin approval).
+Then log in with your email/username and password, or sign up (new accounts are
+`pending` and need admin approval before they can log in). Admins get an
+**Approve accounts** panel under Settings → Account.
 
 The app automatically adds `http://` when you type only `192.168.1.50:8000`.
 Use the **Test connection** button in Settings before refreshing the library.

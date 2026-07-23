@@ -13,7 +13,7 @@ struct MekambMusicNativeApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView()
+            RootContainerView()
                 .environmentObject(appState)
                 .preferredColorScheme(.dark)
         }
