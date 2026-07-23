@@ -137,4 +137,14 @@ data class CacheStats(
 data class AccountInfo(
     val username: String,
     val email: String,
+    val isAdmin: Boolean = false,
+)
+
+/** A user row from the admin approval panel (`GET /admin/users`). */
+data class AdminUser(
+    val id: String,
+    val username: String,
+    val email: String,
+    val status: String,
+    val isAdmin: Boolean,
 )

@@ -18,7 +18,7 @@ async def collect_readiness(
     lidarr_check: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, object]:
     checks = [
-        _check_api_token(settings),
+        _check_admin_emails(settings),
         _check_storage_backend(settings),
         _check_sandbox_paths(settings),
         _check_directory("quarantine_root", getattr(settings, "quarantine_root")),
@@ -31,10 +31,14 @@ async def collect_readiness(
     return {"status": status, "checks": checks}
 
 
-def _check_api_token(settings: object) -> dict[str, str]:
-    if getattr(settings, "api_token", "") or getattr(settings, "api_tokens", ""):
-        return _ok("api_token")
-    return _error("api_token", "API_TOKEN or API_TOKENS is not configured.")
+def _check_admin_emails(settings: object) -> dict[str, str]:
+    if getattr(settings, "admin_emails", "").strip():
+        return _ok("admin_emails")
+    return _error(
+        "admin_emails",
+        "ADMIN_EMAILS is not configured; no account can be bootstrapped as admin to "
+        "approve signups.",
+    )
 
 
 def _check_storage_backend(settings: object) -> dict[str, str]:

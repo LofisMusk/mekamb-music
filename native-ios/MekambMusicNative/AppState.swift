@@ -677,12 +677,13 @@ enum PlaybackQuality: String, CaseIterable, Identifiable {
 @MainActor
 final class AppState: ObservableObject {
     @AppStorage("mekambMusicApiEndpoint") var apiEndpoint: String = ""
-    // The bearer credential sent on every request: either a legacy API token or,
-    // once logged in / migrated, the account session token (same header either way).
+    // The bearer credential sent on every request: the account session token from
+    // /auth/login. There is no raw API-token scheme anymore — you must log in.
     @AppStorage("mekambMusicApiToken") var apiToken: String = ""
-    // Set when apiToken is an account session token; blank while on a legacy token.
     @AppStorage("mekambMusicAccountUsername") var accountUsername: String = ""
     @AppStorage("mekambMusicAccountEmail") var accountEmail: String = ""
+    // Whether the signed-in account is an admin — gates the in-app approval panel.
+    @AppStorage("mekambMusicAccountIsAdmin") var accountIsAdmin: Bool = false
     @AppStorage("mekambMusicAutoplaySimilarEnabled") var autoplaySimilarEnabled: Bool = true
     @AppStorage("mekambMusicPlaybackQuality") var playbackQuality: PlaybackQuality = .auto
     /// "Prefetch queued tracks" toggle in Settings — gates the upcoming-queue background cache.
@@ -1172,11 +1173,12 @@ final class AppState: ObservableObject {
 
     private var deviceName: String { "iOS (\(UIDevice.current.name))" }
 
-    /// Stores a fresh account session: it replaces whatever bearer credential was stored.
+    /// Stores a fresh account session: it replaces whatever session token was stored.
     private func applyAuthSession(token: String, user: AuthUserPayload) {
         apiToken = token
         accountUsername = user.username
         accountEmail = user.email
+        accountIsAdmin = user.isAdmin
     }
 
     func login(identifier: String, password: String) async {
@@ -1189,24 +1191,6 @@ final class AppState: ObservableObject {
             )
             self.applyAuthSession(token: session.token, user: session.user)
             return "Signed in as \(session.user.username)."
-        }
-    }
-
-    /// Migrates a legacy API token to an account. The backend invalidates the token;
-    /// the returned session token replaces it on this device.
-    func claimToken(token: String, email: String, username: String, password: String) async {
-        await runAuthAction {
-            let body = try JSONEncoder().encode(
-                ClaimTokenPayload(
-                    email: email, username: username, password: password,
-                    token: token, deviceName: self.deviceName
-                )
-            )
-            let session: AuthSessionPayload = try await self.request(
-                "/auth/claim-token", method: "POST", body: body, requiresAuth: false
-            )
-            self.applyAuthSession(token: session.token, user: session.user)
-            return "Token migrated — signed in as \(session.user.username)."
         }
     }
 
@@ -1235,9 +1219,58 @@ final class AppState: ObservableObject {
         apiToken = ""
         accountUsername = ""
         accountEmail = ""
+        accountIsAdmin = false
         authStatusMessage = "Logged out."
         authStatusIsError = false
         await refreshLibrary()
+    }
+
+    /// Refreshes the signed-in account from `/auth/me`. Keeps `accountIsAdmin`/status
+    /// current (e.g. an admin grant landed after login) and, on a 401, signs out so
+    /// a revoked/expired session drops back to the login gate instead of a dead UI.
+    func loadCurrentAccount() async {
+        guard isSignedIn else { return }
+        do {
+            let user: AuthUserPayload = try await request("/auth/me")
+            accountUsername = user.username
+            accountEmail = user.email
+            accountIsAdmin = user.isAdmin
+        } catch BackendError.api(let status, _) where status == 401 {
+            await logout()
+        } catch {
+            // Network hiccup — keep the cached identity and try again next launch.
+        }
+    }
+
+    // MARK: - Admin account approval
+
+    func fetchAdminUsers(status: String? = nil) async -> [AuthUserPayload] {
+        guard accountIsAdmin else { return [] }
+        let path = status.map { "/admin/users?status=\($0)" } ?? "/admin/users"
+        do {
+            let response: AdminUserListPayload = try await request(path)
+            return response.users
+        } catch {
+            authStatusMessage = clean(error)
+            authStatusIsError = true
+            return []
+        }
+    }
+
+    /// Approve or reject a pending account. Returns true on success.
+    @discardableResult
+    func setUserApproval(id: String, approve: Bool) async -> Bool {
+        let action = approve ? "approve" : "reject"
+        do {
+            let _: AuthUserPayload = try await request(
+                "/admin/users/\(id)/\(action)", method: "POST"
+            )
+            return true
+        } catch {
+            authStatusMessage = clean(error)
+            authStatusIsError = true
+            return false
+        }
     }
 
     private func runAuthAction(_ action: () async throws -> String) async {
@@ -3091,7 +3124,7 @@ final class AppState: ObservableObject {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         guard (200..<300).contains(http.statusCode) else {
-            // Auth errors (e.g. token_migrated, invalid_credentials) use a structured
+            // Auth errors (e.g. invalid_credentials, account_pending) use a structured
             // {code, message} detail; everything else is a plain string detail.
             if let structured = try? JSONDecoder().decode(ApiStructuredError.self, from: data),
                let message = structured.detail.message {
@@ -3574,7 +3607,7 @@ struct ApiStructuredError: Decodable {
 
 // MARK: - Account auth payloads
 
-struct AuthUserPayload: Decodable {
+struct AuthUserPayload: Decodable, Identifiable {
     let id: String
     let email: String
     let username: String
@@ -3609,23 +3642,14 @@ struct LoginPayload: Encodable {
     }
 }
 
-struct ClaimTokenPayload: Encodable {
-    let email: String
-    let username: String
-    let password: String
-    let token: String
-    let deviceName: String
-
-    enum CodingKeys: String, CodingKey {
-        case email, username, password, token
-        case deviceName = "device_name"
-    }
-}
-
 struct RegisterPayload: Encodable {
     let email: String
     let username: String
     let password: String
+}
+
+struct AdminUserListPayload: Decodable {
+    let users: [AuthUserPayload]
 }
 
 enum BackendError: LocalizedError {

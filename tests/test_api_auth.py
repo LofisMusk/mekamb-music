@@ -1,6 +1,6 @@
 """HTTP-level tests for the auth/admin routers: exercises the real FastAPI
 wiring (dependency graph, error mapping, response schemas) against a shared
-in-memory SQLite DB and a fake Redis, plus the legacy-token compatibility path.
+in-memory SQLite DB and a fake Redis.
 """
 from __future__ import annotations
 
@@ -52,7 +52,6 @@ def client(monkeypatch):
 
     # An admin bootstrap email so we can get an approved admin without a prior admin.
     monkeypatch.setattr(config_module.settings, "admin_emails", "admin@b.com")
-    monkeypatch.setattr(config_module.settings, "api_tokens", "legacyuser:legacy-token-1")
 
     app.dependency_overrides[db_session] = _db_override
     app.dependency_overrides[redis_client] = lambda: fake_redis
@@ -144,59 +143,11 @@ def test_non_admin_cannot_reach_admin_panel(client):
     assert forbidden.status_code == 403
 
 
-def test_claim_token_migrates_and_logs_in(client):
-    resp = client.post(
-        "/auth/claim-token",
-        json={
-            "email": "legacy@b.com",
-            "username": "legacyuser",
-            "password": "supersecret",
-            "token": "legacy-token-1",
-        },
-    )
-    assert resp.status_code == 201, resp.text
-    body = resp.json()
-    assert body["user"]["status"] == "approved"
-    token = body["token"]
-    me = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
-    assert me.status_code == 200
-
-
-def test_legacy_raw_token_still_authenticates(client):
-    # An UNCLAIMED raw configured API token must keep working on protected
-    # endpoints in parallel with the new session auth (no hard cutover).
+def test_raw_bearer_token_never_authenticates(client):
+    # There is no configured raw-token scheme anymore: an arbitrary bearer value
+    # (even one that looks like a token) must be rejected on protected endpoints.
     resp = client.get("/playback/state", headers={"Authorization": "Bearer legacy-token-1"})
-    # 200 (state or empty) — the point is it's NOT 401.
-    assert resp.status_code != 401
-
-
-def test_claimed_legacy_token_stops_authenticating(client):
-    # Works before the claim...
-    before = client.get("/playback/state", headers={"Authorization": "Bearer legacy-token-1"})
-    assert before.status_code != 401
-
-    claim = client.post(
-        "/auth/claim-token",
-        json={
-            "email": "legacy@b.com",
-            "username": "legacyuser",
-            "password": "supersecret",
-            "token": "legacy-token-1",
-        },
-    )
-    assert claim.status_code == 201, claim.text
-    session_token = claim.json()["token"]
-
-    # ...and is dead immediately after, with a machine-readable reason.
-    after = client.get("/playback/state", headers={"Authorization": "Bearer legacy-token-1"})
-    assert after.status_code == 401
-    assert after.json()["detail"]["code"] == "token_migrated"
-
-    # The replacement session token reaches the same data scope.
-    replacement = client.get(
-        "/playback/state", headers={"Authorization": f"Bearer {session_token}"}
-    )
-    assert replacement.status_code != 401
+    assert resp.status_code == 401
 
 
 def test_missing_token_still_401(client):

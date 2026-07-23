@@ -1,13 +1,12 @@
 from collections.abc import AsyncIterator
 from fastapi import Depends, Header, HTTPException, status
 from redis.asyncio import Redis
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.service import identity_for, resolve_session_token
 from app.catalog.internet_archive import InternetArchiveClient
 from app.catalog.lidarr_client import LidarrClient
-from app.core.auth import ApiKeyIdentity, match_bearer_token
+from app.core.auth import ApiKeyIdentity
 from app.core.config import settings
 from app.db.models import User
 from app.db.session import get_session
@@ -42,32 +41,12 @@ async def require_token(
 ) -> ApiKeyIdentity:
     """Resolve a request to a data-scope identity (``api_key_id``).
 
-    Two auth schemes are accepted in parallel so existing clients keep working:
-      1. Legacy raw ``API_TOKEN(S)`` bearer tokens — but only while unclaimed.
-         Once a token has been migrated to an account (``/auth/claim-token``
-         created a user bound to its ``api_key_id``), the raw token is dead and
-         the request gets a ``token_migrated`` 401 so clients know to show the
-         login screen instead of a generic auth failure.
-      2. Session tokens issued by ``/auth/login`` — resolved to an *approved*
-         user; pending/rejected/disabled accounts never resolve, so an
-         unapproved account can never reach a protected endpoint.
+    The only accepted credential is a session token issued by ``/auth/login`` (or
+    ``/auth/register`` for a bootstrap admin). It resolves to an *approved* user;
+    pending/rejected/disabled accounts never resolve, so an unapproved account can
+    never reach a protected endpoint. The account's ``api_key_id`` is the request's
+    data scope.
     """
-    api_key = match_bearer_token(settings, authorization)
-    if api_key is not None:
-        claimed = await session.scalar(select(User.id).where(User.api_key_id == api_key.id))
-        if claimed is not None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={
-                    "code": "token_migrated",
-                    "message": (
-                        "This token has been migrated to an account. "
-                        "Log in with your email/username and password."
-                    ),
-                },
-            )
-        return api_key
-
     token = _extract_bearer(authorization)
     if token is not None:
         user = await resolve_session_token(session, token)

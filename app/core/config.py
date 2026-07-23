@@ -1,7 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,8 +9,6 @@ class Settings(BaseSettings):
 
     app_name: str = "Mekamb Music"
     environment: str = "local"
-    api_token: str = Field(default="")
-    api_tokens: str = Field(default="")
     instance_id: str = "local"
 
     # ── Lidarr (music acquisition + organization) ─────────────────────────────
@@ -143,13 +140,12 @@ class Settings(BaseSettings):
     search_cache_ttl_seconds: int = 300
 
     # ── Accounts / authentication ─────────────────────────────────────────────
-    # Email/username/password auth layered on top of the legacy bearer tokens.
+    # Email/username/password auth with session tokens is the only auth scheme.
     # New signups land in `pending` and cannot authenticate until an admin
-    # approves them; claiming a legacy token auto-approves (the token proves
-    # prior authorization) and inherits that token's api_key_id so the user's
-    # library, liked songs, plays and playback all carry over unchanged.
+    # approves them. Emails in `admin_emails` are bootstrapped as approved admins
+    # on register so the first admin can get in and approve everyone else.
     registration_enabled: bool = True
-    admin_emails: str = ""  # comma-separated emails auto-approved as admins on register/claim
+    admin_emails: str = ""  # comma-separated emails auto-approved as admins on register
     auth_session_ttl_days: int = 90
     password_min_length: int = 8
     auth_login_rate_limit: int = 10  # failed attempts per identifier within the window

@@ -1,5 +1,5 @@
-"""Account authentication endpoints: register, login, claim-token migration,
-logout, current-account info, and password change.
+"""Account authentication endpoints: register, login, logout, current-account
+info, and password change.
 
 These routes are intentionally NOT behind ``require_token`` (except the
 account-management ones that use ``require_user``) — they are the front door.
@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import _extract_bearer, current_user, db_session, redis_client, require_user
+from app.api.deps import _extract_bearer, db_session, redis_client, require_user
 from app.auth import service as auth_service
 from app.auth.service import AuthError
 from app.core.config import settings
@@ -31,14 +31,6 @@ class RegisterRequest(BaseModel):
     email: str
     username: str
     password: str = Field(min_length=1)
-
-
-class ClaimTokenRequest(BaseModel):
-    email: str
-    username: str
-    password: str = Field(min_length=1)
-    token: str
-    device_name: str | None = None
 
 
 class LoginRequest(BaseModel):
@@ -91,7 +83,7 @@ def _user_response(user: User) -> UserResponse:
 
 
 def _auth_http_error(exc: AuthError) -> HTTPException:
-    conflict = {"email_taken", "username_taken", "token_already_claimed"}
+    conflict = {"email_taken", "username_taken"}
     forbidden = {"account_pending", "account_rejected", "account_disabled", "registration_disabled"}
     if exc.code in conflict:
         code = status.HTTP_409_CONFLICT
@@ -155,30 +147,6 @@ async def register(
         message = "Account created. An admin must approve it before you can log in."
     await session.commit()
     return RegisterResponse(user=_user_response(user), token=token, message=message)
-
-
-@router.post("/claim-token", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
-async def claim_token(
-    request: ClaimTokenRequest,
-    session: AsyncSession = Depends(db_session),
-) -> SessionResponse:
-    """Migrate an existing token-based user to a password account, keeping all
-    their data (library, likes, plays, playlists, playback)."""
-    try:
-        user = await auth_service.claim_token(
-            session,
-            email=request.email,
-            username=request.username,
-            password=request.password,
-            token=request.token,
-        )
-        token, _ = await auth_service.create_session(
-            session, user, device_name=request.device_name
-        )
-    except AuthError as exc:
-        raise _auth_http_error(exc) from exc
-    await session.commit()
-    return SessionResponse(token=token, user=_user_response(user))
 
 
 @router.post("/login", response_model=SessionResponse)

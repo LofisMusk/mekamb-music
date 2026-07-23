@@ -48,7 +48,7 @@ import pl.mekamb.music.ui.components.BackIconButton
 import pl.mekamb.music.ui.theme.MekambColors
 
 @Composable
-fun SettingsScreen(uiState: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) {
+fun SettingsScreen(uiState: AppUiState, viewModel: AppViewModel, onBack: () -> Unit, onOpenAdmin: () -> Unit = {}) {
     LaunchedEffect(Unit) { viewModel.loadCacheStats() }
 
     LazyColumn(
@@ -61,7 +61,7 @@ fun SettingsScreen(uiState: AppUiState, viewModel: AppViewModel, onBack: () -> U
                 Text("Settings", color = MekambColors.TextPrimary, fontSize = 23.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.padding(start = 12.dp))
             }
         }
-        item { AccountSection(uiState, viewModel) }
+        item { AccountSection(uiState, viewModel, onOpenAdmin) }
         item { Spacer(Modifier.height(14.dp)) }
         item { ServerSection(uiState, viewModel) }
         item { Spacer(Modifier.height(14.dp)) }
@@ -90,62 +90,42 @@ private fun SectionLabel(text: String) {
 }
 
 @Composable
-private fun AccountSection(uiState: AppUiState, viewModel: AppViewModel) {
+private fun AccountSection(uiState: AppUiState, viewModel: AppViewModel, onOpenAdmin: () -> Unit) {
+    // Login / registration happen at the launch gate — Settings is only reachable while
+    // signed in, so this only ever shows the current account (+ admin approval entry).
     SettingsCard {
-        if (uiState.hasSession) {
-            Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(46.dp).background(androidx.compose.ui.graphics.Brush.linearGradient(MekambColors.AvatarGradient), CircleShape), contentAlignment = Alignment.Center) {
-                    Text(uiState.accountUsername.take(2).uppercase(), color = MekambColors.BackgroundAlt, fontWeight = FontWeight.ExtraBold)
-                }
-                Column(Modifier.weight(1f).padding(start = 12.dp)) {
+        Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(46.dp).background(androidx.compose.ui.graphics.Brush.linearGradient(MekambColors.AvatarGradient), CircleShape), contentAlignment = Alignment.Center) {
+                Text(uiState.accountUsername.take(2).uppercase(), color = MekambColors.BackgroundAlt, fontWeight = FontWeight.ExtraBold)
+            }
+            Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(uiState.accountUsername, color = MekambColors.TextPrimary, fontSize = 14.5.sp, fontWeight = FontWeight.Bold)
-                    Text(uiState.accountEmail, color = MekambColors.TextMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp))
-                }
-                OutlinedButton(onClick = { viewModel.logout() }) { Text("Sign out") }
-            }
-        } else {
-            var mode by remember { mutableStateOf("login") }
-            var identifier by remember { mutableStateOf("") }
-            var email by remember { mutableStateOf("") }
-            var username by remember { mutableStateOf("") }
-            var password by remember { mutableStateOf("") }
-            var token by remember { mutableStateOf("") }
-
-            Text("Not signed in", color = MekambColors.TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 12.dp))
-            Row(Modifier.padding(vertical = 8.dp)) {
-                listOf("login" to "Log in", "migrate" to "Migrate token", "register" to "Sign up").forEach { (value, label) ->
-                    TextButton(onClick = { mode = value }) {
-                        Text(label, color = if (mode == value) MekambColors.Accent else MekambColors.TextMuted, fontSize = 12.sp)
+                    if (uiState.accountIsAdmin) {
+                        Text(
+                            "ADMIN",
+                            color = MekambColors.Accent,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            letterSpacing = 0.6.sp,
+                            modifier = Modifier
+                                .padding(start = 8.dp)
+                                .background(MekambColors.Accent.copy(alpha = 0.16f), RoundedCornerShape(6.dp))
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                        )
                     }
                 }
+                Text(uiState.accountEmail, color = MekambColors.TextMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp))
             }
-            if (mode == "migrate") {
-                OutlinedTextField(token, { token = it }, label = { Text("Legacy API token") }, modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(8.dp))
-            }
-            if (mode == "login") {
-                OutlinedTextField(identifier, { identifier = it }, label = { Text("Email or username") }, modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(8.dp))
-            } else {
-                OutlinedTextField(email, { email = it }, label = { Text("Email") }, modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(username, { username = it }, label = { Text("Username") }, modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(8.dp))
-            }
-            OutlinedTextField(password, { password = it }, label = { Text("Password") }, modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(10.dp))
+            OutlinedButton(onClick = { viewModel.logout() }) { Text("Sign out") }
+        }
+        if (uiState.accountIsAdmin) {
             Button(
-                onClick = {
-                    when (mode) {
-                        "login" -> viewModel.login(identifier, password)
-                        "migrate" -> viewModel.claimToken(token, email, username, password)
-                        else -> viewModel.register(email, username, password)
-                    }
-                },
-                colors = ButtonDefaults.buttonColors(containerColor = MekambColors.Accent, contentColor = MekambColors.BackgroundAlt),
+                onClick = onOpenAdmin,
+                colors = ButtonDefaults.buttonColors(containerColor = MekambColors.SurfaceAlt, contentColor = MekambColors.TextPrimary),
                 modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
             ) {
-                Text(if (mode == "migrate") "Migrate & sign in" else if (mode == "register") "Create account" else "Log in")
+                Text("Approve accounts")
             }
         }
     }

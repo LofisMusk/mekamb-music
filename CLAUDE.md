@@ -58,14 +58,16 @@ their services/repositories wired through FastAPI dependencies in
 persistence in a repository, and wire it in `deps.py` — don't put DB queries in
 route handlers.
 
-**Auth (`app/api/deps.py`, `app/core/auth.py`, `app/auth/`).** Two schemes run
-in parallel. (1) Legacy raw `API_TOKEN`/`API_TOKENS` bearer tokens, valid only
-until *claimed*; once migrated via `/auth/claim-token` the raw token returns 401
-`token_migrated`. (2) Session tokens from `/auth/login`, resolving to an
-*approved* `User`. Every protected request resolves to an `api_key_id` data
-scope. Shared data (catalog, imports, storage, libraries) is common across all
-identities; personal data (likes, plays, recommendations, playback state,
-playlists, sync actions) is scoped per `api_key_id`.
+**Auth (`app/api/deps.py`, `app/core/auth.py`, `app/auth/`).** Session tokens
+from `/auth/login` are the only scheme — there is no raw `API_TOKEN` bearer auth.
+A token resolves (via `resolve_session_token`) to an *approved* `User`; pending/
+rejected/disabled accounts never resolve. Self-signup (`/auth/register`) creates
+a `pending` account that an admin must approve (`/admin/users/*`); emails in
+`ADMIN_EMAILS` are bootstrapped as approved admins. Every protected request
+resolves to an `api_key_id` data scope. Shared data (catalog, imports, storage,
+libraries) is common across all identities; personal data (likes, plays,
+recommendations, playback state, playlists, sync actions) is scoped per
+`api_key_id`.
 
 **Import pipeline (`app/imports/`, `app/workers/import_worker.py`).** Lidarr
 finishes an album → calls `POST /catalog/webhook` (verified by

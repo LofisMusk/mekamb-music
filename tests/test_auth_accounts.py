@@ -3,7 +3,7 @@
 Runs against a real in-memory SQLite async engine so the actual SQL (uniqueness
 constraints, session lookups, status filtering) is exercised, not a fake. The
 focus is the security contract: an unapproved account can never obtain a working
-session, and token-claim migrations preserve the user's data scope.
+session.
 """
 from __future__ import annotations
 
@@ -14,13 +14,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.auth import service as auth
 from app.auth.service import AuthError
 from app.core.config import Settings
-from app.db.models import Base, LikedTrack
+from app.db.models import Base
 
 
 def _cfg(**overrides) -> Settings:
     base = dict(
-        api_token="",
-        api_tokens="",
         admin_emails="",
         registration_enabled=True,
         password_min_length=8,
@@ -201,65 +199,6 @@ async def test_change_password_requires_current_and_rehashes(session):
         session, u, current_password="supersecret", new_password="brandnewpass", cfg=_cfg()
     )
     assert await auth.authenticate(session, identifier="alice", password="brandnewpass")
-
-
-# ── token-claim migration (data preservation) ─────────────────────────────────
-
-
-async def test_claim_token_preserves_api_key_id_and_data(session):
-    cfg = _cfg(api_tokens="alice:legacy-token-1")
-    # Simulate the legacy user already having a liked track under their token's scope.
-    from uuid import uuid4
-
-    liked = LikedTrack(api_key_id="alice", track_id=uuid4())
-    session.add(liked)
-    await session.flush()
-
-    user = await auth.claim_token(
-        session, email="a@b.com", username="alice", password="supersecret",
-        token="legacy-token-1", cfg=cfg,
-    )
-    assert user.status == auth.STATUS_APPROVED  # token proves prior authorization
-    assert user.api_key_id == "alice"  # inherited scope -> data carries over
-
-    # The pre-existing liked track is still scoped to this account.
-    from sqlalchemy import select
-
-    rows = list(await session.scalars(select(LikedTrack).where(LikedTrack.api_key_id == "alice")))
-    assert len(rows) == 1
-
-
-async def test_claim_invalid_token_rejected(session):
-    cfg = _cfg(api_tokens="alice:legacy-token-1")
-    with pytest.raises(AuthError) as exc:
-        await auth.claim_token(
-            session, email="a@b.com", username="alice", password="supersecret",
-            token="not-the-token", cfg=cfg,
-        )
-    assert exc.value.code == "invalid_token"
-
-
-async def test_token_can_only_be_claimed_once(session):
-    cfg = _cfg(api_tokens="alice:legacy-token-1")
-    await auth.claim_token(
-        session, email="a@b.com", username="alice", password="supersecret",
-        token="legacy-token-1", cfg=cfg,
-    )
-    with pytest.raises(AuthError) as exc:
-        await auth.claim_token(
-            session, email="c@d.com", username="charlie", password="supersecret",
-            token="legacy-token-1", cfg=cfg,
-        )
-    assert exc.value.code == "token_already_claimed"
-
-
-async def test_claim_token_grants_admin_when_email_allowlisted(session):
-    cfg = _cfg(api_tokens="alice:legacy-token-1", admin_emails="a@b.com")
-    user = await auth.claim_token(
-        session, email="a@b.com", username="alice", password="supersecret",
-        token="legacy-token-1", cfg=cfg,
-    )
-    assert user.is_admin is True
 
 
 # ── admin guard rails ─────────────────────────────────────────────────────────

@@ -56,8 +56,10 @@ import pl.mekamb.music.AppViewModel
 import pl.mekamb.music.data.PlaybackSnapshot
 import pl.mekamb.music.ui.components.ArtworkImage
 import pl.mekamb.music.ui.screens.AddMusicScreen
+import pl.mekamb.music.ui.screens.AdminApprovalScreen
 import pl.mekamb.music.ui.screens.AlbumScreen
 import pl.mekamb.music.ui.screens.ArtistScreen
+import pl.mekamb.music.ui.screens.AuthScreen
 import pl.mekamb.music.ui.screens.HomeScreen
 import pl.mekamb.music.ui.screens.ImportsScreen
 import pl.mekamb.music.ui.screens.LibraryScreen
@@ -75,12 +77,13 @@ private object Routes {
     const val Imports = "imports"
     const val Liked = "liked"
     const val Settings = "settings"
+    const val Admin = "admin"
     const val Album = "album/{albumId}"
     const val Artist = "artist/{artistName}"
     const val Mix = "mix/{mixId}"
 
     /** "Pushed" screens get no persistent bottom-tab highlight, matching the design (`!s.view`). */
-    val pushed = setOf(Liked, Settings, Album, Artist, Mix)
+    val pushed = setOf(Liked, Settings, Admin, Album, Artist, Mix)
 }
 
 private data class TabSpec(val route: String, val label: String, val icon: ImageVector)
@@ -96,6 +99,13 @@ private val tabs = listOf(
 fun MekambApp(viewModel: AppViewModel = viewModel()) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val playback by viewModel.playbackState.collectAsStateWithLifecycle()
+
+    // Launch gate: no account session → onboarding + login/register before the app.
+    if (!uiState.hasSession) {
+        AuthScreen(uiState = uiState, viewModel = viewModel)
+        return
+    }
+
     val navController = rememberNavController()
     var showProfileMenu by remember { mutableStateOf(false) }
     var showNowPlaying by remember { mutableStateOf(false) }
@@ -162,7 +172,15 @@ fun MekambApp(viewModel: AppViewModel = viewModel()) {
                         )
                     }
                     composable(Routes.Settings) {
-                        SettingsScreen(uiState = uiState, viewModel = viewModel, onBack = { navController.popBackStack() })
+                        SettingsScreen(
+                            uiState = uiState,
+                            viewModel = viewModel,
+                            onBack = { navController.popBackStack() },
+                            onOpenAdmin = { navController.navigate(Routes.Admin) },
+                        )
+                    }
+                    composable(Routes.Admin) {
+                        AdminApprovalScreen(viewModel = viewModel, onBack = { navController.popBackStack() })
                     }
                     composable(Routes.Album) { entry ->
                         val albumId = entry.arguments?.getString("albumId").orEmpty()

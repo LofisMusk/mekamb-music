@@ -11,8 +11,8 @@ stream everything from this backend.
 ## Local Setup
 
 1. Copy `.env.example` to `.env`.
-2. Set `API_TOKEN` to a long random secret, or set `API_TOKENS` to multiple
-   named secrets such as `alice:secret-one,bob:secret-two`.
+2. Set `ADMIN_EMAILS` to the email(s) that should be bootstrapped as admins on
+   first registration (comma-separated) — that first admin approves everyone else.
 3. Start the stack:
 
 ```bash
@@ -24,21 +24,18 @@ desktop apps; there is no browser frontend.
 
 ## Accounts
 
-Users authenticate with email/username + password. Register via
-`POST /auth/register` (new accounts are `pending` and cannot log in until an
-admin approves them), then `POST /auth/login` with either the email or username.
-Emails in `ADMIN_EMAILS` are bootstrapped as approved admins so the first admin
-can get in; admins approve/reject/disable accounts under `/admin/users`.
+Email/username + password with session tokens is the **only** authentication
+scheme — there is no raw API-token bearer auth. Register via `POST /auth/register`
+(new accounts are `pending` and cannot log in until an admin approves them), then
+`POST /auth/login` with either the email or username to receive a session token
+sent as `Authorization: Bearer <token>` on every request. Emails in `ADMIN_EMAILS`
+are bootstrapped as approved admins so the first admin can get in; admins
+approve/reject/disable accounts under `/admin/users`.
 
-Existing token-based users migrate without losing data via
-`POST /auth/claim-token` (the "I have a token" flow): supplying a valid
-`API_TOKEN(S)` value creates an approved account that inherits that token's data
-scope, so the library, liked songs, plays, playlists and playback all carry over.
-An unclaimed raw API token keeps authenticating, so nobody is forced to migrate
-on a deadline — but the moment a token is claimed it stops working everywhere
-(requests with it get a 401 with code `token_migrated`) and the account's
-email/username/password fully replaces it. Every app (iOS, Android, desktop)
-has this flow in Settings under Account: log in, migrate a token, or sign up.
+Each app launches into an onboarding + login screen: enter the backend URL, then
+log in or sign up. A pending signup shows an "awaiting admin approval" message and
+cannot proceed until an admin approves it. Admins get an in-app **Approve accounts**
+panel (Settings → Account) to review pending signups.
 
 ## Native iOS App
 
@@ -52,9 +49,9 @@ Open it with:
 open native-ios/MekambMusicNative.xcodeproj
 ```
 
-In the app Settings screen, set the backend endpoint, then log in (or migrate a
-legacy API token / sign up) under Account. For a physical iPhone, do not use
-`localhost`; use your Mac/server LAN IP, for example `http://192.168.1.50:8000`.
+On launch the app shows an onboarding + login screen: set the backend endpoint,
+then log in or sign up. For a physical iPhone, do not use `localhost`; use your
+Mac/server LAN IP, for example `http://192.168.1.50:8000`.
 
 ## Native Android App
 
@@ -165,9 +162,9 @@ python -m app.api.openapi_export openapi.json
 - `PUT /playlists/{id}/tracks/order`
 - `DELETE /playlists/{id}/tracks/{track_id}`
 
-Pass `Authorization: Bearer <API_TOKEN>` to every non-health endpoint. When
-`API_TOKENS` is configured, all keys share the same downloaded albums/library,
-imports, and storage, but each key has separate liked tracks, recent plays,
+Pass `Authorization: Bearer <session-token>` (from `POST /auth/login`) to every
+non-health endpoint. All accounts share the same downloaded albums/library,
+imports, and storage, but each account has separate liked tracks, recent plays,
 personalized recommendations, playback state, playlists, and sync actions.
 
 ## Recommendations

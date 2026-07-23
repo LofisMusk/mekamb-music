@@ -376,18 +376,6 @@ class ApiClient(private val prefs: Prefs) {
         return parseSession(response)
     }
 
-    suspend fun claimToken(token: String, email: String, username: String, password: String, deviceName: String): Pair<String, AccountInfo> {
-        val body = JSONObject()
-            .put("token", token)
-            .put("email", email)
-            .put("username", username)
-            .put("password", password)
-            .put("device_name", deviceName)
-            .toString()
-        val response = JSONObject(request("/auth/claim-token", method = "POST", body = body, requiresAuth = false))
-        return parseSession(response)
-    }
-
     /** Returns a session only if the account was auto-approved; otherwise null + a message. */
     suspend fun register(email: String, username: String, password: String): Pair<Pair<String, AccountInfo>?, String?> {
         val body = JSONObject().put("email", email).put("username", username).put("password", password).toString()
@@ -396,6 +384,9 @@ class ApiClient(private val prefs: Prefs) {
         val session = token?.let { parseSession(response) }
         return session to response.optString("message").takeIf { it.isNotBlank() }
     }
+
+    /** Current account, used on launch to refresh admin/status (and detect a revoked session). */
+    suspend fun me(): AccountInfo = parseAccount(JSONObject(request("/auth/me")))
 
     suspend fun logout() {
         runCatching { request("/auth/logout", method = "POST") }
@@ -406,14 +397,41 @@ class ApiClient(private val prefs: Prefs) {
         return true
     }
 
-    private fun parseSession(response: JSONObject): Pair<String, AccountInfo> {
-        val user = response.optJSONObject("user")
-        val token = response.optString("token")
-        return token to AccountInfo(
-            username = user?.optString("username").orEmpty(),
-            email = user?.optString("email").orEmpty(),
-        )
+    // ── Admin account approval ─────────────────────────────────────────────────────────────────
+
+    suspend fun adminUsers(status: String? = null): List<AdminUser> {
+        val query = if (status.isNullOrBlank()) "/admin/users" else "/admin/users?status=${encodeQuery(status)}"
+        val response = JSONObject(request(query))
+        val items = response.optJSONArray("users") ?: JSONArray()
+        val result = mutableListOf<AdminUser>()
+        for (index in 0 until items.length()) {
+            val item = items.optJSONObject(index) ?: continue
+            result += AdminUser(
+                id = item.optCleanString("id") ?: continue,
+                username = item.optCleanString("username") ?: "",
+                email = item.optCleanString("email") ?: "",
+                status = item.optCleanString("status") ?: "pending",
+                isAdmin = item.optBoolean("is_admin", false),
+            )
+        }
+        return result
     }
+
+    suspend fun setUserApproval(id: String, approve: Boolean) {
+        val action = if (approve) "approve" else "reject"
+        request("/admin/users/${encodePath(id)}/$action", method = "POST")
+    }
+
+    private fun parseSession(response: JSONObject): Pair<String, AccountInfo> {
+        val token = response.optString("token")
+        return token to parseAccount(response.optJSONObject("user"))
+    }
+
+    private fun parseAccount(user: JSONObject?): AccountInfo = AccountInfo(
+        username = user?.optString("username").orEmpty(),
+        email = user?.optString("email").orEmpty(),
+        isAdmin = user?.optBoolean("is_admin", false) ?: false,
+    )
 
     // ── Shared parsing ────────────────────────────────────────────────────────────────────────
 
